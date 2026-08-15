@@ -32,8 +32,8 @@ temporal:
 
 workflowWorker:
   image:
-    repository: "agent-harness-workflow-worker"
-    tag: "local"
+    repository: "gcr.io/kumarabd/agent-harness/workflow-worker"
+    tag: "latest"
     pullPolicy: IfNotPresent
   replicaCount: 1
   # -- Left empty deliberately: no real usage data exists yet to size these
@@ -47,8 +47,8 @@ workflowWorker:
 
 activityWorker:
   image:
-    repository: "agent-harness-activity-worker"
-    tag: "local"
+    repository: "gcr.io/kumarabd/agent-harness/activity-worker"
+    tag: "latest"
     pullPolicy: IfNotPresent
   # -- Multi-replica by default: this is the dedicated-per-tenant fleet that
   # holds tenant credentials and does real content I/O

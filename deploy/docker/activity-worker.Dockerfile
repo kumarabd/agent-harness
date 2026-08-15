@@ -2,7 +2,7 @@
 # stubs) — see activities/activities/worker.py.
 #
 # Build context must be the REPO ROOT, not deploy/docker/:
-#   docker build -f deploy/docker/activity-worker.Dockerfile -t agent-harness-activity-worker:local .
+#   docker build -f deploy/docker/activity-worker.Dockerfile -t gcr.io/kumarabd/agent-harness/activity-worker:latest .
 
 FROM python:3.12-slim AS build
 WORKDIR /src

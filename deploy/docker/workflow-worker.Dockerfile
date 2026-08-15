@@ -1,7 +1,7 @@
 # Go workflow worker (Session Coordinator + Turn Workflow) — see workflows/cmd/worker.
 #
 # Build context must be the REPO ROOT, not deploy/docker/:
-#   docker build -f deploy/docker/workflow-worker.Dockerfile -t agent-harness-workflow-worker:local .
+#   docker build -f deploy/docker/workflow-worker.Dockerfile -t gcr.io/kumarabd/agent-harness/workflow-worker:latest .
 
 FROM golang:1.26-alpine AS build
 WORKDIR /src
