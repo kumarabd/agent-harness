@@ -1,0 +1,13 @@
+{
+  "message": {
+    "role": "user",
+    "content": "actually never mind, stop that and do something else"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Switching to the new request instead.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 60, "output_tokens": 20 }
+    }
+  ]
+}

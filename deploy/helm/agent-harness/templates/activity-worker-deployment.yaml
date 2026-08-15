@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "activity-worker") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "activity-worker") | nindent 4 }}
+spec:
+  replicas: {{ .Values.activityWorker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "activity-worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "activity-worker") | nindent 8 }}
+      {{- with .Values.activityWorker.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "agent-harness.fullname" . }}
+      # This worker never calls the Kubernetes API — it only polls Temporal
+      # and (per docs/components/multi-tenancy.md) talks to this tenant's own
+      # Postgres and mounts this tenant's own session filesystem PV.
+      automountServiceAccountToken: false
+      containers:
+        - name: activity-worker
+          image: "{{ .Values.activityWorker.image.repository }}:{{ .Values.activityWorker.image.tag }}"
+          imagePullPolicy: {{ .Values.activityWorker.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "agent-harness.fullname" . }}-config
+          {{- if .Values.postgres.enabled }}
+          env:
+            # {statefulset-name}-0.{headless-service-name} — the stable
+            # per-pod DNS name the headless postgres-service.yaml gives pod 0
+            # (the only pod, since postgres replicas is fixed at 1). Just the
+            # bare service name would also resolve via headless-service DNS
+            # round-robin across ready pods, but the explicit -0 form is what
+            # actually documents "there is exactly one Postgres pod" rather
+            # than relying on that being true only because replicas happens
+            # to be 1 today.
+            - name: POSTGRES_HOST
+              value: "{{ include "agent-harness.componentFullname" (dict "context" . "component" "postgres") }}-0.{{ include "agent-harness.componentFullname" (dict "context" . "component" "postgres") }}"
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.username | quote }}
+            # Mounting the same Secret the Postgres instance itself uses,
+            # rather than duplicating the password into a second Secret —
+            # one credential, one source, shared by both sides.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret | default (printf "%s-postgres" (include "agent-harness.fullname" .)) }}
+                  key: {{ .Values.postgres.existingSecretPasswordKey }}
+          {{- end }}
+          {{- if .Values.tenantVolume.enabled }}
+          volumeMounts:
+            # The session filesystem tree (docs/components/session-filesystem.md)
+            # lives under a subpath disjoint from Postgres's own subpath on the
+            # same tenant PV — this worker only ever sees its own slice.
+            - name: tenant-data
+              mountPath: /sessions
+              subPath: {{ .Values.tenantVolume.sessionsSubPath }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.activityWorker.resources | nindent 12 }}
+      {{- if .Values.tenantVolume.enabled }}
+      volumes:
+        - name: tenant-data
+          persistentVolumeClaim:
+            claimName: {{ include "agent-harness.fullname" . }}-data
+      {{- end }}
+      {{- with .Values.activityWorker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.activityWorker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.activityWorker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

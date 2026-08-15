@@ -1,0 +1,23 @@
+{{- if .Values.postgres.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "postgres") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "postgres") | nindent 4 }}
+spec:
+  # Headless (clusterIP: None) — this is what StatefulSet.spec.serviceName
+  # requires: it's the governing service that gives the pod its stable DNS
+  # name ({statefulset-name}-0.{this-service-name}), which is what
+  # activity-worker-deployment.yaml actually connects to as POSTGRES_HOST.
+  # A normal ClusterIP Service would still technically route traffic to the
+  # single pod, but wouldn't be the correct governing service for the
+  # StatefulSet and would deviate from the documented, expected pattern.
+  clusterIP: None
+  selector:
+    {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "postgres") | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+{{- end }}

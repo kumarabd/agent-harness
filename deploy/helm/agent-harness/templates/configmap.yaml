@@ -1,0 +1,16 @@
+{{- if not .Values.temporal.address -}}
+{{- fail "temporal.address is required — this chart deploys workers only, not Temporal itself. Set --set temporal.address=<host>:<port> or the equivalent in your values file." -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agent-harness.fullname" . }}-config
+  labels:
+    {{- include "agent-harness.labels" . | nindent 4 }}
+data:
+  # Both workers read the same values here — they only coordinate by polling
+  # the same Temporal task queue, nothing else ties workflow-worker and
+  # activity-worker together.
+  TEMPORAL_ADDRESS: {{ .Values.temporal.address | quote }}
+  TEMPORAL_TASK_QUEUE: {{ .Values.temporal.taskQueue | quote }}
+  TEMPORAL_NAMESPACE: {{ .Values.temporal.namespace | quote }}

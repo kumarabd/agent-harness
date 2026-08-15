@@ -1,0 +1,408 @@
+{
+  "message": {
+    "role": "user",
+    "content": "keep going forever"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Step 0, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 0
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 1, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 1
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 2, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 2
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 3, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 3
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 4, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 4
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 5, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 5
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 6, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 6
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 7, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 7
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 8, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 8
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 9, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 9
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 10, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 10
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 11, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 11
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 12, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 12
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 13, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 13
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 14, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 14
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 15, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 15
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 16, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 16
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 17, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 17
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 18, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 18
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 19, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 19
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 20, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 20
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 21, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 21
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 22, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 22
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 23, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 23
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "content": "Step 24, requesting another tool call.",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "step": 24
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    }
+  ]
+}

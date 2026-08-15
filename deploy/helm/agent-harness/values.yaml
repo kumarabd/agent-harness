@@ -1,0 +1,103 @@
+# -- This chart is one release PER TENANT (docs/components/multi-tenancy.md):
+# install it once per tenant, each with its own values (at minimum a
+# different `temporal.namespace` and release name). It deploys the tenant's
+# activity worker fleet, its own self-hosted Postgres instance + PV, against
+# an EXISTING Temporal server/cluster (shared across tenants — namespaces are
+# the isolation boundary, not separate clusters). It does not deploy Temporal
+# itself.
+#
+# The workflow-worker pool (Session Coordinator + Turn Workflow) is
+# deliberately NOT deployed per-tenant by this chart — per
+# docs/components/multi-tenancy.md's 2026-08-14 revision, workflow workers are
+# tenant-agnostic and run as a separate shared pool, out of scope for this
+# chart. `workflowWorker` below remains as a single-tenant/local-dev
+# convenience (e.g. testing one tenant's namespace end-to-end without standing
+# up the shared pool separately) — do not run one per tenant in a real
+# multi-tenant deployment.
+
+temporal:
+  # -- Temporal frontend address, host:port. REQUIRED — the chart will not
+  # render a usable deployment without this set (see NOTES.txt).
+  # Examples: "temporal-frontend.temporal.svc.cluster.local:7233",
+  # "my-namespace.a1b2c.tmprl.cloud:7233"
+  address: "temporal-frontend.core.svc.cluster.local:7233"
+  # -- Temporal namespace for THIS tenant. Must be unique per tenant/release —
+  # this is the actual isolation boundary inside the shared Temporal cluster
+  # (docs/components/multi-tenancy.md). Set explicitly per release; "default"
+  # is a local-dev-only value, not a real multi-tenant default.
+  namespace: "default"
+  # -- Task queue name. Must be identical for both workers below — they only
+  # coordinate by polling the same queue, nothing else ties them together.
+  taskQueue: "agent-loop"
+
+workflowWorker:
+  image:
+    repository: "agent-harness-workflow-worker"
+    tag: "local"
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  # -- Left empty deliberately: no real usage data exists yet to size these
+  # from (matching the numeric-values-left-open discipline used throughout
+  # docs/). Set explicitly before any real deployment.
+  resources: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+activityWorker:
+  image:
+    repository: "agent-harness-activity-worker"
+    tag: "local"
+    pullPolicy: IfNotPresent
+  # -- Multi-replica by default: this is the dedicated-per-tenant fleet that
+  # holds tenant credentials and does real content I/O
+  # (docs/components/multi-tenancy.md). Requires tenantVolume.accessMode to
+  # support multiple simultaneous mounters if > 1 — see that value's comment.
+  replicaCount: 1
+  resources: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- One self-hosted Postgres instance for this tenant, backed by
+# tenantVolume below. Deliberately NOT a managed/shared Postgres service —
+# see docs/components/multi-tenancy.md's 2026-08-14 revision for why. Fixed
+# at exactly one replica (see templates/postgres-statefulset.yaml) — this is
+# not a scaling dimension, it's the isolation boundary.
+postgres:
+  enabled: true
+  image:
+    repository: "postgres"
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+  database: "agent_harness"
+  username: "agent_harness"
+  # -- Name of a pre-existing Secret to use instead of the chart generating
+  # one (templates/postgres-secret.yaml). Leave empty to let the chart
+  # generate and manage a random password, stable across `helm upgrade`
+  # (see that template's comment on `helm.sh/resource-policy: keep`).
+  existingSecret: ""
+  existingSecretPasswordKey: "POSTGRES_PASSWORD"
+  resources: {}
+
+# -- The shared PV for this tenant: hosts Postgres's data directory AND the
+# session filesystem tree (docs/components/session-filesystem.md), under
+# disjoint subpaths — see templates/postgres-statefulset.yaml and
+# templates/activity-worker-deployment.yaml for how each side is confined to
+# its own subpath via `subPath`.
+tenantVolume:
+  enabled: true
+  size: "20Gi"
+  # -- REQUIRED to be a ReadWriteMany-capable class if activityWorker.replicaCount
+  # > 1 — the session filesystem must be reachable by every activity-worker
+  # replica simultaneously. Most cloud block-storage classes (EBS gp3, GCP
+  # PD-SSD, Azure Managed Disks) are ReadWriteOnce only; you need a
+  # file-storage-backed class (EFS, Filestore, Azure Files, or an equivalent
+  # CSI driver) for a real multi-replica deployment. Leave unset to use the
+  # cluster's default StorageClass.
+  storageClassName: ""
+  accessMode: "ReadWriteMany"
+  postgresSubPath: "postgres"
+  sessionsSubPath: "sessions"

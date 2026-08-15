@@ -1,0 +1,40 @@
+{
+  "message": {
+    "role": "user",
+    "content": "delegate a subtask and then wrap up"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "I'll delegate this to a subagent.",
+      "tool_calls": [
+        {
+          "name": "spawn_subagent",
+          "is_subagent": true,
+          "arguments": {
+            "prompt": "research the subtopic",
+            "scripted_model_responses": [
+              {
+                "content": "Researching...",
+                "tool_calls": [
+                  { "name": "search", "arguments": { "query": "subtopic" }, "is_subagent": false }
+                ],
+                "usage": { "input_tokens": 80, "output_tokens": 30 }
+              },
+              {
+                "content": "Subagent research complete.",
+                "tool_calls": [],
+                "usage": { "input_tokens": 90, "output_tokens": 20 }
+              }
+            ]
+          }
+        }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 40 }
+    },
+    {
+      "content": "Wrapping up now that the subagent is done.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 120, "output_tokens": 30 }
+    }
+  ]
+}

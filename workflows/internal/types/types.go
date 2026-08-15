@@ -1,0 +1,139 @@
+// Package types holds the JSON-serializable shapes shared across the Go workflow
+// layer and the Python activity layer. Mirrored by hand in activities/activities/types.py —
+// not code-generated in this slice. Field names use the JSON tag to match the Python
+// side's snake_case exactly, since Temporal's default data converter is plain JSON.
+//
+// Reshaped 2026-08-14 for the reference-passing contract
+// (docs/components/temporal-workflow.md, "Resolved: Reference-Passing Contract"
+// and "Resolved: Reference/ID Schema"): every activity input/output that used
+// to carry message content, tool arguments, or tool results now carries only
+// IDs and control-flow metadata. Content-bearing fields (ModelResponse.Content,
+// ToolCall.Arguments, ToolResult.Result/Reason/SideEffect as workflow-visible
+// fields, TurnResult.FinalMessage) are gone — that data now lives exclusively
+// in Postgres, read/written by the activity implementations directly.
+package types
+
+// Usage mirrors a model call's token accounting, used by the turn workflow's
+// inline token/cost budget check (components/temporal-workflow.md, Resolved:
+// Stop-Condition Default Values). Numbers, not content — stays workflow-visible.
+type Usage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+// Message is used only at the one remaining content-crossing boundary: the
+// coordinator's signal payload, and the InsertMessage activity's input
+// (components/temporal-workflow.md, "Resolved: Reference/ID Schema" — this is
+// the literal handoff point from an already-durable Temporal signal into
+// Postgres, not a violation of the contract).
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content,omitempty"`
+}
+
+// TurnInput starts a Turn Workflow — top-level or, recursively, a subagent.
+// No content: the coordinator/parent turn hands over only IDs. The inbound
+// message itself is written to Postgres by the turn workflow's own
+// InsertMessage activity call at the very start of its loop, sourced from the
+// signal payload the coordinator is holding (session coordinator only, not
+// the turn workflow) — see coordinator.go.
+type TurnInput struct {
+	SessionKey string `json:"session_key"`
+	TurnID     string `json:"turn_id"`
+	ParentType string `json:"parent_type"` // "session" | "turn" — see components/state-layer.md turns.parent_type
+	// ParentID/TurnSeq are only meaningful for a top-level turn (ParentType ==
+	// "session") — passed through so the turn workflow's start-of-turn
+	// InsertMessage call can create its own turns row (components/state-layer.md:
+	// "Turn workflow, via its own activities — inserts the row when the turn
+	// starts"). For a subagent (ParentType == "turn"), ParentID is the parent
+	// turn_id and TurnSeq is unused (nil) — matches the schema's partial unique
+	// index, which only applies when parent_type = 'session'.
+	ParentID       string  `json:"parent_id"`
+	TurnSeq        *int    `json:"turn_seq,omitempty"`
+	InitialMessage Message `json:"initial_message"`
+}
+
+// TurnResult is a Turn Workflow's return value. Deliberately holds no content
+// — not even the final response text (components/temporal-workflow.md,
+// "Resolved: Reference/ID Schema": "even the *result* handed back to a
+// parent/coordinator shouldn't carry content"). A parent turn wanting a
+// subagent's actual output reads it from Postgres via TurnID, same as
+// everything else.
+type TurnResult struct {
+	TurnID     string `json:"turn_id"`
+	StopReason string `json:"stop_reason"` // "no_tool_calls" | "max_iterations" | "max_retries" | "budget_exhausted"
+	Iterations int    `json:"iterations"`
+}
+
+// SignalPayload is what SignalWithStart / a follow-up signal carries into the
+// Session Coordinator (02-architecture-temporal-execution.md §3).
+// ScriptedModelResponses is gone — test fixtures are written directly to
+// _test_scripted_responses by the starter CLI, never passed through the
+// workflow (see workflows/cmd/starter).
+type SignalPayload struct {
+	Message Message `json:"message"`
+}
+
+// ModelCallInput is ModelCall's only input — no content. ModelCall reads
+// prior turn history from Postgres itself (it *is* the context-hydration
+// step now) and looks up ContextSeq's scripted/real response.
+type ModelCallInput struct {
+	TurnID     string `json:"turn_id"`
+	ContextSeq int    `json:"context_seq"`
+}
+
+// ToolCallRef is one tool call minted by ModelCall — name/ID/dispatch-kind
+// only, no arguments. The workflow uses this to decide Activity-vs-child-workflow
+// dispatch; it never sees the arguments themselves.
+type ToolCallRef struct {
+	ToolCallID string `json:"tool_call_id"`
+	ToolName   string `json:"tool_name"`
+	IsSubagent bool   `json:"is_subagent"`
+}
+
+// ModelCallOutput is ModelCall's only output — refs and usage, never content
+// or arguments.
+type ModelCallOutput struct {
+	HasToolCalls bool          `json:"has_tool_calls"`
+	ToolCalls    []ToolCallRef `json:"tool_calls"`
+	Usage        Usage         `json:"usage"`
+}
+
+// ToolCallInput is ToolCall's only input — it reads its own arguments from
+// Postgres via this ID (components/temporal-workflow.md).
+type ToolCallInput struct {
+	ToolCallID string `json:"tool_call_id"`
+}
+
+// ToolCallOutput is ToolCall's only output — status, not result/reason/side_effect.
+// Those stay in Postgres; the workflow only needs ok/error/cancelled to
+// decide retry-count bookkeeping.
+type ToolCallOutput struct {
+	ToolCallID string `json:"tool_call_id"`
+	Status     string `json:"status"` // "ok" | "error" | "cancelled"
+}
+
+// InsertMessageInput is the input for the message-insert activity — the one
+// place content still crosses an activity input boundary, since it's the
+// literal handoff from the coordinator's signal payload (already durable via
+// Temporal signal history) into Postgres. messages.seq is computed by the
+// activity itself (MAX(seq)+1 within its own turn), not passed in — it's a
+// pure ordering/persistence concern, decoupled from ModelCallInput.ContextSeq
+// (which is a separate, workflow-tracked fixture-lookup index — the two only
+// coincidentally start at the same value, they track different things).
+//
+// IsTurnStart marks the one call per turn that also creates the turns row
+// (components/state-layer.md: "Turn workflow, via its own activities —
+// inserts the row when the turn starts"). On that call, if ParentType ==
+// "turn" (a subagent), Message is ignored — the activity instead derives the
+// subagent's own inbound content from its *own* tool_calls.arguments row
+// (tool_call_id == this TurnID, already written by the parent's ModelCall
+// call), since the workflow itself never has that content to pass along.
+type InsertMessageInput struct {
+	TurnID      string  `json:"turn_id"`
+	Message     Message `json:"message"`
+	IsTurnStart bool    `json:"is_turn_start"`
+	ParentID    string  `json:"parent_id"`
+	ParentType  string  `json:"parent_type"`
+	TurnSeq     *int    `json:"turn_seq,omitempty"`
+}

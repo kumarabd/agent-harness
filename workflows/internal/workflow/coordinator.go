@@ -1,0 +1,146 @@
+package workflow
+
+import (
+	"time"
+
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/workflow"
+
+	"agent-harness/workflows/internal/ids"
+	"agent-harness/workflows/internal/types"
+)
+
+// idleTTL is deliberately short in this local-dev slice so the coordinator's
+// self-termination behavior is easy to observe without a long wait. The real
+// design's resolved default is 5-15 minutes (components/session-coordinator.md);
+// 30s here is a dev-loop convenience, not a design change.
+const idleTTL = 30 * time.Second
+
+// CoordinatorInput starts (or is ignored by, if the workflow already exists —
+// SignalWithStart handles that) a Session Coordinator.
+type CoordinatorInput struct {
+	SessionKey string `json:"session_key"`
+}
+
+// CoordinatorWorkflow is the long-lived, nearly-stateless control-plane
+// workflow: workflow ID = session key. It holds only a pointer to the
+// currently-running Turn Workflow (if any) and a turn-sequence counter — no
+// conversation content (components/session-coordinator.md).
+func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
+	logger := workflow.GetLogger(ctx)
+	logger.Info("coordinator started", "session_key", input.SessionKey)
+
+	turnSeq := 0 // real design recomputes MAX(turn_seq)+1 from Postgres on startup; stubbed to 0 here — no Postgres in this slice
+	var currentTurnHandle workflow.ChildWorkflowFuture
+	var currentTurnID string
+	turnActive := false
+
+	signalChan := workflow.GetSignalChannel(ctx, NewMessageSignalName)
+	var pendingSignal *types.SignalPayload
+	haveSignal := false
+
+	for {
+		idleTimerCtx, cancelIdleTimer := workflow.WithCancel(ctx)
+		idleTimer := workflow.NewTimer(idleTimerCtx, idleTTL)
+
+		sel := workflow.NewSelector(ctx)
+		sel.AddReceive(signalChan, func(c workflow.ReceiveChannel, more bool) {
+			var payload types.SignalPayload
+			c.Receive(ctx, &payload)
+			pendingSignal = &payload
+			haveSignal = true
+		})
+		if turnActive {
+			sel.AddFuture(currentTurnHandle, func(f workflow.Future) {
+				var result types.TurnResult
+				err := f.Get(ctx, &result)
+				if err != nil {
+					logger.Error("turn workflow ended with error", "turn_id", currentTurnID, "error", err)
+				} else {
+					logger.Info("turn workflow completed", "turn_id", currentTurnID, "stop_reason", result.StopReason)
+				}
+				turnActive = false
+				currentTurnID = ""
+			})
+		} else {
+			sel.AddFuture(idleTimer, func(f workflow.Future) {
+				// no-op callback; presence in the selector is what lets the
+				// idle path win the select below
+			})
+		}
+		sel.Select(ctx)
+		cancelIdleTimer()
+
+		if !turnActive && !haveSignal {
+			// Only the idle timer could have fired for us to get here with no
+			// signal and no active turn — self-terminate per the resolved TTL
+			// design (components/session-coordinator.md). A fresh
+			// SignalWithStart recreates this workflow on demand.
+			logger.Info("coordinator idle timeout, exiting", "session_key", input.SessionKey)
+			return nil
+		}
+
+		if !haveSignal {
+			// Turn completion path looped back around with no new signal yet;
+			// go wait again.
+			continue
+		}
+
+		payload := *pendingSignal
+		pendingSignal = nil
+		haveSignal = false
+
+		if turnActive {
+			// Forward into the running Turn Workflow rather than starting a
+			// second one — this IS the distributed active-session guard
+			// (02-architecture-temporal-execution.md §2).
+			err := workflow.SignalExternalWorkflow(ctx, currentTurnID, "", NewMessageSignalName, payload).Get(ctx, nil)
+			if err != nil {
+				logger.Error("failed to forward signal to active turn", "turn_id", currentTurnID, "error", err)
+			}
+			continue
+		}
+
+		turnSeq++
+		newTurnID := ids.TurnID(input.SessionKey, turnSeq)
+		turnSeqCopy := turnSeq // TurnInput.TurnSeq is a pointer; don't let it alias the loop variable
+		childInput := types.TurnInput{
+			SessionKey:     input.SessionKey,
+			TurnID:         newTurnID,
+			ParentType:     "session",
+			ParentID:       input.SessionKey,
+			TurnSeq:        &turnSeqCopy,
+			InitialMessage: payload.Message,
+		}
+		cwo := workflow.ChildWorkflowOptions{
+			WorkflowID:        newTurnID,
+			ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON, // coordinator crash never tears down an in-flight turn
+		}
+		cctx := workflow.WithChildOptions(ctx, cwo)
+		handle := workflow.ExecuteChildWorkflow(cctx, TurnWorkflow, childInput)
+
+		// Wait for the child to actually be accepted by the server before
+		// treating it as active — this is where the resolved "already
+		// started" reconciliation would surface an ABANDON-survived turn from
+		// a prior coordinator crash (components/02-architecture-temporal-execution.md §2).
+		var childWE workflow.Execution
+		startErr := handle.GetChildWorkflowExecution().Get(ctx, &childWE)
+		if startErr != nil {
+			if temporal.IsWorkflowExecutionAlreadyStartedError(startErr) {
+				// A turn with this ID is still genuinely running (survived a
+				// prior coordinator crash under ABANDON) — attach to it
+				// rather than trusting our freshly-reset "no active turn"
+				// assumption (02-architecture-temporal-execution.md §2).
+				logger.Info("turn already running, attaching instead of starting fresh", "turn_id", newTurnID)
+			} else {
+				logger.Error("failed to start turn workflow", "turn_id", newTurnID, "error", startErr)
+				continue
+			}
+		}
+
+		currentTurnHandle = handle
+		currentTurnID = newTurnID
+		turnActive = true
+	}
+}

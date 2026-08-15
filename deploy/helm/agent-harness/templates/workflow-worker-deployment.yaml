@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "workflow-worker") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "workflow-worker") | nindent 4 }}
+spec:
+  replicas: {{ .Values.workflowWorker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "workflow-worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "workflow-worker") | nindent 8 }}
+      {{- with .Values.workflowWorker.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "agent-harness.fullname" . }}
+      # This worker never calls the Kubernetes API — it only polls Temporal.
+      automountServiceAccountToken: false
+      containers:
+        - name: workflow-worker
+          image: "{{ .Values.workflowWorker.image.repository }}:{{ .Values.workflowWorker.image.tag }}"
+          imagePullPolicy: {{ .Values.workflowWorker.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "agent-harness.fullname" . }}-config
+          resources:
+            {{- toYaml .Values.workflowWorker.resources | nindent 12 }}
+      {{- with .Values.workflowWorker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.workflowWorker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.workflowWorker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

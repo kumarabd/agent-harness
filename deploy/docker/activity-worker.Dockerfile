@@ -1,0 +1,29 @@
+# Python activity worker (ModelCall, ToolCall, Persist, Deliver, CompressContext
+# stubs) — see activities/activities/worker.py.
+#
+# Build context must be the REPO ROOT, not deploy/docker/:
+#   docker build -f deploy/docker/activity-worker.Dockerfile -t agent-harness-activity-worker:local .
+
+FROM python:3.12-slim AS build
+WORKDIR /src
+
+# Copy project metadata first so dependency install is cached independently
+# of source changes.
+COPY activities/pyproject.toml ./
+RUN pip install --no-cache-dir --prefix=/install .
+
+COPY activities/activities ./activities
+
+FROM python:3.12-slim
+# Not distroless: this layer pip-installs a real dependency tree
+# (temporalio and its transitive deps), which is awkward to reproduce
+# correctly on a distroless base — python:3.12-slim is the pragmatic standard
+# choice here, unlike the Go binary above which has zero runtime dependencies.
+COPY --from=build /install /usr/local
+COPY --from=build /src/activities /app/activities
+WORKDIR /app
+
+RUN useradd --system --no-create-home --uid 10001 worker
+USER worker
+
+ENTRYPOINT ["python", "-m", "activities.worker"]

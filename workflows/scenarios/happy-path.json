@@ -1,0 +1,21 @@
+{
+  "message": {
+    "role": "user",
+    "content": "search for two things and summarize"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "I'll search for both things.",
+      "tool_calls": [
+        { "name": "search", "arguments": { "query": "first thing" }, "is_subagent": false },
+        { "name": "search", "arguments": { "query": "second thing" }, "is_subagent": false }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 40 }
+    },
+    {
+      "content": "Here's a summary of both results.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 150, "output_tokens": 60 }
+    }
+  ]
+}

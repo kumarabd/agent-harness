@@ -1,0 +1,15 @@
+{
+  "message": {
+    "role": "user",
+    "content": "run a long tool call"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Starting a long-running tool call.",
+      "tool_calls": [
+        { "name": "slow_tool", "arguments": { "duration": "long" }, "is_subagent": false }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 30 }
+    }
+  ]
+}

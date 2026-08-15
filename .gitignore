@@ -1,0 +1,17 @@
+# Python
+activities/.venv/
+activities/agent_harness_activities.egg-info/
+**/__pycache__/
+*.pyc
+
+# Go
+workflows/cmd/_*/
+
+# macOS
+.DS_Store
+
+# Local dev artifacts
+*.db
+
+# Exported container images (`make export`)
+dist/

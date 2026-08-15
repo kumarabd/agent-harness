@@ -1,0 +1,16 @@
+[project]
+name = "agent-harness-activities"
+version = "0.1.0"
+description = "Stub Temporal activities (ModelCall, ToolCall, Persist, Deliver, CompressContext) for the agent-loop worker's first implementation slice."
+requires-python = ">=3.10"
+dependencies = [
+    "temporalio>=1.7,<2",
+    "asyncpg>=0.29,<1",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["activities*"]
