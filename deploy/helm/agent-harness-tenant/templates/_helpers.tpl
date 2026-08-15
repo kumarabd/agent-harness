@@ -45,7 +45,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
-Per-component name, e.g. "agent-harness-workflow-worker".
+Per-component name, e.g. "agent-harness-tenant-activity-worker".
 */}}
 {{- define "agent-harness.componentFullname" -}}
 {{- printf "%s-%s" (include "agent-harness.fullname" .context) .component -}}

@@ -1,23 +1,25 @@
 .DEFAULT_GOAL := help
 
 # Builds and exports the two worker container images (deploy/docker/*.Dockerfile)
-# using Podman. Image names and tags are read directly out of
-# deploy/helm/agent-harness/values.yaml (workflowWorker.image /
-# activityWorker.image) rather than duplicated here, so `helm install` always
-# picks up exactly what this built without a values.yaml edit, and the two
-# can't silently drift apart. Both Dockerfiles require the repo root as their
-# build context — see the comment at the top of each for why (they COPY from
-# both workflows/ and activities/).
+# using Podman. Image names and tags are read directly out of the two Helm
+# charts' values.yaml files (deploy/helm/agent-harness-shared for the
+# workflow worker, deploy/helm/agent-harness-tenant for the activity worker —
+# split per docs/components/multi-tenancy.md) rather than duplicated here, so
+# `helm install` always picks up exactly what this built without a
+# values.yaml edit, and the two can't silently drift apart. Both Dockerfiles
+# require the repo root as their build context — see the comment at the top
+# of each for why (they COPY from both workflows/ and activities/).
 
-VALUES_FILE := deploy/helm/agent-harness/values.yaml
-EXPORT_DIR  ?= dist/images
+WORKFLOW_VALUES_FILE := deploy/helm/agent-harness-shared/values.yaml
+TENANT_VALUES_FILE   := deploy/helm/agent-harness-tenant/values.yaml
+EXPORT_DIR            ?= dist/images
 
-chart_image_field = $(shell python3 -c "import yaml; print(yaml.safe_load(open('$(VALUES_FILE)'))['$(1)']['image']['$(2)'])")
+yaml_field = $(shell python3 -c "import yaml; print(yaml.safe_load(open('$(1)'))$(2))")
 
-WORKFLOW_IMAGE_NAME := $(call chart_image_field,workflowWorker,repository)
-WORKFLOW_IMAGE_TAG  := $(call chart_image_field,workflowWorker,tag)
-ACTIVITY_IMAGE_NAME := $(call chart_image_field,activityWorker,repository)
-ACTIVITY_IMAGE_TAG  := $(call chart_image_field,activityWorker,tag)
+WORKFLOW_IMAGE_NAME := $(call yaml_field,$(WORKFLOW_VALUES_FILE),['image']['repository'])
+WORKFLOW_IMAGE_TAG  := $(call yaml_field,$(WORKFLOW_VALUES_FILE),['image']['tag'])
+ACTIVITY_IMAGE_NAME := $(call yaml_field,$(TENANT_VALUES_FILE),['activityWorker']['image']['repository'])
+ACTIVITY_IMAGE_TAG  := $(call yaml_field,$(TENANT_VALUES_FILE),['activityWorker']['image']['tag'])
 
 WORKFLOW_IMAGE := $(WORKFLOW_IMAGE_NAME):$(WORKFLOW_IMAGE_TAG)
 ACTIVITY_IMAGE := $(ACTIVITY_IMAGE_NAME):$(ACTIVITY_IMAGE_TAG)
@@ -34,9 +36,9 @@ ACTIVITY_TAR := $(EXPORT_DIR)/$(notdir $(ACTIVITY_IMAGE_NAME))-$(ACTIVITY_IMAGE_
 
 help: ## Show this help
 	@echo "Usage: make <target> [EXPORT_DIR=dist/images]"
-	@echo "Image name/tag come from $(VALUES_FILE):"
-	@echo "  workflow worker: $(WORKFLOW_IMAGE)"
-	@echo "  activity worker: $(ACTIVITY_IMAGE)"
+	@echo "Image name/tag come from each chart's values.yaml:"
+	@echo "  workflow worker: $(WORKFLOW_IMAGE)  ($(WORKFLOW_VALUES_FILE))"
+	@echo "  activity worker: $(ACTIVITY_IMAGE)  ($(TENANT_VALUES_FILE))"
 	@echo
 	@grep -E '^[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*##"}; {printf "  %-24s %s\n", $$1, $$2}'
 

@@ -105,25 +105,38 @@ you'll see `RequestCancelActivity` followed by the tool call resolving with a
 
 ## Deployment (`deploy/`)
 
-`deploy/docker/` has Dockerfiles for both worker processes; `deploy/helm/agent-harness/`
-is a **per-tenant** Helm chart (`docs/components/multi-tenancy.md`) — one
-`helm install` per tenant, each release with its own Temporal namespace and a
-self-hosted, PV-backed Postgres instance dedicated to that tenant. It deploys
-against an existing Temporal server/cluster, not one it manages itself.
+`deploy/docker/` has Dockerfiles for both worker processes. `deploy/helm/`
+has two Helm charts, split per `docs/components/multi-tenancy.md`'s compute
+isolation decision:
 
-The chart's `workflowWorker` Deployment is a single-tenant/local-dev
-convenience only — the real design's workflow-worker pool is tenant-agnostic
-and meant to run as one shared pool across tenants (`docs/components/multi-tenancy.md`),
-not deployed per-tenant by this chart. See `deploy/helm/agent-harness/values.yaml`'s
-top comment and `templates/NOTES.txt` for the full picture, including the
-`ReadWriteMany`-storage-class requirement if `activityWorker.replicaCount > 1`.
+- **`agent-harness-shared`** — the tenant-agnostic workflow-worker pool
+  (Session Coordinator + Turn Workflow). Deployed **once for the whole
+  cluster**, not per tenant. `temporal.namespaces` lists every tenant
+  namespace this pool serves; a namespace failing to start (unreachable, not
+  yet created) is retried with backoff and doesn't affect the others.
+- **`agent-harness-tenant`** — the per-tenant components: the activity
+  worker fleet (holds that tenant's credentials, does real content I/O), a
+  self-hosted PV-backed Postgres instance, and the tenant PV. One
+  `helm install` **per tenant**, each with its own Temporal namespace.
 
-**Validated:** `helm lint` and `helm template` against several value
-combinations (default, `postgres.enabled=false`), plus `docker build` and a
-real end-to-end scenario run through both built container images locally.
-**Not yet validated:** an actual `helm install` of the Postgres
-StatefulSet/PVC/Secret against a real Kubernetes cluster — no isolated test
-cluster was available. Watch closely on first real install.
+Both deploy against an existing Temporal server/cluster, not one either
+chart manages itself. See each chart's `values.yaml` top comment and
+`templates/NOTES.txt` for the full picture, including the
+`ReadWriteMany`-storage-class requirement on `agent-harness-tenant` if
+`activityWorker.replicaCount > 1`.
+
+**Validated:** `helm lint`/`helm template` against several value
+combinations, `docker build`, and a real `helm install` of both charts
+against a real Kubernetes cluster (namespace `agents`) — images pulled
+successfully from the published registry, both workers came up healthy, and
+a real turn ran end to end with correct Postgres state confirmed via direct
+query, not just "pods are Running."
+
+**Known gap:** neither chart runs the Postgres schema migration
+(`activities/migrations/001_initial_schema.sql`) automatically — it has to
+be applied by hand against a fresh tenant Postgres instance before its
+activity worker can do anything useful. No init job/mechanism for this
+exists yet.
 
 ## A note on heartbeat timing (if you tune `tool_call.py` or the `HeartbeatTimeout`)
 
