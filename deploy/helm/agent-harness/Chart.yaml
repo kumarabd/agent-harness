@@ -1,9 +1,0 @@
-apiVersion: v2
-name: agent-harness
-description: >-
-  Agent loop worker (Session Coordinator + Turn Workflow, Go; ModelCall/ToolCall/
-  Persist/Deliver activities, Python). Deploys against an existing Temporal
-  server — this chart does not bundle Temporal or its datastore.
-type: application
-version: 0.1.0
-appVersion: "0.1.0"

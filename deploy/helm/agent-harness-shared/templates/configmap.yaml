@@ -1,0 +1,16 @@
+{{- if not .Values.temporal.address -}}
+{{- fail "temporal.address is required — this chart deploys the shared workflow-worker pool only, not Temporal itself. Set --set temporal.address=<host>:<port> or the equivalent in your values file." -}}
+{{- end -}}
+{{- if not .Values.temporal.namespaces -}}
+{{- fail "temporal.namespaces must list at least one Temporal namespace for this pool to serve. Each listed namespace must already exist in Temporal (temporal operator namespace create <name>)." -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agent-harness-shared.fullname" . }}-config
+  labels:
+    {{- include "agent-harness-shared.labels" . | nindent 4 }}
+data:
+  TEMPORAL_ADDRESS: {{ .Values.temporal.address | quote }}
+  TEMPORAL_TASK_QUEUE: {{ .Values.temporal.taskQueue | quote }}
+  TEMPORAL_NAMESPACES: {{ join "," .Values.temporal.namespaces | quote }}

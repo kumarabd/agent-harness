@@ -6,14 +6,13 @@
 # the isolation boundary, not separate clusters). It does not deploy Temporal
 # itself.
 #
-# The workflow-worker pool (Session Coordinator + Turn Workflow) is
-# deliberately NOT deployed per-tenant by this chart — per
-# docs/components/multi-tenancy.md's 2026-08-14 revision, workflow workers are
-# tenant-agnostic and run as a separate shared pool, out of scope for this
-# chart. `workflowWorker` below remains as a single-tenant/local-dev
-# convenience (e.g. testing one tenant's namespace end-to-end without standing
-# up the shared pool separately) — do not run one per tenant in a real
-# multi-tenant deployment.
+# The workflow-worker pool (Session Coordinator + Turn Workflow) is NOT
+# deployed by this chart at all — per docs/components/multi-tenancy.md's
+# 2026-08-14 revision, workflow workers are tenant-agnostic and run as a
+# separate shared pool, deployed ONCE for the whole cluster via the sibling
+# ../agent-harness-shared chart. This tenant's Temporal namespace (below)
+# must be added to that shared release's `temporal.namespaces` for turns in
+# this namespace to actually get scheduled.
 
 temporal:
   # -- Temporal frontend address, host:port. REQUIRED — the chart will not
@@ -29,21 +28,6 @@ temporal:
   # -- Task queue name. Must be identical for both workers below — they only
   # coordinate by polling the same queue, nothing else ties them together.
   taskQueue: "agent-loop"
-
-workflowWorker:
-  image:
-    repository: "gcr.io/kumarabd/agent-harness/workflow-worker"
-    tag: "latest"
-    pullPolicy: IfNotPresent
-  replicaCount: 1
-  # -- Left empty deliberately: no real usage data exists yet to size these
-  # from (matching the numeric-values-left-open discipline used throughout
-  # docs/). Set explicitly before any real deployment.
-  resources: {}
-  podAnnotations: {}
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}
 
 activityWorker:
   image:
@@ -89,7 +73,7 @@ postgres:
 # its own subpath via `subPath`.
 tenantVolume:
   enabled: true
-  size: "20Gi"
+  size: "10Gi"
   # -- REQUIRED to be a ReadWriteMany-capable class if activityWorker.replicaCount
   # > 1 — the session filesystem must be reachable by every activity-worker
   # replica simultaneously. Most cloud block-storage classes (EBS gp3, GCP

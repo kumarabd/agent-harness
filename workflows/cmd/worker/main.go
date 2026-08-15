@@ -5,7 +5,10 @@
 // CompressContext activities referenced by name from the workflows here.
 //
 // Configured via env vars (not hardcoded) so this binary is deployable —
-// see deploy/docker/workflow-worker.Dockerfile and deploy/helm/agent-harness:
+// see deploy/docker/workflow-worker.Dockerfile and
+// deploy/helm/agent-harness-shared (this binary is the tenant-agnostic
+// shared pool; deploy/helm/agent-harness-tenant deploys everything else,
+// per docs/components/multi-tenancy.md):
 //
 //	TEMPORAL_ADDRESS    Temporal frontend host:port. Default: localhost:7233.
 //	TEMPORAL_NAMESPACE  Single Temporal namespace. Default: default. Used only
@@ -27,10 +30,14 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
@@ -47,6 +54,7 @@ func envOrDefault(key, fallback string) string {
 
 // namespaces returns the list of tenant namespaces this process should serve,
 // per the TEMPORAL_NAMESPACES/TEMPORAL_NAMESPACE resolution described above.
+// Always returns at least one entry.
 func namespaces() []string {
 	if raw := os.Getenv("TEMPORAL_NAMESPACES"); raw != "" {
 		var out []string
@@ -64,8 +72,9 @@ func namespaces() []string {
 }
 
 // runForNamespace starts one Client+Worker pair for a single tenant namespace
-// and blocks until it exits (cleanly via interrupt, or with an error).
-func runForNamespace(address, namespace, taskQueue string) error {
+// and blocks until it stops — cleanly, once ctx is cancelled (returns nil),
+// or with an error (dial failure, or Run() itself failing).
+func runForNamespace(ctx context.Context, address, namespace, taskQueue string) error {
 	c, err := client.Dial(client.Options{HostPort: address, Namespace: namespace})
 	if err != nil {
 		return err
@@ -84,7 +93,53 @@ func runForNamespace(address, namespace, taskQueue string) error {
 	w.RegisterWorkflow(wf.TurnWorkflow)
 
 	log.Printf("workflow worker starting: temporal=%q namespace=%q task_queue=%q", address, namespace, taskQueue)
-	return w.Run(worker.InterruptCh())
+
+	// worker.Run wants a <-chan interface{}; adapt ctx's cancellation into
+	// that shape. Using one shared ctx (via signal.NotifyContext, registered
+	// once in main) rather than each goroutine calling worker.InterruptCh()
+	// independently: ctx.Done() is a broadcast, safely observed by however
+	// many concurrent selects are waiting on it, whereas sharing one raw
+	// signal.Notify channel across goroutines would only wake ONE waiter per
+	// signal delivery — wrong for N concurrently-running namespace pairs.
+	stopCh := make(chan interface{})
+	go func() {
+		<-ctx.Done()
+		close(stopCh)
+	}()
+	return w.Run(stopCh)
+}
+
+// retryForNamespace keeps one tenant namespace's Client+Worker pair alive for
+// the life of the process: a failure to start or run it (that namespace not
+// existing yet at pod startup, a transient network blip, ...) is logged and
+// retried with exponential backoff, rather than treated as fatal — either to
+// just this namespace or, as it was before this change, to the entire shared
+// pool. One tenant's broken/not-yet-onboarded namespace must never take
+// every other currently-served tenant down with it — this is what actually
+// makes "shared pool" safe operationally, not just content-isolation-safe
+// (see docs/components/multi-tenancy.md's reference-passing contract for the
+// latter).
+func retryForNamespace(ctx context.Context, address, namespace, taskQueue string) {
+	const (
+		initialBackoff = time.Second
+		maxBackoff     = 30 * time.Second
+	)
+	backoff := initialBackoff
+	for ctx.Err() == nil {
+		err := runForNamespace(ctx, address, namespace, taskQueue)
+		if err == nil {
+			return // ctx was cancelled — clean shutdown, nothing to retry
+		}
+		log.Printf("workflow worker for namespace %q stopped with error, retrying in %s: %v", namespace, backoff, err)
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return
+		}
+		if backoff *= 2; backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
 }
 
 func main() {
@@ -92,40 +147,18 @@ func main() {
 	taskQueue := envOrDefault("TEMPORAL_TASK_QUEUE", "agent-loop")
 	nss := namespaces()
 
-	if len(nss) == 1 {
-		// Common case (single tenant / local dev): run inline, no goroutine
-		// fan-out needed, and a failure here is the process's own failure —
-		// same behavior as before this change.
-		if err := runForNamespace(address, nss[0], taskQueue); err != nil {
-			log.Fatalf("worker stopped with error: %v", err)
-		}
-		return
-	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// Shared pool serving multiple tenant namespaces: one Client+Worker pair
-	// per namespace, running concurrently in this process
-	// (docs/components/multi-tenancy.md). Simplest correct behavior for this
-	// pass: if any pair's Run() returns an error, the whole process exits —
-	// graceful partial-degradation (keep serving the healthy namespaces,
-	// report the unhealthy one) is a real future concern not designed in the
-	// docs, so not invented here.
 	var wg sync.WaitGroup
-	errCh := make(chan error, len(nss))
 	for _, ns := range nss {
 		wg.Add(1)
 		go func(namespace string) {
 			defer wg.Done()
-			if err := runForNamespace(address, namespace, taskQueue); err != nil {
-				errCh <- err
-			}
+			retryForNamespace(ctx, address, namespace, taskQueue)
 		}(ns)
 	}
 
 	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		if err != nil {
-			log.Fatalf("worker stopped with error: %v", err)
-		}
-	}
+	log.Printf("all workflow workers stopped, exiting")
 }

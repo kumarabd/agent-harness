@@ -1,0 +1,58 @@
+agent-harness-tenant has been deployed.
+
+This is a PER-TENANT release (docs/components/multi-tenancy.md) — one
+`helm install` per tenant, each with its own release name and
+`temporal.namespace`. It deploys:
+{{- if .Values.postgres.enabled }}
+  - {{ include "agent-harness.componentFullname" (dict "context" . "component" "postgres") }}
+    (Postgres — one self-hosted instance for this tenant, PV-backed)
+{{- end }}
+  - {{ include "agent-harness.componentFullname" (dict "context" . "component" "activity-worker") }}
+    (Python — ModelCall/ToolCall/Persist/Deliver/CompressContext activities;
+    this tenant's dedicated fleet, holds this tenant's credentials)
+
+It does NOT deploy Temporal server itself, and does NOT deploy the
+workflow-worker pool (Session Coordinator + Turn Workflow) — that's the
+tenant-agnostic shared pool, deployed ONCE for the whole cluster by the
+sibling ../agent-harness-shared chart. For turns in this tenant's namespace
+to actually get scheduled, this tenant's `temporal.namespace` (below) must
+be listed in that shared release's `temporal.namespaces`.
+
+This release's activity worker is configured to poll:
+
+  Temporal address:   {{ .Values.temporal.address }}
+  Temporal namespace: {{ .Values.temporal.namespace }}
+  Task queue:         {{ .Values.temporal.taskQueue }}
+
+Check it's actually connecting:
+
+  kubectl logs -l app.kubernetes.io/component=activity-worker
+
+You should see a line like:
+  "activity worker starting: temporal=... namespace=... task_queue=..."
+
+If it's crash-looping, the most common cause at this stage is
+`temporal.address` being unreachable from inside the cluster (check network
+policy / DNS) or pointing at a namespace it doesn't have access to.
+
+{{- if .Values.postgres.enabled }}
+
+Check Postgres came up:
+
+  kubectl logs -l app.kubernetes.io/component=postgres -c postgres
+  kubectl get pvc {{ include "agent-harness.fullname" . }}-data
+
+A StatefulSet stuck Pending usually means the PVC never bound — check
+`kubectl describe pvc` for a storage-class/capacity error. If
+activityWorker.replicaCount > 1, the PVC's storageClassName MUST support
+ReadWriteMany (the session filesystem tree is mounted by every replica
+simultaneously) — most cloud block-storage classes (EBS, PD-SSD, Azure
+Managed Disks) do NOT support this; you need a file-storage-backed class
+(EFS, Filestore, Azure Files, or equivalent).
+{{- end }}
+
+Note: no real LLM or gateway are wired up yet — ModelCall/ToolCall/Persist/
+Deliver/CompressContext are otherwise real, Postgres-backed activities (the
+reference-passing contract in docs/components/temporal-workflow.md is
+implemented and verified end-to-end, not just designed). See the repo root
+README.md for what's real vs. stubbed.
