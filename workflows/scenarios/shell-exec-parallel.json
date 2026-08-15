@@ -1,0 +1,29 @@
+{
+  "message": {
+    "role": "user",
+    "content": "run two shell commands at once"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Running both now.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": { "command": "echo A > shared.txt && sleep 1 && cat shared.txt" },
+          "is_subagent": false
+        },
+        {
+          "name": "shell_exec",
+          "arguments": { "command": "echo B > shared.txt && sleep 1 && cat shared.txt" },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 30 }
+    },
+    {
+      "content": "Both commands finished.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 120, "output_tokens": 30 }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "message": {
+    "role": "user",
+    "content": "run a shell command"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Running that now.",
+      "tool_calls": [
+        { "name": "shell_exec", "arguments": { "command": "echo hello && pwd" }, "is_subagent": false }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 30 }
+    },
+    {
+      "content": "Done — ran the command successfully.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 120, "output_tokens": 30 }
+    }
+  ]
+}

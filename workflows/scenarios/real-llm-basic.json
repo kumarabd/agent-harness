@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "Run the shell command `echo hello` and tell me exactly what it printed."
+  }
+}
