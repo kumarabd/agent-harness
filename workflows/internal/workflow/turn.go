@@ -158,19 +158,20 @@ loop:
 				fut := workflow.ExecuteChildWorkflow(cctx, TurnWorkflow, childInput)
 				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isSubagent: true})
 			} else {
+				timing := toolTimingFor(tc.ToolName)
 				ao := workflow.ActivityOptions{
 					ActivityID:          tc.ToolCallID,
-					StartToCloseTimeout: activityTimeoutTierA,
+					StartToCloseTimeout: timing.StartToCloseTimeout,
 					// HeartbeatTimeout is what actually makes cancellation delivery
 					// possible: the SDK core throttles the real network heartbeat to
 					// roughly 80% of this value (capped separately), so it has to be
-					// short relative to how long the stub activity actually runs in
-					// this local slice — otherwise the first real heartbeat carrying
-					// the cancellation notice never lands before the activity finishes
-					// on its own. 1s here against the stub's ~4s artificial delay
-					// (activities/activities/tool_call.py) gives several real
-					// heartbeats within the test window.
-					HeartbeatTimeout:    1 * time.Second,
+					// short relative to how long the activity actually runs —
+					// otherwise the first real heartbeat carrying the cancellation
+					// notice never lands before the activity finishes on its own.
+					// Per-tool via toolTimingFor (tool_tiers.go) — a real Tier B tool
+					// like shell_exec needs a much longer timeout than the fixture-only
+					// demo tools' fast local timing.
+					HeartbeatTimeout:    timing.HeartbeatTimeout,
 					WaitForCancellation: true, // WAIT_CANCELLATION_COMPLETED, never ABANDON — see docs
 					RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
 				}

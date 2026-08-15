@@ -20,3 +20,42 @@ def subagent_turn_id(turn_id: str, n: int) -> str:
     """"{turn_id}:sub:{n}" — a subagent child workflow's ID, nested under its
     parent's turn ID. Recursion just keeps applying this."""
     return f"{turn_id}:sub:{n}"
+
+
+def session_key_of(turn_id: str) -> str:
+    """The session_key prefix of any turn_id (top-level or subagent) — the
+    same split session_fs_path uses, exposed separately since callers
+    coordinating leases (leases.py) need the raw session_key too, not just
+    the derived path."""
+    session_key, sep, _ = turn_id.partition(":turn:")
+    if not sep:
+        raise ValueError(f"not a turn_id (missing ':turn:'): {turn_id!r}")
+    return session_key
+
+
+def session_fs_path(turn_id: str) -> str:
+    """Maps a turn_id to its working directory on the session filesystem PV,
+    per docs/components/session-filesystem.md's path convention:
+    "/session/{session_key}/" for a top-level turn, extended with "sub/{n}/"
+    per nesting level for a subagent. No new schema/queries needed — the ID
+    scheme was designed hierarchically precisely so this is a pure string
+    transform: "sess-1:turn:1" -> "/session/sess-1/"; "sess-1:turn:1:sub:1"
+    -> "/session/sess-1/sub/1/"; "sess-1:turn:1:sub:1:sub:2" ->
+    "/session/sess-1/sub/1/sub/2/".
+
+    Only ever called with an actual turn_id (a tool_calls row's parent_id,
+    which is always a turn or subagent-turn ID, never an ":act:" activity
+    ID) — not meant for arbitrary strings.
+    """
+    session_key, sep, rest = turn_id.partition(":turn:")
+    if not sep:
+        raise ValueError(f"not a turn_id (missing ':turn:'): {turn_id!r}")
+    parts = rest.split(":")
+    sub_parts = parts[1:]  # parts[0] is the top-level turn_seq — irrelevant to the path
+    path = f"/session/{session_key}/"
+    for i in range(0, len(sub_parts), 2):
+        marker, n = sub_parts[i], sub_parts[i + 1]
+        if marker != "sub":
+            raise ValueError(f"unexpected turn_id segment {marker!r} in {turn_id!r}")
+        path += f"sub/{n}/"
+    return path

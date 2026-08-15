@@ -49,6 +49,22 @@ class InsertMessageActivity:
     async def __call__(self, input: InsertMessageInput) -> None:
         async with self._pool.acquire() as conn:
             async with conn.transaction():
+                if input.is_turn_start and input.parent_type == "session":
+                    # sessions.session_key is what session_filesystem_leases'
+                    # FK requires (leases.py) — no Gateway component exists
+                    # yet in this codebase to upsert a real row on first
+                    # contact (state-layer.md's documented owner), so this is
+                    # the closest real "first contact with a session" write
+                    # available. platform/channel_id are genuinely unknown at
+                    # this layer — 'unknown' is an honest placeholder, not a
+                    # fabricated real value; a real Gateway replaces this
+                    # entirely rather than this needing to guess correctly.
+                    await conn.execute(
+                        "INSERT INTO sessions (session_key, platform, channel_id) "
+                        "VALUES ($1, 'unknown', 'unknown') ON CONFLICT (session_key) DO NOTHING",
+                        input.parent_id,
+                    )
+
                 if input.is_turn_start:
                     await conn.execute(
                         "INSERT INTO turns (turn_id, parent_id, parent_type, turn_seq, status) "

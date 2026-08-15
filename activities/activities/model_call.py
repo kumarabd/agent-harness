@@ -7,9 +7,8 @@ never holds message content, tool names' arguments, or model output text —
 only IDs. So this activity:
   1. Looks up a scripted response in `_test_scripted_responses` (test-fixture
      path — see the module docstring on why this table exists at all). If
-     none exists, this is where a real model-provider call would go; that
-     integration is out of scope for this pass (no LLM wiring exists yet in
-     this project) — raise a clear error instead of silently faking success.
+     none exists, calls a real model provider (llm.py — OpenAI) instead of
+     faking success; that seam is the only branch point here.
   2. Reads prior turn history from `messages` to build context — this
      activity *is* the context-hydration step now, not a separate one.
   3. Inserts its own response into `messages`.
@@ -26,20 +25,21 @@ import logging
 
 from temporalio import activity
 
-from . import ids
+from . import ids, llm
 from .types import ModelCallInput, ModelCallOutput, ToolCallRef, Usage
 
 logger = logging.getLogger(__name__)
 
 
 class ModelCallActivity:
-    """Bound-method activity so the Postgres pool (created once in worker.py)
-    is injected per-process rather than held as module-global state — the
-    idiomatic way to give a Temporal Python activity a shared resource
-    without a global."""
+    """Bound-method activity so the Postgres pool and OpenAI client (both
+    created once in worker.py) are injected per-process rather than held as
+    module-global state — the idiomatic way to give a Temporal Python
+    activity shared resources without globals."""
 
-    def __init__(self, pool):
+    def __init__(self, pool, openai_client):
         self._pool = pool
+        self._openai_client = openai_client
 
     @activity.defn(name="ModelCall")
     async def __call__(self, input: ModelCallInput) -> ModelCallOutput:
@@ -50,19 +50,22 @@ class ModelCallActivity:
                 input.turn_id,
                 input.context_seq,
             )
-            if fixture is None:
-                raise RuntimeError(
-                    f"ModelCall[{input.turn_id}:{input.context_seq}]: no test fixture found and no "
-                    "real model provider is configured. Real LLM integration is out of scope for "
-                    "this implementation pass (docs/components/temporal-workflow.md) — write a "
-                    "scripted response to _test_scripted_responses for this (turn_id, seq), or add "
-                    "a real provider call here."
+            if fixture is not None:
+                content: str = fixture["content"]
+                raw_tool_calls: list[dict] = json.loads(fixture["tool_calls"])
+                raw_usage: dict = json.loads(fixture["usage"])
+                usage = Usage(
+                    input_tokens=raw_usage.get("input_tokens", 0), output_tokens=raw_usage.get("output_tokens", 0)
                 )
-
-            content: str = fixture["content"]
-            raw_tool_calls: list[dict] = json.loads(fixture["tool_calls"])
-            raw_usage: dict = json.loads(fixture["usage"])
-            usage = Usage(input_tokens=raw_usage.get("input_tokens", 0), output_tokens=raw_usage.get("output_tokens", 0))
+            else:
+                session_row = await conn.fetchrow(
+                    "SELECT system_prompt FROM sessions WHERE session_key = $1",
+                    ids.session_key_of(input.turn_id),
+                )
+                system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
+                conversation = await llm.build_conversation(conn, input.turn_id, system_prompt)
+                real = await llm.call_model(self._openai_client, conversation)
+                content, raw_tool_calls, usage = real.content, real.raw_tool_calls, real.usage
 
             logger.info(
                 "ModelCall[%s:%d] -> %r (tool_calls=%d)",

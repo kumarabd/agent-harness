@@ -8,8 +8,7 @@ owns the one connection pool for the process — created once in worker.py,
 injected into activity instances rather than held as module-global state, so
 there's exactly one lifecycle to reason about.
 
-Env vars (already set by deploy/helm/agent-harness/templates/activity-worker-deployment.yaml,
-just unused by the code until now):
+Env vars (already set by deploy/helm/agent-harness-tenant/templates/activity-worker-deployment.yaml):
     POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
 """
 

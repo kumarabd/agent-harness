@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "temporalio>=1.7,<2",
     "asyncpg>=0.29,<1",
+    "openai>=1.40,<2",
 ]
 
 [build-system]
