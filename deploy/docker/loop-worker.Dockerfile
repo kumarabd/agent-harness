@@ -1,7 +1,7 @@
-# Go workflow worker (Session Coordinator + Turn Workflow) — see workflows/cmd/worker.
+# Go loop-worker (Session Coordinator + Turn Workflow) — see workflows/cmd/loop-worker.
 #
 # Build context must be the REPO ROOT, not deploy/docker/:
-#   docker build -f deploy/docker/workflow-worker.Dockerfile -t gcr.io/kumarabd/agent-harness/workflow-worker:latest .
+#   docker build -f deploy/docker/loop-worker.Dockerfile -t gcr.io/kumarabd/agent-harness/loop-worker:latest .
 
 FROM golang:1.26-alpine AS build
 WORKDIR /src
@@ -12,14 +12,14 @@ COPY workflows/go.mod workflows/go.sum ./
 RUN go mod download
 
 COPY workflows/ ./
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/worker ./cmd/worker
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/loop-worker ./cmd/loop-worker
 
 # Distroless: no shell, no package manager — minimal attack surface for a
 # process that will eventually hold no tenant credentials itself (this is the
-# workflow layer, not the activity layer that holds tool credentials per
+# shared loop-worker, not the tenant-worker that holds tool credentials per
 # docs/components/multi-tenancy.md) but should still not be trivially
 # shell-accessible if compromised.
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/worker /worker
+COPY --from=build /out/loop-worker /loop-worker
 USER nonroot:nonroot
-ENTRYPOINT ["/worker"]
+ENTRYPOINT ["/loop-worker"]

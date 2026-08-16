@@ -1,19 +1,24 @@
+{{- if .Values.llm.enabled -}}
+{{- if not .Values.llm.openai.model }}
+{{- fail "llm.openai.model is required when llm.enabled=true — the provider's model catalog isn't known ahead of time, so there's no safe default to guess." }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "activity-worker") }}
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "tenant-worker") }}
   labels:
-    {{- include "agent-harness.componentLabels" (dict "context" . "component" "activity-worker") | nindent 4 }}
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "tenant-worker") | nindent 4 }}
 spec:
-  replicas: {{ .Values.activityWorker.replicaCount }}
+  replicas: {{ .Values.tenantWorker.replicaCount }}
   selector:
     matchLabels:
-      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "activity-worker") | nindent 6 }}
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "tenant-worker") | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "activity-worker") | nindent 8 }}
-      {{- with .Values.activityWorker.podAnnotations }}
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "tenant-worker") | nindent 8 }}
+      {{- with .Values.tenantWorker.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -24,14 +29,15 @@ spec:
       # Postgres and mounts this tenant's own session filesystem PV.
       automountServiceAccountToken: false
       containers:
-        - name: activity-worker
-          image: "{{ .Values.activityWorker.image.repository }}:{{ .Values.activityWorker.image.tag }}"
-          imagePullPolicy: {{ .Values.activityWorker.image.pullPolicy }}
+        - name: tenant-worker
+          image: "{{ .Values.tenantWorker.image.repository }}:{{ .Values.tenantWorker.image.tag }}"
+          imagePullPolicy: {{ .Values.tenantWorker.image.pullPolicy }}
           envFrom:
             - configMapRef:
                 name: {{ include "agent-harness.fullname" . }}-config
-          {{- if .Values.postgres.enabled }}
+          {{- if or .Values.postgres.enabled .Values.llm.enabled }}
           env:
+          {{- if .Values.postgres.enabled }}
             # {statefulset-name}-0.{headless-service-name} — the stable
             # per-pod DNS name the headless postgres-service.yaml gives pod 0
             # (the only pod, since postgres replicas is fixed at 1). Just the
@@ -57,6 +63,22 @@ spec:
                   name: {{ .Values.postgres.existingSecret | default (printf "%s-postgres" (include "agent-harness.fullname" .)) }}
                   key: {{ .Values.postgres.existingSecretPasswordKey }}
           {{- end }}
+          {{- if .Values.llm.enabled }}
+            # Real ModelCall calls only (activities/activities/llm.py) —
+            # turns with a _test_scripted_responses fixture never touch this.
+            - name: PIONEER_BASE_URL
+              value: {{ .Values.llm.openai.baseURL | quote }}
+            - name: PIONEER_MODEL
+              value: {{ .Values.llm.openai.model | quote }}
+            - name: PIONEER_MAX_TOKENS
+              value: {{ .Values.llm.openai.maxTokens | quote }}
+            - name: PIONEER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-harness.fullname" . }}-llm
+                  key: PIONEER_API_KEY
+          {{- end }}
+          {{- end }}
           {{- if .Values.tenantVolume.enabled }}
           volumeMounts:
             # The session filesystem tree (docs/components/session-filesystem.md)
@@ -67,22 +89,22 @@ spec:
               subPath: {{ .Values.tenantVolume.sessionsSubPath }}
           {{- end }}
           resources:
-            {{- toYaml .Values.activityWorker.resources | nindent 12 }}
+            {{- toYaml .Values.tenantWorker.resources | nindent 12 }}
       {{- if .Values.tenantVolume.enabled }}
       volumes:
         - name: tenant-data
           persistentVolumeClaim:
             claimName: {{ include "agent-harness.fullname" . }}-data
       {{- end }}
-      {{- with .Values.activityWorker.nodeSelector }}
+      {{- with .Values.tenantWorker.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.activityWorker.affinity }}
+      {{- with .Values.tenantWorker.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.activityWorker.tolerations }}
+      {{- with .Values.tenantWorker.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

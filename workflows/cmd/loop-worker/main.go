@@ -1,11 +1,12 @@
-// Command worker registers the Session Coordinator and Turn Workflow on the
-// configured task queue and polls a Temporal server for work. Run alongside
-// the Python activity worker (activities/activities/worker.py), which polls
-// the same task queue for the ModelCall/ToolCall/InsertMessage/Persist/Deliver/
-// CompressContext activities referenced by name from the workflows here.
+// Command loop-worker registers the Session Coordinator and Turn Workflow on
+// the configured task queue and polls a Temporal server for work. Run
+// alongside each tenant's tenant-worker (activities/activities/tenant_worker.py),
+// which polls the same task queue for the ModelCall/ToolCall/InsertMessage/
+// Persist/Deliver/CompressContext activities referenced by name from the
+// workflows here.
 //
 // Configured via env vars (not hardcoded) so this binary is deployable —
-// see deploy/docker/workflow-worker.Dockerfile and
+// see deploy/docker/loop-worker.Dockerfile and
 // deploy/helm/agent-harness-shared (this binary is the tenant-agnostic
 // shared pool; deploy/helm/agent-harness-tenant deploys everything else,
 // per docs/components/multi-tenancy.md):
@@ -18,15 +19,14 @@
 //	                    process serves — one Client+Worker pair per namespace,
 //	                    run concurrently in this single process
 //	                    (docs/components/multi-tenancy.md, "Resolved: Compute
-//	                    Isolation" — the shared, tenant-agnostic workflow-worker
+//	                    Isolation" — the shared, tenant-agnostic loop-worker
 //	                    pool). Static config, chosen deliberately over dynamic
 //	                    registration, mirroring the gateway's static-shard-config
 //	                    pattern (components/gateway.md). Takes precedence over
 //	                    TEMPORAL_NAMESPACE if both are set.
 //	TEMPORAL_TASK_QUEUE Task queue name, shared across every namespace this
-//	                    process serves. Default: agent-loop. Must match the
-//	                    Python activity worker's TEMPORAL_TASK_QUEUE for each
-//	                    corresponding tenant's activity-worker fleet.
+//	                    process serves. Default: agent-loop. Must match each
+//	                    tenant's own tenant-worker fleet's TEMPORAL_TASK_QUEUE.
 package main
 
 import (
@@ -83,16 +83,16 @@ func runForNamespace(ctx context.Context, address, namespace, taskQueue string) 
 
 	// LocalActivityWorkerOnly: this process registers no activities — every
 	// activity (ModelCall, ToolCall, InsertMessage, Persist, Deliver,
-	// CompressContext) is implemented by that tenant's Python activity worker
-	// (activities/activities/worker.py). Without this flag, this worker would
-	// also poll for regular activity tasks on the same queue and occasionally
-	// win that race, failing the task since it has no implementation
-	// registered.
+	// CompressContext) is implemented by that tenant's tenant-worker
+	// (activities/activities/tenant_worker.py). Without this flag, this
+	// worker would also poll for regular activity tasks on the same queue
+	// and occasionally win that race, failing the task since it has no
+	// implementation registered.
 	w := worker.New(c, taskQueue, worker.Options{LocalActivityWorkerOnly: true})
 	w.RegisterWorkflow(wf.CoordinatorWorkflow)
 	w.RegisterWorkflow(wf.TurnWorkflow)
 
-	log.Printf("workflow worker starting: temporal=%q namespace=%q task_queue=%q", address, namespace, taskQueue)
+	log.Printf("loop worker starting: temporal=%q namespace=%q task_queue=%q", address, namespace, taskQueue)
 
 	// worker.Run wants a <-chan interface{}; adapt ctx's cancellation into
 	// that shape. Using one shared ctx (via signal.NotifyContext, registered
@@ -130,7 +130,7 @@ func retryForNamespace(ctx context.Context, address, namespace, taskQueue string
 		if err == nil {
 			return // ctx was cancelled — clean shutdown, nothing to retry
 		}
-		log.Printf("workflow worker for namespace %q stopped with error, retrying in %s: %v", namespace, backoff, err)
+		log.Printf("loop worker for namespace %q stopped with error, retrying in %s: %v", namespace, backoff, err)
 		select {
 		case <-time.After(backoff):
 		case <-ctx.Done():
@@ -160,5 +160,5 @@ func main() {
 	}
 
 	wg.Wait()
-	log.Printf("all workflow workers stopped, exiting")
+	log.Printf("all loop workers stopped, exiting")
 }

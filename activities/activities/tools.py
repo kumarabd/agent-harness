@@ -38,7 +38,7 @@ from . import leases
 
 _SESSION_ROOT_ENV = "SESSION_ROOT"
 # Local-dev fallback; real deployments set SESSION_ROOT to match the Helm
-# chart's PV mount (deploy/helm/agent-harness-tenant's activityWorker mounts
+# chart's PV mount (deploy/helm/agent-harness-tenant's tenantWorker mounts
 # the session filesystem tree at /sessions).
 _DEFAULT_SESSION_ROOT = "/tmp/agent-harness-sessions"
 

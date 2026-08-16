@@ -1,13 +1,13 @@
 apiVersion: v2
 name: agent-harness-shared
 description: >-
-  The shared, tenant-agnostic workflow-worker pool (Session Coordinator +
+  The shared, tenant-agnostic loop-worker pool (Session Coordinator +
   Turn Workflow, Go) for agent-harness. Deployed ONCE for the whole cluster —
   NOT one release per tenant, see docs/components/multi-tenancy.md's
   "Resolved: Compute Isolation" decision. Deploys against an existing
   Temporal server; does not bundle Temporal or its datastore, and deploys
   none of the per-tenant components (those live in the agent-harness-tenant
-  chart — activity workers, Postgres, tenant PV — one release per tenant).
+  chart — tenant workers, Postgres, tenant PV — one release per tenant).
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

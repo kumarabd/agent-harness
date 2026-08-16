@@ -22,7 +22,7 @@ spec:
       # This worker never calls the Kubernetes API — it only polls Temporal.
       automountServiceAccountToken: false
       containers:
-        - name: workflow-worker
+        - name: loop-worker
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           envFrom:

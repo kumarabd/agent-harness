@@ -9,8 +9,8 @@ metadata:
     {{- include "agent-harness.labels" . | nindent 4 }}
 data:
   # Both workers read the same values here — they only coordinate by polling
-  # the same Temporal task queue, nothing else ties workflow-worker and
-  # activity-worker together.
+  # the same Temporal task queue, nothing else ties loop-worker and
+  # tenant-worker together.
   TEMPORAL_ADDRESS: {{ .Values.temporal.address | quote }}
   TEMPORAL_TASK_QUEUE: {{ .Values.temporal.taskQueue | quote }}
   TEMPORAL_NAMESPACE: {{ .Values.temporal.namespace | quote }}

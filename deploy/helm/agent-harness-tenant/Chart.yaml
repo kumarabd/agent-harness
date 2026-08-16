@@ -2,13 +2,13 @@ apiVersion: v2
 name: agent-harness-tenant
 description: >-
   Per-tenant components for agent-harness (docs/components/multi-tenancy.md):
-  the tenant's dedicated activity-worker fleet (ModelCall/ToolCall/Persist/
-  Deliver/CompressContext activities, Python), its own self-hosted Postgres
-  instance, and the tenant PV. One release per tenant. Deploys against an
-  existing Temporal server — this chart does not bundle Temporal or its
-  datastore. Does NOT deploy the workflow-worker pool (Session Coordinator +
-  Turn Workflow) — that's the tenant-agnostic shared pool, deployed once for
-  the whole cluster by the sibling ../agent-harness-shared chart.
+  the tenant's dedicated tenant-worker fleet (ModelCall/ToolCall/InsertMessage/
+  Persist/Deliver/CompressContext activities, Python), its own self-hosted
+  Postgres instance, and the tenant PV. One release per tenant. Deploys
+  against an existing Temporal server — this chart does not bundle Temporal
+  or its datastore. Does NOT deploy the loop-worker pool (Session Coordinator
+  + Turn Workflow) — that's the tenant-agnostic shared pool, deployed once
+  for the whole cluster by the sibling ../agent-harness-shared chart.
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

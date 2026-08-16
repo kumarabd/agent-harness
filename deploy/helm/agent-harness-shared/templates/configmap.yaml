@@ -1,5 +1,5 @@
 {{- if not .Values.temporal.address -}}
-{{- fail "temporal.address is required — this chart deploys the shared workflow-worker pool only, not Temporal itself. Set --set temporal.address=<host>:<port> or the equivalent in your values file." -}}
+{{- fail "temporal.address is required — this chart deploys the shared loop-worker pool only, not Temporal itself. Set --set temporal.address=<host>:<port> or the equivalent in your values file." -}}
 {{- end -}}
 {{- if not .Values.temporal.namespaces -}}
 {{- fail "temporal.namespaces must list at least one Temporal namespace for this pool to serve. Each listed namespace must already exist in Temporal (temporal operator namespace create <name>)." -}}

@@ -6,13 +6,13 @@ metadata:
   labels:
     {{- include "agent-harness.labels" . | nindent 4 }}
 spec:
-  # ReadWriteMany by default: this PV is mounted by the whole activity-worker
+  # ReadWriteMany by default: this PV is mounted by the whole tenant-worker
   # fleet simultaneously (docs/components/session-filesystem.md — the session
   # tree must be reachable by any replica), not just by the single-instance
   # Postgres StatefulSet. Most cloud block-storage classes (EBS gp3, PD-SSD,
   # Azure managed disks) only support RWO — this requires a file-storage-backed
   # class (EFS, Azure Files, Filestore, or an equivalent CSI driver). Set
-  # tenantVolume.accessMode: ReadWriteOnce only if activityWorker.replicaCount
+  # tenantVolume.accessMode: ReadWriteOnce only if tenantWorker.replicaCount
   # is pinned to 1, which defeats the point of a worker fleet.
   accessModes:
     - {{ .Values.tenantVolume.accessMode }}

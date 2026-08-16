@@ -1,17 +1,17 @@
-"""Activity worker entrypoint. Registers ModelCall, ToolCall, InsertMessage,
+"""Tenant worker entrypoint. Registers ModelCall, ToolCall, InsertMessage,
 Persist, Deliver, and CompressContext on the configured task queue and polls a
-Temporal server for activity tasks. Run alongside the Go workflow worker
-(workflows/cmd/worker), which registers the Session Coordinator and Turn
+Temporal server for activity tasks. Run alongside the shared loop-worker
+(workflows/cmd/loop-worker), which registers the Session Coordinator and Turn
 Workflow on the same task queue and dispatches activities to this process by
 name.
 
 Configured via env vars (not hardcoded) so this process is deployable — see
-deploy/docker/activity-worker.Dockerfile and deploy/helm/agent-harness-tenant:
+deploy/docker/tenant-worker.Dockerfile and deploy/helm/agent-harness-tenant:
 
     TEMPORAL_ADDRESS     Temporal frontend host:port. Default: localhost:7233.
     TEMPORAL_NAMESPACE   Temporal namespace. Default: default.
     TEMPORAL_TASK_QUEUE  Task queue name. Default: agent-loop. Must match the
-                         Go workflow worker's TEMPORAL_TASK_QUEUE.
+                         shared loop-worker's TEMPORAL_TASK_QUEUE.
     POSTGRES_HOST/PORT/DB/USER/PASSWORD  This tenant's Postgres instance
                          (docs/components/multi-tenancy.md). See db.py.
     SESSION_ROOT         Root of the session filesystem tree real tools
@@ -30,7 +30,7 @@ deploy/docker/activity-worker.Dockerfile and deploy/helm/agent-harness-tenant:
     PIONEER_MAX_TOKENS   Default: 4096. See llm.py.
 
 Usage:
-    python -m activities.worker
+    python -m activities.tenant_worker
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ async def main() -> None:
         ],
     )
     logging.getLogger(__name__).info(
-        "activity worker starting: temporal=%r namespace=%r task_queue=%r", address, namespace, task_queue
+        "tenant worker starting: temporal=%r namespace=%r task_queue=%r", address, namespace, task_queue
     )
     try:
         await worker.run()

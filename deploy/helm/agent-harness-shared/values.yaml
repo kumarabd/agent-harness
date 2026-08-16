@@ -1,6 +1,6 @@
 # -- This chart is deployed ONCE for the whole cluster
 # (docs/components/multi-tenancy.md's "Resolved: Compute Isolation" — the
-# shared, tenant-agnostic workflow-worker pool): unlike
+# shared, tenant-agnostic loop-worker pool): unlike
 # deploy/helm/agent-harness-tenant, it is NOT one release per tenant. It
 # deploys only the Session Coordinator + Turn Workflow pool, against an
 # EXISTING Temporal server/cluster. It deploys none of the per-tenant
@@ -23,20 +23,20 @@ temporal:
   # render a usable deployment without this set (see NOTES.txt).
   # Examples: "temporal-frontend.temporal.svc.cluster.local:7233",
   # "my-namespace.a1b2c.tmprl.cloud:7233"
-  address: ""
+  address: "temporal-frontend.core.svc.cluster.local:7233"
   # -- List of Temporal namespaces this pool serves — one Client+Worker pair
   # per namespace, concurrently, in every replica. REQUIRED: at least one
   # namespace. Every entry must already exist in Temporal (`temporal operator
   # namespace create <name>`) before this chart is installed/upgraded with it
   # listed here.
-  namespaces: []
+  namespaces: ["abishekk"]
   # -- Task queue name. Must match every tenant's agent-harness-tenant
   # release (temporal.taskQueue there) for that tenant's namespace — this is
   # the only thing tying the two charts together at runtime.
   taskQueue: "agent-loop"
 
 image:
-  repository: "gcr.io/kumarabd/agent-harness/workflow-worker"
+  repository: "gcr.io/kumarabd/agent-harness/loop-worker"
   tag: "latest"
   pullPolicy: IfNotPresent
 

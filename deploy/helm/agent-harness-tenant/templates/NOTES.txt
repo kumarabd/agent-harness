@@ -7,18 +7,18 @@ This is a PER-TENANT release (docs/components/multi-tenancy.md) — one
   - {{ include "agent-harness.componentFullname" (dict "context" . "component" "postgres") }}
     (Postgres — one self-hosted instance for this tenant, PV-backed)
 {{- end }}
-  - {{ include "agent-harness.componentFullname" (dict "context" . "component" "activity-worker") }}
-    (Python — ModelCall/ToolCall/Persist/Deliver/CompressContext activities;
-    this tenant's dedicated fleet, holds this tenant's credentials)
+  - {{ include "agent-harness.componentFullname" (dict "context" . "component" "tenant-worker") }}
+    (Python — ModelCall/ToolCall/InsertMessage/Persist/Deliver/CompressContext
+    activities; this tenant's dedicated fleet, holds this tenant's credentials)
 
 It does NOT deploy Temporal server itself, and does NOT deploy the
-workflow-worker pool (Session Coordinator + Turn Workflow) — that's the
+loop-worker pool (Session Coordinator + Turn Workflow) — that's the
 tenant-agnostic shared pool, deployed ONCE for the whole cluster by the
 sibling ../agent-harness-shared chart. For turns in this tenant's namespace
 to actually get scheduled, this tenant's `temporal.namespace` (below) must
 be listed in that shared release's `temporal.namespaces`.
 
-This release's activity worker is configured to poll:
+This release's tenant worker is configured to poll:
 
   Temporal address:   {{ .Values.temporal.address }}
   Temporal namespace: {{ .Values.temporal.namespace }}
@@ -26,10 +26,10 @@ This release's activity worker is configured to poll:
 
 Check it's actually connecting:
 
-  kubectl logs -l app.kubernetes.io/component=activity-worker
+  kubectl logs -l app.kubernetes.io/component=tenant-worker
 
 You should see a line like:
-  "activity worker starting: temporal=... namespace=... task_queue=..."
+  "tenant worker starting: temporal=... namespace=... task_queue=..."
 
 If it's crash-looping, the most common cause at this stage is
 `temporal.address` being unreachable from inside the cluster (check network
@@ -44,15 +44,29 @@ Check Postgres came up:
 
 A StatefulSet stuck Pending usually means the PVC never bound — check
 `kubectl describe pvc` for a storage-class/capacity error. If
-activityWorker.replicaCount > 1, the PVC's storageClassName MUST support
+tenantWorker.replicaCount > 1, the PVC's storageClassName MUST support
 ReadWriteMany (the session filesystem tree is mounted by every replica
 simultaneously) — most cloud block-storage classes (EBS, PD-SSD, Azure
 Managed Disks) do NOT support this; you need a file-storage-backed class
 (EFS, Filestore, Azure Files, or equivalent).
 {{- end }}
 
-Note: no real LLM or gateway are wired up yet — ModelCall/ToolCall/Persist/
-Deliver/CompressContext are otherwise real, Postgres-backed activities (the
+{{- if .Values.llm.enabled }}
+
+Real LLM calls are configured for this release (activities/activities/llm.py,
+OpenAI-compatible provider) — turns with no _test_scripted_responses fixture
+row will call model {{ .Values.llm.openai.model }} at {{ .Values.llm.openai.baseURL }}.
+{{- else }}
+
+Real LLM calls are NOT configured for this release (llm.enabled=false) — any
+turn with no _test_scripted_responses fixture row will fail with a clear
+error from ModelCall rather than silently faking a response. Set llm.enabled,
+llm.openai.model, and llm.openai.apiKey to wire up real calls.
+{{- end }}
+
+Note: no real gateway is wired up yet — Deliver is still a stub (logs the
+final message rather than actually sending it). ModelCall/ToolCall/
+InsertMessage/Persist are otherwise real, Postgres-backed activities (the
 reference-passing contract in docs/components/temporal-workflow.md is
 implemented and verified end-to-end, not just designed). See the repo root
 README.md for what's real vs. stubbed.

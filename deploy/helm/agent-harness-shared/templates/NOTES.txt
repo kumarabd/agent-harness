@@ -1,6 +1,6 @@
 agent-harness-shared has been deployed.
 
-This is the SHARED, tenant-agnostic workflow-worker pool
+This is the SHARED, tenant-agnostic loop-worker pool
 (docs/components/multi-tenancy.md) — deployed ONCE for the whole cluster,
 unlike agent-harness-tenant which is one release per tenant. It deploys:
 
@@ -9,7 +9,7 @@ unlike agent-harness-tenant which is one release per tenant. It deploys:
     in temporal.namespaces from every replica)
 
 It does NOT deploy Temporal server itself, and does NOT deploy any
-tenant-specific components (activity workers, Postgres, tenant PV — those
+tenant-specific components (tenant workers, Postgres, tenant PV — those
 come from the agent-harness-tenant chart, one release per tenant).
 
 This release is currently configured to serve:
@@ -23,7 +23,7 @@ Check the pool is actually connecting:
   kubectl logs -l app.kubernetes.io/instance={{ .Release.Name }}
 
 You should see one line per namespace above:
-  "workflow worker starting: temporal=... namespace=... task_queue=..."
+  "loop worker starting: temporal=... namespace=... task_queue=..."
 
 A namespace that fails to start (unreachable, or doesn't exist yet in
 Temporal — see `temporal operator namespace create <name>`) logs a retry
@@ -41,5 +41,5 @@ release, a deliberate trade — see multi-tenancy.md.
 
 Note: the ModelCall/ToolCall/Persist/Deliver/CompressContext activities that
 this pool's workflows dispatch to are implemented by each tenant's own
-agent-harness-tenant release (activity-worker), not by anything in this
+agent-harness-tenant release (tenant-worker), not by anything in this
 chart.

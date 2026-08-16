@@ -9,7 +9,7 @@ spec:
   # Headless (clusterIP: None) — this is what StatefulSet.spec.serviceName
   # requires: it's the governing service that gives the pod its stable DNS
   # name ({statefulset-name}-0.{this-service-name}), which is what
-  # activity-worker-deployment.yaml actually connects to as POSTGRES_HOST.
+  # tenant-worker-deployment.yaml actually connects to as POSTGRES_HOST.
   # A normal ClusterIP Service would still technically route traffic to the
   # single pod, but wouldn't be the correct governing service for the
   # StatefulSet and would deviate from the documented, expected pattern.

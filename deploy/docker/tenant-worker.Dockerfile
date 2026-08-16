@@ -1,8 +1,8 @@
-# Python activity worker (ModelCall, ToolCall, Persist, Deliver, CompressContext
-# stubs) — see activities/activities/worker.py.
+# Python tenant-worker (ModelCall, ToolCall, InsertMessage, Persist, Deliver,
+# CompressContext) — see activities/activities/tenant_worker.py.
 #
 # Build context must be the REPO ROOT, not deploy/docker/:
-#   docker build -f deploy/docker/activity-worker.Dockerfile -t gcr.io/kumarabd/agent-harness/activity-worker:latest .
+#   docker build -f deploy/docker/tenant-worker.Dockerfile -t gcr.io/kumarabd/agent-harness/tenant-worker:latest .
 
 FROM python:3.12-slim AS build
 WORKDIR /src
@@ -26,4 +26,4 @@ WORKDIR /app
 RUN useradd --system --no-create-home --uid 10001 worker
 USER worker
 
-ENTRYPOINT ["python", "-m", "activities.worker"]
+ENTRYPOINT ["python", "-m", "activities.tenant_worker"]

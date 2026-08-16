@@ -44,13 +44,13 @@ Four terminals (or four background processes):
 temporal server start-dev
 # Web UI: http://localhost:8233
 
-# 2. Go workflow worker
+# 2. Go loop-worker
 cd workflows
-go run ./cmd/worker
+go run ./cmd/loop-worker
 
-# 3. Python activity worker
+# 3. Python tenant-worker
 cd activities
-.venv/bin/python -m activities.worker
+.venv/bin/python -m activities.tenant_worker
 
 # 4. Starter CLI — submits a scripted scenario as if it were an inbound gateway message
 cd workflows
@@ -109,21 +109,22 @@ you'll see `RequestCancelActivity` followed by the tool call resolving with a
 has two Helm charts, split per `docs/components/multi-tenancy.md`'s compute
 isolation decision:
 
-- **`agent-harness-shared`** — the tenant-agnostic workflow-worker pool
+- **`agent-harness-shared`** — the tenant-agnostic loop-worker pool
   (Session Coordinator + Turn Workflow). Deployed **once for the whole
   cluster**, not per tenant. `temporal.namespaces` lists every tenant
   namespace this pool serves; a namespace failing to start (unreachable, not
   yet created) is retried with backoff and doesn't affect the others.
-- **`agent-harness-tenant`** — the per-tenant components: the activity
-  worker fleet (holds that tenant's credentials, does real content I/O), a
-  self-hosted PV-backed Postgres instance, and the tenant PV. One
+- **`agent-harness-tenant`** — the per-tenant components: the tenant-worker
+  fleet (holds that tenant's credentials, does real content I/O — ModelCall,
+  ToolCall, and the message/turn bookkeeping activities all together, one
+  queue), a self-hosted PV-backed Postgres instance, and the tenant PV. One
   `helm install` **per tenant**, each with its own Temporal namespace.
 
 Both deploy against an existing Temporal server/cluster, not one either
 chart manages itself. See each chart's `values.yaml` top comment and
 `templates/NOTES.txt` for the full picture, including the
 `ReadWriteMany`-storage-class requirement on `agent-harness-tenant` if
-`activityWorker.replicaCount > 1`.
+`tenantWorker.replicaCount > 1`.
 
 **Validated:** `helm lint`/`helm template` against several value
 combinations, `docker build`, and a real `helm install` of both charts
@@ -135,7 +136,7 @@ query, not just "pods are Running."
 **Known gap:** neither chart runs the Postgres schema migration
 (`activities/migrations/001_initial_schema.sql`) automatically — it has to
 be applied by hand against a fresh tenant Postgres instance before its
-activity worker can do anything useful. No init job/mechanism for this
+tenant worker can do anything useful. No init job/mechanism for this
 exists yet.
 
 ## A note on heartbeat timing (if you tune `tool_call.py` or the `HeartbeatTimeout`)
