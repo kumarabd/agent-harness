@@ -28,6 +28,10 @@ deploy/docker/tenant-worker.Dockerfile and deploy/helm/agent-harness-tenant:
                          model catalog isn't known ahead of time; guessing
                          one would likely just be wrong). See llm.py.
     PIONEER_MAX_TOKENS   Default: 4096. See llm.py.
+    METRICS_BIND_ADDRESS Host:port the Prometheus exposition endpoint listens
+                         on. Default: 0.0.0.0:9090. See
+                         docs/components/budget-guardrails.md, "Resolved:
+                         Metrics Export" — plain scrape, no ServiceMonitor.
 
 Usage:
     python -m activities.tenant_worker
@@ -41,6 +45,7 @@ import os
 
 from openai import AsyncOpenAI
 from temporalio.client import Client
+from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
 from .compress_context import compress_context
@@ -77,7 +82,18 @@ async def main() -> None:
         base_url=os.environ.get("PIONEER_BASE_URL", "https://api.pioneer.ai/v1"),
     )
 
-    client = await Client.connect(address, namespace=namespace)
+    # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
+    # temporalio's built-in Prometheus support: no new dependency, no
+    # bespoke registry. Emits the SDK's own built-in activity/workflow
+    # metrics for free, plus whatever ModelCallActivity/ToolCallActivity
+    # record via activity.metric_meter(). Scraped directly (plain
+    # prometheus.io/scrape pod annotations — no ServiceMonitor).
+    runtime = Runtime(
+        telemetry=TelemetryConfig(
+            metrics=PrometheusConfig(bind_address=os.environ.get("METRICS_BIND_ADDRESS", "0.0.0.0:9090"))
+        )
+    )
+    client = await Client.connect(address, namespace=namespace, runtime=runtime)
     # Worker needs the bound __call__ methods, not the instances themselves —
     # @activity.defn attaches its metadata to the decorated function, and
     # `instance.__call__` (bound) carries that metadata; the bare instance

@@ -14,3 +14,4 @@ data:
   TEMPORAL_ADDRESS: {{ .Values.temporal.address | quote }}
   TEMPORAL_TASK_QUEUE: {{ .Values.temporal.taskQueue | quote }}
   TEMPORAL_NAMESPACES: {{ join "," .Values.temporal.namespaces | quote }}
+  METRICS_BIND_ADDRESS: {{ printf "0.0.0.0:%d" (int .Values.metrics.port) | quote }}

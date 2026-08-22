@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 from temporalio import activity
 from temporalio.exceptions import CancelledError
@@ -86,10 +87,21 @@ class ToolCallActivity:
         )
 
         logger.info("ToolCall start: %s(%r)", tool_name, arguments)
+        # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
+        # labeled by tool_name/status, emitted on every exit path below.
+        meter = activity.metric_meter().with_additional_attributes({"tool_name": tool_name})
+        started = time.monotonic()
+
+        def record(status: str) -> None:
+            duration = time.monotonic() - started
+            meter.with_additional_attributes({"status": status}).create_counter("tool_call_total").add(1)
+            meter.create_histogram_float("tool_call_latency_seconds", unit="s").record(duration)
+
         try:
             result = await spec.handler(arguments, ctx)
         except (asyncio.CancelledError, CancelledError):
             logger.info("ToolCall cancelled: %s", tool_name)
+            record("cancelled")
             await self._pool.execute(
                 "UPDATE tool_calls SET status = 'cancelled', reason = $2, side_effect = 'unknown', "
                 "completed_at = now() WHERE tool_call_id = $1",
@@ -99,9 +111,11 @@ class ToolCallActivity:
             return ToolCallOutput(tool_call_id=input.tool_call_id, status="cancelled")
         except Exception as exc:  # noqa: BLE001 - deliberately broad, see module docstring
             logger.exception("ToolCall error: %s", tool_name)
+            record("error")
             return await self._finish_error(input.tool_call_id, str(exc))
 
         logger.info("ToolCall done: %s -> %r", tool_name, result)
+        record("ok")
         await self._pool.execute(
             "UPDATE tool_calls SET status = 'ok', result = $2, completed_at = now() WHERE tool_call_id = $1",
             input.tool_call_id,

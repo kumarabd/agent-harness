@@ -44,6 +44,18 @@ tenantWorker:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  # -- docs/components/budget-guardrails.md, "Resolved: Metrics Export".
+  # Nested under tenantWorker (not a top-level key) deliberately — this is
+  # this tenant's own worker's exposition endpoint, not shared/global config,
+  # consistent with everything else under this key being specific to this
+  # release. Tenant identity on scraped metrics comes for free from the
+  # existing app.kubernetes.io/instance={{ .Release.Name }} pod label
+  # (templates/_helpers.tpl) that standard Prometheus Kubernetes
+  # service-discovery already captures — nothing new needed for that here.
+  metrics:
+    enabled: true
+    port: 9090
+    path: "/metrics"
 
 # -- One self-hosted Postgres instance for this tenant, backed by
 # tenantVolume below. Deliberately NOT a managed/shared Postgres service —

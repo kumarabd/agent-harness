@@ -18,9 +18,16 @@ spec:
     metadata:
       labels:
         {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "tenant-worker") | nindent 8 }}
-      {{- with .Values.tenantWorker.podAnnotations }}
+      {{- if or .Values.tenantWorker.metrics.enabled .Values.tenantWorker.podAnnotations }}
       annotations:
+        {{- if .Values.tenantWorker.metrics.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.tenantWorker.metrics.port | quote }}
+        prometheus.io/path: {{ .Values.tenantWorker.metrics.path | quote }}
+        {{- end }}
+        {{- with .Values.tenantWorker.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "agent-harness.fullname" . }}
@@ -32,6 +39,11 @@ spec:
         - name: tenant-worker
           image: "{{ .Values.tenantWorker.image.repository }}:{{ .Values.tenantWorker.image.tag }}"
           imagePullPolicy: {{ .Values.tenantWorker.image.pullPolicy }}
+          {{- if .Values.tenantWorker.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.tenantWorker.metrics.port }}
+          {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "agent-harness.fullname" . }}-config

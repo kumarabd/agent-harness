@@ -1,5 +1,5 @@
-# Component: Session Consolidation
-## (Memory Integration — Base Layer)
+# Component: Dreaming
+## (Session Consolidation — Offline Memory Integration)
 
 > STATUS: IN PROGRESS — base mechanism resolved. This is explicitly a first layer, not the full memory system; deeper design (retrieval, episode schema, cross-session linking) is intentionally deferred.
 
@@ -36,9 +36,9 @@ ALTER TABLE sessions ADD COLUMN last_consolidated_turn_seq int;
 A session is a candidate when idle past the threshold **and** `last_consolidated_turn_seq` is null or less than its latest `turn_seq`. The consolidation job advances this watermark after a successful push to the memory backend, which is what makes the next run's read incremental rather than a full replay.
 
 ### Open Questions / To Design (substantial — this is intentionally a first pass)
-- Episode schema — what an episode actually contains, its granularity (one per session, one per meaningful sub-arc within a long session, etc.).
-- Memory backend — what system episodes are pushed to, and the integration contract (push API, format, auth).
-- Retrieval — how a future turn's context-hydration step actually draws on consolidated episodes (or whether that's a separate, later capability entirely).
+- Episode schema — what an episode actually contains, its granularity (one per session, one per meaningful sub-arc within a long session, etc.). **2026-08-17: format resolved in `components/memory-slot.md` — an episode is an OKF document (`type: episode`, markdown + YAML frontmatter).** Granularity, and the exact frontmatter fields beyond OKF's mandatory `type`, still open.
+- Memory backend — what system episodes are pushed to, and the integration contract (push API, format, auth). **2026-08-17: resolved in `components/memory-slot.md` — an OKF bundle stored on the tenant's existing session-filesystem PV, using the already-resolved Postgres-backed lease mechanism for concurrent-writer safety.** No new infrastructure; this job's push step now targets that location. Exact directory layout/`index.md` conventions still open.
+- Retrieval — how a future turn's context-hydration step actually draws on consolidated episodes. **2026-08-16: now tracked as its own component, `components/memory-slot.md`** — confirmed to be a separate, later capability rather than folded in here.
 - Exact idle threshold (days) — not yet numerically decided, only established as "much longer than the coordinator's own TTL."
 - Cross-session linking / entity resolution (e.g. recognizing the same ongoing project across multiple sessions) — not addressed at all yet.
 - Interaction with session filesystem archival (`components/session-filesystem.md`'s open question: if raw files are ever archived, context-hydration needs to notice and rehydrate) — this component is the natural gate for that, but the archival mechanism itself remains undesigned.
@@ -47,3 +47,6 @@ A session is a candidate when idle past the threshold **and** `last_consolidated
 ### Notes Log
 - 2026-08-07: Introduced as a scaffold while resolving subagent filesystem isolation — parked in `future-work.md` §3 pending a real design pass.
 - 2026-08-07: Promoted to a full component doc. Resolved the base mechanism: daily per-tenant Temporal Schedule, incremental consolidation via a `last_consolidated_turn_seq` watermark on `sessions`, output framed explicitly as "episodes" pushed to an external memory backend. Deliberately kept episode schema, memory backend choice, and retrieval out of scope for this pass — this is the base layer of memory integration, not the full system.
+- 2026-08-16: Retrieval split out into its own component doc, `components/memory-slot.md` — this doc stays scoped to the producer/consolidation side only.
+- 2026-08-17: `components/memory-slot.md` resolved episode schema (format) and memory backend as OKF documents in an OKF bundle on the tenant's existing session-filesystem PV — this job's output target is now concrete, though exact frontmatter fields and directory conventions remain open there.
+- 2026-08-17: Renamed `components/session-consolidation.md` → `components/dreaming.md` at the user's direction, "Session Consolidation" kept as the technical subtitle. The name is a deliberate pointer to the human sleep/memory-consolidation analogy — offline, periodic, distilling raw experience into durable memory without the live system being aware it's happening — which the user wants to dig into in depth (how dreaming actually works biologically, and what of that process is or isn't a good fit here) before reworking this doc's own content around it. This pass is the rename only; the base mechanism above is unchanged and not yet rewritten in the new framing.

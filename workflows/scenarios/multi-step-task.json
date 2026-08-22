@@ -1,0 +1,34 @@
+{
+  "message": {
+    "role": "user",
+    "content": "extract the number from the data file, double it, and report the result"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "First, let me write the raw data file.",
+      "tool_calls": [
+        { "name": "shell_exec", "arguments": { "command": "mkdir -p work && echo 'raw value: 21' > work/data.txt" }, "is_subagent": false }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 20 }
+    },
+    {
+      "content": "Now extracting the number from it.",
+      "tool_calls": [
+        { "name": "shell_exec", "arguments": { "command": "grep -o '[0-9]\\+' work/data.txt > work/number.txt && cat work/number.txt" }, "is_subagent": false }
+      ],
+      "usage": { "input_tokens": 110, "output_tokens": 20 }
+    },
+    {
+      "content": "Doubling it.",
+      "tool_calls": [
+        { "name": "shell_exec", "arguments": { "command": "echo $(( $(cat work/number.txt) * 2 )) > work/result.txt && cat work/result.txt" }, "is_subagent": false }
+      ],
+      "usage": { "input_tokens": 120, "output_tokens": 20 }
+    },
+    {
+      "content": "Done — the extracted value was 21, doubled to 42.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 130, "output_tokens": 20 }
+    }
+  ]
+}

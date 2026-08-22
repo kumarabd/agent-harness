@@ -39,7 +39,7 @@ CREATE TABLE sessions (
   branch          text,
   created_at      timestamptz NOT NULL DEFAULT now(),
   last_active_at  timestamptz NOT NULL DEFAULT now(),  -- updated by persist activity per turn
-  last_consolidated_turn_seq int  -- watermark for incremental session consolidation (components/session-consolidation.md)
+  last_consolidated_turn_seq int  -- watermark for incremental session consolidation (components/dreaming.md)
 );
 
 -- Every workflow-shaped execution unit: top-level turns AND subagent turns, since
@@ -184,7 +184,7 @@ Not a new design decision — mostly making explicit what earlier docs already i
 
 | Table | Written by | Read by |
 |---|---|---|
-| `sessions` | **Gateway** — upserts the row on first contact for a session key (creates if absent). **Persist activity** — updates `last_active_at` on every turn completion. **Session consolidation job** — advances `last_consolidated_turn_seq` after a successful episode push (`components/session-consolidation.md`). | Turn workflow's context-hydration activity (session metadata: model, system_prompt, cwd/repo/branch). Consolidation job (scans for idle, not-yet-consolidated sessions). |
+| `sessions` | **Gateway** — upserts the row on first contact for a session key (creates if absent). **Persist activity** — updates `last_active_at` on every turn completion. **Session consolidation job** — advances `last_consolidated_turn_seq` after a successful episode push (`components/dreaming.md`). | Turn workflow's context-hydration activity (session metadata: model, system_prompt, cwd/repo/branch). Consolidation job (scans for idle, not-yet-consolidated sessions). |
 | `turns` | **Turn workflow**, via its own activities — inserts the row (`status='running'`) when the turn starts; the **persist activity** updates it to `completed`/`cancelled`/`failed` at the end. | **Session coordinator** — the one Postgres read it performs, `SELECT MAX(turn_seq)+1 ... WHERE parent_id=$session_key AND parent_type='session'`, to recompute the next turn_seq on startup (see `components/session-coordinator.md`). Turn workflow's context-hydration activity (recent turn history). |
 | `messages` | **Revised 2026-08-14 — incremental, not end-of-turn-only.** A start-of-turn activity inserts the inbound message (sourced from the coordinator's signal payload) *before* the first `ModelCall`, per the reference-passing contract (`components/temporal-workflow.md`). Each `ModelCall` inserts its own assistant-message row as part of producing its reference-only output. `Persist` now only covers whatever's left at turn end (e.g. tool/observation messages folded in after cancellation). | `ModelCall` (reads prior turn history to build context — this *is* the context-hydration step now, not a separate activity). Future: consolidation job (`future-work.md` §3). |
 | `tool_calls` | **Revised 2026-08-14 — written by `ModelCall`, not `Persist`.** `ModelCall` mints each `tool_call_id` and writes the row (including `arguments`) as part of producing its response, since it's the one holding the content that row needs. The `ToolCall` activity updates the same row with `status`/`result`/`reason`/`side_effect` once it completes (or is cancelled) — two writers to one row over its lifecycle, not two separate rows. | `ModelCall` (reads `tool_call_id`s back when relevant — e.g. subagent merge-back). Future: consolidation job. |

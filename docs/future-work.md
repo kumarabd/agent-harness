@@ -39,16 +39,16 @@ The tension:
 ---
 
 ## 3. Session Consolidation & Memory Extraction
-**Status: BASE MECHANISM RESOLVED — promoted to `components/session-consolidation.md`.** Framed explicitly as (at least part of) the harness's memory integration, not a housekeeping mechanism: a daily, per-tenant Temporal Schedule job that finds idle sessions, compacts/summarizes them into "episodes," and pushes those episodes to a memory backend.
+**Status: BASE MECHANISM RESOLVED — promoted to `components/dreaming.md`.** Framed explicitly as (at least part of) the harness's memory integration, not a housekeeping mechanism: a daily, per-tenant Temporal Schedule job that finds idle sessions, compacts/summarizes them into "episodes," and pushes those episodes to a memory backend.
 
 **Deliberately still open, kept here as forward-pointers rather than duplicated in the component doc:**
 - Episode schema (what an episode actually contains, its granularity).
 - Memory backend choice and integration contract.
-- Retrieval — how a future turn's context-hydration actually draws on consolidated episodes.
+- Retrieval — how a future turn's context-hydration actually draws on consolidated episodes. **2026-08-16: now tracked as its own component, `components/memory-slot.md`** — the runtime/consumer counterpart to this section's producer-side mechanism.
 - Cross-session linking / entity resolution.
 - Exact idle-threshold value, and interaction with any future raw-session archival (still undesigned, and deliberately decoupled from consolidation itself — see the component doc).
 
-**To revisit:** each item above, as its own follow-up design pass — see `components/session-consolidation.md`'s own open-questions list for the full detail.
+**To revisit:** each item above, as its own follow-up design pass — see `components/dreaming.md`'s own open-questions list for the full detail.
 
 ---
 
@@ -60,6 +60,8 @@ Surfaced while closing out the retry-policy work (`components/activities-outboun
 **Working hypothesis, based on how other harnesses handle this:** in-process harnesses (Claude Code, Codex, Cursor) use permission-gating *before execution* — an allow/deny policy (and often a human-in-the-loop prompt) checked against the proposed command before it ever runs — not anything to do with retries after the fact. That's likely the right pattern to adopt here too, but it interacts with things already decided (cooperative cancellation, activity boundaries, the turn workflow's loop) in ways not yet worked out — e.g. does a gating check happen inside the tool-call activity, or as a separate step before the activity is even started; does it ever need a human-approval round-trip mid-turn (which would look like a new kind of interrupt/signal, not covered by the existing interrupt design).
 
 **To revisit:** design as its own topic once the core execution path is settled — likely needs its own section in `components/activities-outbound-delivery.md` or a dedicated component doc.
+
+**2026-08-16: a dedicated component doc now exists — `components/tool-registry.md`** — named as the natural home for this, since permission/destructive-command policy is inherently per-tool data. Not yet resolved there either; this section's working hypothesis and open interactions (human-in-the-loop mid-turn approval, activity-boundary placement) still apply verbatim.
 
 ---
 

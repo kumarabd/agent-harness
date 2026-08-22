@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from temporalio import activity
 
@@ -64,7 +65,15 @@ class ModelCallActivity:
                 )
                 system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
                 conversation = await llm.build_conversation(conn, input.turn_id, system_prompt)
+                # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
+                # real provider round-trip time only; the fixture path above isn't
+                # real work and would just add noise to the histogram.
+                histogram = activity.metric_meter().create_histogram_float(
+                    "model_call_latency_seconds", unit="s"
+                )
+                started = time.monotonic()
                 real = await llm.call_model(self._openai_client, conversation)
+                histogram.record(time.monotonic() - started)
                 content, raw_tool_calls, usage = real.content, real.raw_tool_calls, real.usage
 
             logger.info(

@@ -27,11 +27,16 @@
 //	TEMPORAL_TASK_QUEUE Task queue name, shared across every namespace this
 //	                    process serves. Default: agent-loop. Must match each
 //	                    tenant's own tenant-worker fleet's TEMPORAL_TASK_QUEUE.
+//	METRICS_BIND_ADDRESS Host:port the Prometheus exposition endpoint listens
+//	                    on. Default: 0.0.0.0:9090. See
+//	                    docs/components/budget-guardrails.md, "Resolved:
+//	                    Metrics Export" — plain scrape, no ServiceMonitor.
 package main
 
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -39,7 +44,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/uber-go/tally/v4"
+	tallyprom "github.com/uber-go/tally/v4/prometheus"
 	"go.temporal.io/sdk/client"
+	contribtally "go.temporal.io/sdk/contrib/tally"
 	"go.temporal.io/sdk/worker"
 
 	wf "agent-harness/workflows/internal/workflow"
@@ -71,11 +79,40 @@ func namespaces() []string {
 	return []string{envOrDefault("TEMPORAL_NAMESPACE", client.DefaultNamespace)}
 }
 
+// newMetricsHandler builds a Prometheus-backed client.MetricsHandler and
+// starts the HTTP listener serving /metrics — created once per process, not
+// once per namespace, since every namespace's Client+Worker pair shares one
+// exposition endpoint (docs/components/budget-guardrails.md, "Resolved:
+// Metrics Export"). Per-namespace attribution happens via a "namespace" tag
+// applied where workflow code actually calls workflow.GetMetricsHandler(ctx)
+// (workflows/internal/workflow/turn.go), not here — this handler itself is
+// namespace-agnostic.
+func newMetricsHandler(bindAddress string) client.MetricsHandler {
+	reporter := tallyprom.NewReporter(tallyprom.Options{})
+	scope, _ := tally.NewRootScope(tally.ScopeOptions{
+		CachedReporter:  reporter,
+		SanitizeOptions: &contribtally.PrometheusSanitizeOptions,
+		Separator:       "_",
+	}, time.Second)
+	scope = contribtally.NewPrometheusNamingScope(scope)
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", reporter.HTTPHandler())
+	go func() {
+		if err := http.ListenAndServe(bindAddress, mux); err != nil { //nolint:gosec // internal-only exposition endpoint
+			log.Printf("metrics HTTP server stopped: %v", err)
+		}
+	}()
+	log.Printf("metrics exposition listening on %q", bindAddress)
+
+	return contribtally.NewMetricsHandler(scope)
+}
+
 // runForNamespace starts one Client+Worker pair for a single tenant namespace
 // and blocks until it stops — cleanly, once ctx is cancelled (returns nil),
 // or with an error (dial failure, or Run() itself failing).
-func runForNamespace(ctx context.Context, address, namespace, taskQueue string) error {
-	c, err := client.Dial(client.Options{HostPort: address, Namespace: namespace})
+func runForNamespace(ctx context.Context, address, namespace, taskQueue string, metricsHandler client.MetricsHandler) error {
+	c, err := client.Dial(client.Options{HostPort: address, Namespace: namespace, MetricsHandler: metricsHandler})
 	if err != nil {
 		return err
 	}
@@ -119,14 +156,14 @@ func runForNamespace(ctx context.Context, address, namespace, taskQueue string) 
 // makes "shared pool" safe operationally, not just content-isolation-safe
 // (see docs/components/multi-tenancy.md's reference-passing contract for the
 // latter).
-func retryForNamespace(ctx context.Context, address, namespace, taskQueue string) {
+func retryForNamespace(ctx context.Context, address, namespace, taskQueue string, metricsHandler client.MetricsHandler) {
 	const (
 		initialBackoff = time.Second
 		maxBackoff     = 30 * time.Second
 	)
 	backoff := initialBackoff
 	for ctx.Err() == nil {
-		err := runForNamespace(ctx, address, namespace, taskQueue)
+		err := runForNamespace(ctx, address, namespace, taskQueue, metricsHandler)
 		if err == nil {
 			return // ctx was cancelled — clean shutdown, nothing to retry
 		}
@@ -146,6 +183,7 @@ func main() {
 	address := envOrDefault("TEMPORAL_ADDRESS", client.DefaultHostPort)
 	taskQueue := envOrDefault("TEMPORAL_TASK_QUEUE", "agent-loop")
 	nss := namespaces()
+	metricsHandler := newMetricsHandler(envOrDefault("METRICS_BIND_ADDRESS", "0.0.0.0:9090"))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -155,7 +193,7 @@ func main() {
 		wg.Add(1)
 		go func(namespace string) {
 			defer wg.Done()
-			retryForNamespace(ctx, address, namespace, taskQueue)
+			retryForNamespace(ctx, address, namespace, taskQueue, metricsHandler)
 		}(ns)
 	}
 

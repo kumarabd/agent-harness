@@ -43,6 +43,12 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	logger := workflow.GetLogger(ctx)
 	logger.Info("turn workflow started", "turn_id", input.TurnID, "parent_type", input.ParentType)
 
+	// docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
+	// namespace-tagged once here and reused, since loop-worker is shared
+	// across every tenant's namespace from one process; an untagged metric
+	// would collapse every tenant's turns into one undifferentiated number.
+	metrics := workflow.GetMetricsHandler(ctx).WithTags(map[string]string{"namespace": workflow.GetInfo(ctx).Namespace})
+
 	iterations := 0
 	retries := 0
 	cumulativeTokens := 0
@@ -124,6 +130,8 @@ loop:
 		}
 		contextSeq++
 		cumulativeTokens += mcOut.Usage.InputTokens + mcOut.Usage.OutputTokens
+		metrics.WithTags(map[string]string{"direction": "input"}).Counter("model_call_tokens_total").Inc(int64(mcOut.Usage.InputTokens))
+		metrics.WithTags(map[string]string{"direction": "output"}).Counter("model_call_tokens_total").Inc(int64(mcOut.Usage.OutputTokens))
 
 		if !mcOut.HasToolCalls {
 			stopReason = "no_tool_calls"
@@ -230,6 +238,10 @@ loop:
 			}
 		}
 	}
+
+	metrics.Counter("turn_iterations_total").Inc(int64(iterations))
+	metrics.Counter("turn_retries_total").Inc(int64(retries))
+	metrics.WithTags(map[string]string{"stop_reason": stopReason}).Counter("turn_stop_reason_total").Inc(1)
 
 	// --- Egress: every turn (top-level or subagent) persists its own
 	// turns.status — components/state-layer.md's read/write-split table

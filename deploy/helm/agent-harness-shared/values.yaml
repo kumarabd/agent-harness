@@ -49,3 +49,12 @@ podAnnotations: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# -- docs/components/budget-guardrails.md, "Resolved: Metrics Export". Flat/
+# top-level, matching this chart's own existing convention (image/resources/
+# podAnnotations are all top-level too — there's only one workload in this
+# chart, unlike agent-harness-tenant's per-component nesting).
+metrics:
+  enabled: true
+  port: 9090
+  path: "/metrics"
