@@ -19,13 +19,14 @@ tool_call_id (tool_calls.tool_call_id is reused verbatim as OpenAI's
 tool_call_id — any string works, no second ID scheme needed).
 
 TOOLS_SCHEMA now also includes `memory_search`/`memory_expand`
-(docs/components/memory-slot.md) alongside `shell_exec` — real,
+(docs/components/memory-slot.md) and `search_tools`/`call_tool`
+(docs/components/tool-registry.md) alongside `shell_exec` — real,
 model-offerable tools. tools.TOOL_REGISTRY's `search`/`slow_tool`/
 `noop_tool` entries are still fixture-only stubs (docs/components/
 activities-outbound-delivery.md's demo tools) and must never be offered to
 a real model. Not read dynamically off TOOL_REGISTRY, which has no
 LLM-schema metadata yet — a generic schema-registry abstraction for exactly
-three tools would be premature; add future real tools here by hand alongside
+five tools would be premature; add future real tools here by hand alongside
 their TOOL_REGISTRY entry in tools.py.
 
 **Session-start memory retrieval** (docs/components/memory-slot.md,
@@ -63,15 +64,24 @@ from dataclasses import dataclass, field
 
 from openai import AsyncOpenAI
 
-from . import agent_brain
+from . import agent_brain, ids, lcm, model_registry
 from .types import Usage
 
 logger = logging.getLogger(__name__)
 
+# docs/components/model-registry.md, "Resolved: Selection Mechanism" — not a
+# judgment-call nudge (contrast the reverted search_tools-before-shell_exec
+# system-prompt rule): the model has no structural way to know this protocol
+# exists at all without being told, unlike that case where the necessary
+# information was already available another way.
+_NEXT_STEP_HINT_TOOL_NAME = "declare_next_step_hint"
+
 DEFAULT_SYSTEM_PROMPT = (
     "You are an autonomous coding assistant. You have access to a shell_exec "
     "tool to run shell commands in your working directory. Use it when needed "
-    "to complete the user's request, then summarize the result in plain text."
+    "to complete the user's request, then summarize the result in plain text. "
+    f"Every response, also call {_NEXT_STEP_HINT_TOOL_NAME} alongside anything "
+    "else you call, declaring what the next step needs."
 )
 
 TOOLS_SCHEMA = [
@@ -133,6 +143,74 @@ TOOLS_SCHEMA = [
                     "limit": {"type": "number", "description": "Max episodes to return (default 20, max 50)."},
                 },
                 "required": ["node_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_tools",
+            # Description mirrors mcp-hub's own real search_tools tool
+            # description, plus a note about the shell-hub fan-out (this
+            # project's own addition, not mcp-hub's).
+            "description": (
+                "Semantically search the tools available across all registered MCP "
+                "backends, plus locally-available shell/CLI capabilities. Returns "
+                "candidates with a server, tool name, description, and input schema. "
+                "Use call_tool to invoke an mcp-hub result (server != \"shell\"), or "
+                "shell_exec directly to invoke a shell result (server == \"shell\")."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural language description of what you need."},
+                    "top_k": {"type": "number", "description": "Max results to return (default 5)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "call_tool",
+            "description": "Invoke a tool discovered via search_tools, on the backend that owns it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "The server field from a search_tools result."},
+                    "tool": {"type": "string", "description": "The tool field from a search_tools result."},
+                    "arguments": {
+                        "type": "object",
+                        "description": "Arguments matching that result's input_schema.",
+                    },
+                },
+                "required": ["server", "tool", "arguments"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": _NEXT_STEP_HINT_TOOL_NAME,
+            # docs/components/model-registry.md, "Resolved: Selection
+            # Mechanism" — included alongside whatever other tool_calls a
+            # response already has (OpenAI's function-calling API supports
+            # multiple tool_calls per response), so this rides on the same
+            # API call rather than costing a separate round trip.
+            "description": (
+                "Always include this alongside your response, every step, declaring what kind "
+                "of model the NEXT step needs. tier=fast for simple/mechanical next steps "
+                "(e.g. running a command and reporting its output), tier=expert for next steps "
+                "needing careful multi-step reasoning or judgment, tier=medium otherwise."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "modality": {"type": "string", "description": "Always \"language\" for now."},
+                    "tier": {"type": "string", "enum": ["fast", "medium", "expert"]},
+                },
+                "required": ["modality", "tier"],
             },
         },
     },
@@ -200,92 +278,71 @@ class RealModelResult:
     content: str
     raw_tool_calls: list[dict] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
+    # docs/components/model-registry.md — this step's self-declared hint for
+    # the next step, defaulted to model_registry.default_hint() if the model
+    # didn't include declare_next_step_hint in its response (real models
+    # aren't guaranteed to comply with an instruction every single call —
+    # degrade to the bootstrap default rather than erroring).
+    next_hint_modality: str = "language"
+    next_hint_tier: str = "medium"
 
 
-async def build_conversation(conn, turn_id: str, system_prompt: str) -> list[dict]:
-    """Reconstructs this turn's conversation so far, OpenAI-shaped. Scoped to
-    this turn only (messages.parent_id = turn_id), matching exactly how the
-    fixture path already scopes context (_test_scripted_responses WHERE
-    turn_id = ...) — cross-turn session memory is a separate, larger gap
-    (future-work.md's session-consolidation item), not this pass.
+async def build_conversation(conn, turn_id: str, system_prompt: str) -> tuple[list[dict], int]:
+    """Session-wide context assembly (docs/components/context-slot.md) —
+    delegates to lcm.assemble, which reads every top-level turn under this
+    turn's session, not just this one (the fix that doc's "Resolved: Scope"
+    section calls for — cross-turn session memory used to be a real gap,
+    now closed). This function's own remaining job is narrower: detect
+    session-start (still a turn_id-scoped question — "is this the first
+    ModelCall of the first top-level turn" — genuinely different from lcm's
+    assembly concern, so it stays here) and splice in the memory-slot
+    retrieval block lcm.assemble has no reason to know about.
+
+    Returns (conversation, context_tokens) — context_tokens is threaded
+    back through ModelCallOutput to the workflow for the compression-gate
+    check (turn.go can't accumulate this itself across separate
+    turn-workflow executions — see lcm.assemble's own docstring).
     """
-    conversation: list[dict] = [{"role": "system", "content": system_prompt}]
-
-    messages = await conn.fetch(
-        "SELECT message_id, role, content FROM messages WHERE parent_id = $1 ORDER BY seq",
-        turn_id,
-    )
-
-    # docs/components/memory-slot.md, "Resolved: Two Retrieval Triggers" —
-    # session-start is unconditional, fires once, on this turn's first
-    # ModelCall only (message count == 1: just InsertMessage's own
-    # start-of-turn row, no assistant response yet — see module docstring).
     turn_row = await conn.fetchrow("SELECT parent_type, turn_seq FROM turns WHERE turn_id = $1", turn_id)
-    is_session_start = (
-        turn_row is not None
-        and turn_row["parent_type"] == "session"
-        and turn_row["turn_seq"] == 1
-        and len(messages) == 1
-        and messages[0]["role"] == "user"
-    )
-    if is_session_start:
-        memory_block = await _session_start_memory_block(turn_id, messages[0]["content"])
-        if memory_block is not None:
-            conversation.append(memory_block)
+    session_key = ids.session_key_of(turn_id)
 
-    for msg in messages:
-        if msg["role"] != "assistant":
-            conversation.append({"role": msg["role"], "content": msg["content"]})
-            continue
+    conversation, context_tokens = await lcm.assemble(conn, session_key, system_prompt)
 
-        tool_call_rows = await conn.fetch(
-            "SELECT tool_call_id, tool_name, arguments, status, result "
-            "FROM tool_calls WHERE message_id = $1 ORDER BY started_at",
-            msg["message_id"],
+    if turn_row is not None and turn_row["parent_type"] == "session" and turn_row["turn_seq"] == 1:
+        session_messages = await conn.fetch(
+            "SELECT role, content FROM messages WHERE parent_id = $1 ORDER BY seq", turn_id
         )
-        if not tool_call_rows:
-            conversation.append({"role": "assistant", "content": msg["content"]})
-            continue
+        # docs/components/memory-slot.md, "Resolved: Two Retrieval Triggers"
+        # — session-start is unconditional, fires once, on this turn's first
+        # ModelCall only (only InsertMessage's own start-of-turn row exists
+        # yet, no assistant response). Deliberately a direct message-count
+        # check, not inferred from len(conversation) — lcm.assemble's output
+        # length isn't a reliable proxy (it could vary with future changes
+        # to what gets prepended, e.g. summary rows).
+        is_session_start = len(session_messages) == 1 and session_messages[0]["role"] == "user"
+        if is_session_start:
+            first_message = session_messages[0]
+            memory_block = await _session_start_memory_block(turn_id, first_message["content"])
+            if memory_block is not None:
+                # Placed right after the system prompt — before the summary
+                # DAG / verbatim window lcm.assemble already appended,
+                # matching memory-slot.md's "Resolved: Staleness" placement
+                # (retrieved background before live session content).
+                conversation.insert(1, memory_block)
+                context_tokens += lcm.estimate_tokens(memory_block["content"])
 
-        conversation.append(
-            {
-                "role": "assistant",
-                "content": msg["content"] or None,
-                "tool_calls": [
-                    {
-                        "id": row["tool_call_id"],
-                        "type": "function",
-                        "function": {"name": row["tool_name"], "arguments": row["arguments"]},
-                    }
-                    for row in tool_call_rows
-                ],
-            }
-        )
-        for row in tool_call_rows:
-            if row["status"] == "ok":
-                result_content = row["result"] or "{}"
-            elif row["status"] == "cancelled":
-                result_content = json.dumps({"error": "cancelled: interrupted by a new message"})
-            else:
-                # "error" (real failure) or the unexpected "pending" case (the
-                # workflow always waits for a step's tool calls to fully
-                # resolve before looping back to ModelCall, so this shouldn't
-                # occur in practice - treated as a genuine error observation
-                # rather than built out as a real, expected state).
-                result_content = row["result"] or json.dumps({"error": f"tool call did not complete (status={row['status']})"})
-            conversation.append(
-                {"role": "tool", "tool_call_id": row["tool_call_id"], "content": result_content}
-            )
-
-    return conversation
+    return conversation, context_tokens
 
 
-async def call_model(client: AsyncOpenAI, conversation: list[dict]) -> RealModelResult:
-    model = os.environ.get("PIONEER_MODEL")
+async def call_model(client: AsyncOpenAI, conversation: list[dict], model: str) -> RealModelResult:
+    """model is resolved by the caller (model_call.py, via model_registry.py)
+    from this step's hint — not read from PIONEER_MODEL directly here
+    anymore, docs/components/model-registry.md's whole point being that the
+    model isn't fixed for the process's lifetime."""
     if not model:
         raise RuntimeError(
-            "PIONEER_MODEL is not set - Pioneer's model catalog isn't known ahead of time, "
-            "so there's no safe default to guess. Set it to a real model name Pioneer serves."
+            "No model resolved for this step - model_registry.py's LANGUAGE_<TIER>_MODEL/"
+            "PIONEER_MODEL are both unset. Set at least PIONEER_MODEL."
         )
     max_tokens = int(os.environ.get("PIONEER_MAX_TOKENS", "4096"))
 
@@ -297,14 +354,35 @@ async def call_model(client: AsyncOpenAI, conversation: list[dict]) -> RealModel
     )
     message = response.choices[0].message
 
-    raw_tool_calls = [
-        {"name": tc.function.name, "arguments": json.loads(tc.function.arguments), "is_subagent": False}
-        for tc in (message.tool_calls or [])
-    ]
+    raw_tool_calls = []
+    next_hint_modality, next_hint_tier = model_registry.default_hint()
+    for tc in message.tool_calls or []:
+        if tc.function.name == _NEXT_STEP_HINT_TOOL_NAME:
+            # Not a real, dispatchable tool call — pulled out here so
+            # tool_call.py/turn.go never see it as one. Malformed hint
+            # arguments degrade to the bootstrap default rather than
+            # failing the whole response.
+            try:
+                hint_args = json.loads(tc.function.arguments)
+                next_hint_modality = hint_args.get("modality", next_hint_modality)
+                next_hint_tier = hint_args.get("tier", next_hint_tier)
+            except (json.JSONDecodeError, AttributeError):
+                logger.warning("call_model: malformed %s arguments, using default hint", _NEXT_STEP_HINT_TOOL_NAME)
+            continue
+        raw_tool_calls.append(
+            {"name": tc.function.name, "arguments": json.loads(tc.function.arguments), "is_subagent": False}
+        )
+
     usage = Usage(
         input_tokens=response.usage.prompt_tokens if response.usage else 0,
         output_tokens=response.usage.completion_tokens if response.usage else 0,
     )
     # messages.content is NOT NULL - the API can return content=None when the
     # response is tool-calls-only.
-    return RealModelResult(content=message.content or "", raw_tool_calls=raw_tool_calls, usage=usage)
+    return RealModelResult(
+        content=message.content or "",
+        raw_tool_calls=raw_tool_calls,
+        usage=usage,
+        next_hint_modality=next_hint_modality,
+        next_hint_tier=next_hint_tier,
+    )

@@ -30,6 +30,14 @@ on it staying a stub). No tier of its own: both are quick request/response
 network calls with no cancellable subprocess or session-filesystem lease to
 hold, so they fall back to tool_tiers.go's defaultToolTiming on the Go side
 (no entry needed there) and don't call activity.heartbeat() here.
+
+`search_tools`/`call_tool` (docs/components/tool-registry.md, "Resolved:
+mcp-hub-Mediated Integration Mechanism") are the mcp-hub-mediated tier's own
+tools, named to match mcp-hub's real MCP tool names directly, same reasoning
+as memory_search/memory_expand above — same no-tier-of-its-own treatment.
+search_tools additionally fans out to shell_hub.py's local, in-process
+discovery ("Resolved: Native-Tool Discovery") and returns the combined
+result.
 """
 
 from __future__ import annotations
@@ -44,7 +52,7 @@ import asyncpg
 from temporalio import activity
 from temporalio.exceptions import CancelledError
 
-from . import agent_brain, leases
+from . import agent_brain, leases, mcp_hub, shell_hub
 
 _SESSION_ROOT_ENV = "SESSION_ROOT"
 # Local-dev fallback; real deployments set SESSION_ROOT to match the Helm
@@ -221,6 +229,42 @@ async def memory_expand(arguments: dict, ctx: ToolContext) -> dict:
     return await agent_brain.call_tool("memory_expand", arguments)
 
 
+async def search_tools(arguments: dict, ctx: ToolContext) -> dict:
+    """docs/components/tool-registry.md, "Resolved: mcp-hub-Mediated
+    Integration Mechanism" + "Resolved: Native-Tool Discovery" — fans the
+    query out to mcp-hub (real, unchanged) and shell-hub (local, in-process)
+    and returns one combined list, so discovery is genuinely central from
+    the model's perspective in one tool call. Gracefully returns only
+    whichever source is actually configured/available rather than erroring
+    (mcp_hub.McpHubNotConfiguredError mirrors agent_brain's own
+    not-configured shape) — a deployment with no mcp-hub or no shell-hub
+    catalog still works, just with fewer discoverable tools."""
+    query = arguments.get("query", "")
+    top_k = arguments.get("top_k", 5)
+
+    try:
+        raw = await mcp_hub.call_tool("search_tools", {"query": query, "top_k": top_k})
+    except mcp_hub.McpHubNotConfiguredError:
+        raw = []
+    # FastMCP (mcp-hub's own server framework) wraps a tool's non-object
+    # return value in {"result": ...} — MCP's structured_content must be a
+    # JSON object, and search_tools' real return is a bare list — confirmed
+    # by a real call against the live cluster, not assumed from the spec
+    # text alone.
+    mcp_hub_results = raw["result"] if isinstance(raw, dict) and "result" in raw else raw
+    shell_hub_results = await shell_hub.search(query, top_k)
+
+    return {"results": list(mcp_hub_results) + shell_hub_results}
+
+
+async def call_tool(arguments: dict, ctx: ToolContext) -> dict:
+    """Straight proxy to mcp-hub's own call_tool — only mcp-hub-sourced
+    search_tools results are invoked this way; a shell-hub-sourced result is
+    invoked via shell_exec directly instead (see shell_hub.py's module
+    docstring)."""
+    return await mcp_hub.call_tool("call_tool", arguments)
+
+
 async def _demo_echo_stub(arguments: dict, ctx: ToolContext) -> dict:
     """Reproduces the pre-real-tool-registry stub's exact behavior: a fixed
     ~4s simulated delay with heartbeats (real cancellation demonstrable), no
@@ -260,6 +304,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "memory_expand": ToolSpec(
         handler=memory_expand,
+        heartbeat_interval_seconds=5.0,
+        heartbeat_timeout_seconds=15.0,
+        start_to_close_timeout_seconds=30.0,
+    ),
+    "search_tools": ToolSpec(
+        handler=search_tools,
+        heartbeat_interval_seconds=5.0,
+        heartbeat_timeout_seconds=15.0,
+        start_to_close_timeout_seconds=30.0,
+    ),
+    "call_tool": ToolSpec(
+        handler=call_tool,
         heartbeat_interval_seconds=5.0,
         heartbeat_timeout_seconds=15.0,
         start_to_close_timeout_seconds=30.0,

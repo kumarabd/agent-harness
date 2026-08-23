@@ -42,6 +42,15 @@ deploy/docker/tenant-worker.Dockerfile and deploy/helm/agent-harness-tenant:
                          WriteMemory all degrade to a no-op (or, for a
                          mid-session tool call, a clear error observation)
                          rather than failing the turn.
+    MCP_HUB_URL          docs/components/tool-registry.md's mcp-hub-mediated
+                         tool tier (mcp_hub.py, tools.py's search_tools/
+                         call_tool). Not required — search_tools degrades to
+                         shell-hub-only results if unset.
+    EMBEDDING_BASE_URL/EMBEDDING_API_KEY/EMBEDDING_MODEL/EMBEDDING_DIM
+                         shell-hub's own embedding provider (shell_hub.py) —
+                         reuses mcp-hub's own LiteLLM config, not a separate
+                         credential. Not required — shell_hub.search()
+                         degrades to returning no results if unset.
 
 Usage:
     python -m activities.tenant_worker
@@ -58,9 +67,11 @@ from temporalio.client import Client
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
-from .compress_context import compress_context
+from . import shell_hub
+from .compress_context import CompressContextActivity
 from .db import create_pool
 from .deliver import DeliverActivity
+from .get_max_turn_seq import GetMaxTurnSeqActivity
 from .insert_message import InsertMessageActivity
 from .model_call import ModelCallActivity
 from .persist import PersistActivity
@@ -76,6 +87,11 @@ async def main() -> None:
     task_queue = os.environ.get("TEMPORAL_TASK_QUEUE", "agent-loop")
 
     pool = await create_pool()
+    # docs/components/tool-registry.md, "Resolved: Native-Tool Discovery" —
+    # builds shell_hub's in-process zvec index once at startup, same
+    # once-not-per-call rationale as the Postgres pool/OpenAI client here.
+    # No-op if shell_hub.CATALOG is empty or EMBEDDING_BASE_URL isn't set.
+    await shell_hub.init()
     # Constructed once and reused, same rationale as the Postgres pool above —
     # not created per-call, not global state, injected via ModelCallActivity's
     # constructor. AsyncOpenAI() validates api_key eagerly at construction
@@ -116,10 +132,11 @@ async def main() -> None:
             ModelCallActivity(pool, openai_client).__call__,
             ToolCallActivity(pool).__call__,
             InsertMessageActivity(pool).__call__,
+            GetMaxTurnSeqActivity(pool).__call__,
             PersistActivity(pool).__call__,
             DeliverActivity(pool).__call__,
             WriteMemoryActivity(pool).__call__,
-            compress_context,
+            CompressContextActivity(pool, openai_client).__call__,
         ],
     )
     logging.getLogger(__name__).info(

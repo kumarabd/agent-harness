@@ -37,6 +37,16 @@ class Message:
 class ModelCallInput:
     turn_id: str = ""
     context_seq: int = 0
+    # docs/components/model-registry.md, "Resolved: Selection Mechanism" —
+    # the PREVIOUS step's self-declared hint for THIS step, threaded through
+    # opaquely by the workflow (it never interprets these, just passes
+    # ModelCallOutput's hint fields into the next ModelCallInput). Empty
+    # string on the very first call of a turn — model_registry.default_hint()
+    # is what actually supplies {language, medium} in that case, not a
+    # literal default here, so the workflow doesn't need to know the
+    # registry's own bootstrap value.
+    hint_modality: str = ""
+    hint_tier: str = ""
 
 
 @dataclass
@@ -55,6 +65,21 @@ class ModelCallOutput:
     has_tool_calls: bool = False
     tool_calls: list[ToolCallRef] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
+    # docs/components/context-slot.md — the assembled context's estimated
+    # size (lcm.py's estimate_tokens), computed fresh in Python each call
+    # since the Go workflow can't accumulate this itself across separate
+    # turn-workflow executions (see lcm.assemble's own docstring).
+    context_tokens: int = 0
+    # docs/components/context-slot.md, "Responsibilities" — the model
+    # actually used this call's real context window (model_registry.py),
+    # so the workflow can size the compression threshold as a fraction of
+    # it instead of a fixed constant.
+    context_window: int = 0
+    # docs/components/model-registry.md, "Resolved: Selection Mechanism" —
+    # this step's self-declared hint for the NEXT step. Threaded back into
+    # the next ModelCallInput unmodified by the workflow.
+    next_hint_modality: str = "language"
+    next_hint_tier: str = "medium"
 
 
 @dataclass

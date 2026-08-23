@@ -31,7 +31,22 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 	logger := workflow.GetLogger(ctx)
 	logger.Info("coordinator started", "session_key", input.SessionKey)
 
-	turnSeq := 0 // real design recomputes MAX(turn_seq)+1 from Postgres on startup; stubbed to 0 here — no Postgres in this slice
+	// Seed turnSeq from the real Postgres-backed maximum rather than always
+	// starting at 0 — a fresh CoordinatorWorkflow execution (workflow ID =
+	// session key, so this runs every time a prior execution idled out and a
+	// later message starts a new one) otherwise reminted turn:1 on every
+	// restart, colliding with turns the session already had. The Coordinator
+	// can't query Postgres directly (would break the workflow determinism
+	// boundary), so GetMaxTurnSeq does that lookup on its behalf, mirroring
+	// cmd/starter/main.go's own client-side prediction of this same value.
+	var maxTurnSeq int
+	gao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+	gctx := workflow.WithActivityOptions(ctx, gao)
+	if err := workflow.ExecuteActivity(gctx, "GetMaxTurnSeq", input.SessionKey).Get(gctx, &maxTurnSeq); err != nil {
+		logger.Error("failed to look up max turn seq, starting from 0", "session_key", input.SessionKey, "error", err)
+		maxTurnSeq = 0
+	}
+	turnSeq := maxTurnSeq
 	var currentTurnHandle workflow.ChildWorkflowFuture
 	var currentTurnID string
 	turnActive := false

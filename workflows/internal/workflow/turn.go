@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"errors"
+	"strconv"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -37,11 +38,48 @@ func WriteMemoryWorkflow(ctx workflow.Context, turnID string) error {
 	return workflow.ExecuteActivity(actx, "WriteMemory", turnID).Get(actx, nil)
 }
 
+// CompressContextWorkflow is WriteMemoryWorkflow's counterpart for the soft
+// compression trigger (docs/components/context-slot.md, "Resolved: Duties
+// and Strategies" #3 — soft fires async, doesn't block the turn). Same
+// reasoning as WriteMemoryWorkflow's own doc comment for why this needs to
+// be a detached child workflow rather than a bare unawaited ExecuteActivity.
+func CompressContextWorkflow(ctx workflow.Context, turnID string) error {
+	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+	actx := workflow.WithActivityOptions(ctx, ao)
+	return workflow.ExecuteActivity(actx, "CompressContext", turnID).Get(actx, nil)
+}
+
 const (
-	maxIterations         = 20        // components/temporal-workflow.md, Resolved: Stop-Condition Default Values
-	maxRetries            = 5         // turn-level cumulative cap, distinct from per-activity MaximumAttempts
-	budgetTokens          = 2_000_000 // high placeholder ceiling, not infinite — see resolved doc
-	compressionGateTokens = 1_500_000 // inline check threshold; compression activity itself is a stub in this slice
+	maxIterations = 20        // components/temporal-workflow.md, Resolved: Stop-Condition Default Values
+	maxRetries    = 5         // turn-level cumulative cap, distinct from per-activity MaximumAttempts
+	budgetTokens  = 2_000_000 // high placeholder ceiling, not infinite — see resolved doc; turn-local API spend, unrelated to context size below
+
+	// docs/components/context-slot.md, "Resolved: Duties and Strategies" #3
+	// — two-tier threshold, not one constant. Soft: fire compaction async,
+	// don't block this turn. Hard: block until compaction completes. Both
+	// compared against mcOut.ContextTokens (the session-wide assembled
+	// context size ModelCall reports each call), not the turn-local
+	// cumulativeTokens above — a genuinely different quantity (API spend
+	// this turn vs. current context size).
+	//
+	// Fallback-only now — docs/components/model-registry.md exists (that
+	// doc's own "Not blocked on that component landing first — swap the
+	// source of truth when it does" instruction, acted on here): the real
+	// thresholds below are a fraction of mcOut.ContextWindow, the active
+	// model's actual context window. These constants only apply when
+	// ContextWindow is 0 (the fixture path, which never assembles real
+	// context — see model_call.py).
+	softCompressionThreshold = 1_000_000
+	hardCompressionThreshold = 1_500_000
+
+	// docs/components/model-registry.md, "Responsibilities" — soft/hard as
+	// a fraction of the active model's real context window, not a fixed
+	// token count that's wrong for whichever model isn't the one it was
+	// tuned against. Placeholder-simple fractions, not derived from
+	// anything precise, same tolerance for approximation as the constants
+	// above.
+	softCompressionFraction = 0.6
+	hardCompressionFraction = 0.8
 
 	// activityTimeoutTierA matches the stub ModelCall/InsertMessage/Persist/Deliver
 	// activities' shape: sub-2s, fire-and-complete, no heartbeat — Tier A per
@@ -49,6 +87,64 @@ const (
 	// deliberately deferred (components/temporal-workflow.md).
 	activityTimeoutTierA = 30 * time.Second
 )
+
+// compressionState mirrors lcm.compression_state's classification
+// (docs/components/context-slot.md) — kept in Go too since the workflow is
+// what has to act differently on "soft" (async, non-blocking) vs "hard"
+// (blocking) before it can dispatch either compaction path. contextWindow
+// of 0 (the fixture path — see model_call.py) falls back to the static
+// thresholds above instead of computing a fraction of nothing.
+func compressionState(contextTokens, contextWindow int) string {
+	soft, hard := softCompressionThreshold, hardCompressionThreshold
+	if contextWindow > 0 {
+		soft = int(float64(contextWindow) * softCompressionFraction)
+		hard = int(float64(contextWindow) * hardCompressionFraction)
+	}
+	if contextTokens >= hard {
+		return "hard"
+	}
+	if contextTokens >= soft {
+		return "soft"
+	}
+	return "none"
+}
+
+// failTurn is the shared cleanup path for every early-return failure inside
+// TurnWorkflow's loop. Before this existed, a bare `return types.TurnResult{},
+// err` (e.g. ModelCall exhausting its escalate-on-retry ladder at the expert
+// tier — docs/components/model-registry.md's "Fallback beyond
+// escalate-on-retry" open question) skipped the end-of-loop Persist/Deliver
+// entirely: the turns row stayed stuck at 'running' forever and the user
+// never received any response or error for that turn — not a designed
+// fallback, an actual silent drop, confirmed by reading the code path (no
+// defer/recover anywhere in this function). All three of TurnWorkflow's
+// early-return sites shared this exact defect, not just the ModelCall one —
+// routed through one helper instead of copying the same fix three times.
+//
+// Best-effort only, same tolerance as the normal end-of-turn Persist/Deliver
+// calls (`_ = ...Get(...)`, errors ignored): if the turn's own row was never
+// created (e.g. the very first InsertMessage call itself failed), the
+// synthetic error message insert fails its FK against turns(turn_id) and the
+// Persist/Deliver calls become harmless no-ops — there's nothing more
+// meaningful to do when the turn never existed in the first place.
+func failTurn(ctx workflow.Context, turnID string, parentType string, cause error) (types.TurnResult, error) {
+	logger := workflow.GetLogger(ctx)
+	logger.Error("turn failed", "turn_id", turnID, "error", cause)
+
+	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+	actx := workflow.WithActivityOptions(ctx, ao)
+
+	errInsert := types.InsertMessageInput{
+		TurnID:  turnID,
+		Message: types.Message{Role: "assistant", Content: "Something went wrong processing this turn."},
+	}
+	_ = workflow.ExecuteActivity(actx, "InsertMessage", errInsert).Get(actx, nil)
+	_ = workflow.ExecuteActivity(actx, "Persist", turnID, "failed").Get(actx, nil)
+	if parentType == "session" {
+		_ = workflow.ExecuteActivity(actx, "Deliver", turnID).Get(actx, nil)
+	}
+	return types.TurnResult{}, cause
+}
 
 // TurnWorkflow implements the reason-act-observe loop. One workflow *type* for
 // every level of the tree — a top-level turn and a subagent are both this same
@@ -74,7 +170,12 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	retries := 0
 	cumulativeTokens := 0
 	contextSeq := 0 // ModelCall's own call-index for fixture lookup — distinct from messages.seq, which activities compute themselves
-	compressed := false
+	// docs/components/model-registry.md, "Resolved: Selection Mechanism" —
+	// empty on the first iteration (bootstrap default supplied Python-side
+	// by model_registry.default_hint(), not duplicated here), then copied
+	// verbatim from each ModelCallOutput's own next-step hint. This
+	// workflow never interprets these values, just passes them through.
+	hintModality, hintTier := "", ""
 
 	// --- Start-of-turn: write the inbound message (or, for a subagent, let
 	// InsertMessage derive its kickoff content from its own tool_calls row)
@@ -93,7 +194,7 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 			TurnSeq:     input.TurnSeq,
 		}
 		if err := workflow.ExecuteActivity(actx, "InsertMessage", insertInput).Get(actx, nil); err != nil {
-			return types.TurnResult{}, err
+			return failTurn(ctx, input.TurnID, input.ParentType, err)
 		}
 	}
 
@@ -129,30 +230,62 @@ loop:
 			break
 		}
 
-		// --- Resolved: Compression / Context Management (inline gate, activity-backed action) ---
-		if !compressed && cumulativeTokens >= compressionGateTokens {
-			cctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
-			_ = workflow.ExecuteActivity(cctx, "CompressContext", input.TurnID).Get(cctx, nil)
-			compressed = true
-		}
-
 		iterations++
 		cancelCtx, cancel := workflow.WithCancel(ctx)
 
 		// --- Reason: model-call activity (mints tool_call_id/subagent IDs
 		// itself, writes its own response to Postgres, returns refs only) ---
 		var mcOut types.ModelCallOutput
-		mao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+		mao := workflow.ActivityOptions{
+			StartToCloseTimeout: activityTimeoutTierA,
+			// docs/components/model-registry.md, "Resolved: Escalate-on-Retry"
+			// — sized to match the number of language tiers (3) so the retry
+			// ladder and the escalation ladder line up, rather than an
+			// arbitrary retry count picked independently. model_call.py reads
+			// its own attempt number to decide how many tiers to escalate.
+			RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 3},
+		}
 		mctx := workflow.WithActivityOptions(cancelCtx, mao)
-		modelInput := types.ModelCallInput{TurnID: input.TurnID, ContextSeq: contextSeq}
+		modelInput := types.ModelCallInput{
+			TurnID:       input.TurnID,
+			ContextSeq:   contextSeq,
+			HintModality: hintModality,
+			HintTier:     hintTier,
+		}
 		if err := workflow.ExecuteActivity(mctx, "ModelCall", modelInput).Get(mctx, &mcOut); err != nil {
 			cancel()
-			return types.TurnResult{}, err
+			return failTurn(ctx, input.TurnID, input.ParentType, err)
 		}
 		contextSeq++
+		hintModality, hintTier = mcOut.NextHintModality, mcOut.NextHintTier
 		cumulativeTokens += mcOut.Usage.InputTokens + mcOut.Usage.OutputTokens
 		metrics.WithTags(map[string]string{"direction": "input"}).Counter("model_call_tokens_total").Inc(int64(mcOut.Usage.InputTokens))
 		metrics.WithTags(map[string]string{"direction": "output"}).Counter("model_call_tokens_total").Inc(int64(mcOut.Usage.OutputTokens))
+
+		// docs/components/context-slot.md, "Resolved: Duties and Strategies"
+		// #3 — evaluated fresh every iteration (not gated to "once per
+		// turn" the way the old single-threshold check was): compaction
+		// genuinely shrinks content, so if context is still over threshold
+		// after one pass, triggering again is correct, not a bug.
+		switch compressionState(mcOut.ContextTokens, mcOut.ContextWindow) {
+		case "hard":
+			// Blocks until compaction completes, so the *next* ModelCall in
+			// this same turn assembles a smaller context.
+			cctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
+			_ = workflow.ExecuteActivity(cctx, "CompressContext", input.TurnID).Get(cctx, nil)
+		case "soft":
+			// Fire-and-forget — detached child workflow, same reasoning as
+			// the WriteMemory dispatch below. Per-iteration unique
+			// WorkflowID since soft could fire on more than one iteration
+			// within the same turn.
+			cwo := workflow.ChildWorkflowOptions{
+				WorkflowID:        input.TurnID + ":compress-context:" + strconv.Itoa(iterations),
+				ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
+			}
+			cctx := workflow.WithChildOptions(ctx, cwo)
+			childFuture := workflow.ExecuteChildWorkflow(cctx, CompressContextWorkflow, input.TurnID)
+			_ = childFuture.GetChildWorkflowExecution().Get(cctx, nil)
+		}
 
 		if !mcOut.HasToolCalls {
 			stopReason = "no_tool_calls"
@@ -246,7 +379,7 @@ loop:
 			iactx := workflow.WithActivityOptions(ctx, iao)
 			insertInput := types.InsertMessageInput{TurnID: input.TurnID, Message: next.Message}
 			if err := workflow.ExecuteActivity(iactx, "InsertMessage", insertInput).Get(iactx, nil); err != nil {
-				return types.TurnResult{}, err
+				return failTurn(ctx, input.TurnID, input.ParentType, err)
 			}
 			continue loop
 		}

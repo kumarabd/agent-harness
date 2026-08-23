@@ -80,6 +80,15 @@ type SignalPayload struct {
 type ModelCallInput struct {
 	TurnID     string `json:"turn_id"`
 	ContextSeq int    `json:"context_seq"`
+	// docs/components/model-registry.md, "Resolved: Selection Mechanism" —
+	// the previous step's self-declared hint for this step, threaded
+	// through opaquely (this workflow never interprets these, just copies
+	// ModelCallOutput's hint fields into the next call's input). Empty on
+	// the very first call of a turn — the Python side's
+	// model_registry.default_hint() supplies {language, medium} in that
+	// case, not a literal default here.
+	HintModality string `json:"hint_modality"`
+	HintTier     string `json:"hint_tier"`
 }
 
 // ToolCallRef is one tool call minted by ModelCall — name/ID/dispatch-kind
@@ -97,6 +106,21 @@ type ModelCallOutput struct {
 	HasToolCalls bool          `json:"has_tool_calls"`
 	ToolCalls    []ToolCallRef `json:"tool_calls"`
 	Usage        Usage         `json:"usage"`
+	// docs/components/context-slot.md — the assembled context's estimated
+	// size, computed fresh in Python each call (lcm.py's estimate_tokens)
+	// since this workflow can't accumulate it itself across separate
+	// turn-workflow executions the way it does per-turn budget spend below.
+	ContextTokens int `json:"context_tokens"`
+	// docs/components/context-slot.md, "Responsibilities" — the model
+	// actually used this call's real context window (model_registry.py),
+	// letting the compression threshold below be a fraction of it instead
+	// of a fixed constant.
+	ContextWindow int `json:"context_window"`
+	// docs/components/model-registry.md, "Resolved: Selection Mechanism" —
+	// this step's self-declared hint for the next step, copied verbatim
+	// into the next ModelCallInput. This workflow never interprets these.
+	NextHintModality string `json:"next_hint_modality"`
+	NextHintTier     string `json:"next_hint_tier"`
 }
 
 // ToolCallInput is ToolCall's only input — it reads its own arguments from

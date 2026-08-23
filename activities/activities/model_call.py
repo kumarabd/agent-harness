@@ -26,7 +26,7 @@ import time
 
 from temporalio import activity
 
-from . import ids, llm
+from . import ids, llm, model_registry
 from .types import ModelCallInput, ModelCallOutput, ToolCallRef, Usage
 
 logger = logging.getLogger(__name__)
@@ -58,13 +58,38 @@ class ModelCallActivity:
                 usage = Usage(
                     input_tokens=raw_usage.get("input_tokens", 0), output_tokens=raw_usage.get("output_tokens", 0)
                 )
+                # Fixture path never assembles real context (no LCM, no
+                # compression-gate concern for a scripted scenario) — 0 is a
+                # safe default, same "no real work" treatment already given
+                # to the latency histogram below. Same for context_window;
+                # turn.go falls back to its static thresholds when it's 0.
+                context_tokens = 0
+                context_window = 0
+                next_hint_modality, next_hint_tier = model_registry.default_hint()
             else:
                 session_row = await conn.fetchrow(
                     "SELECT system_prompt FROM sessions WHERE session_key = $1",
                     ids.session_key_of(input.turn_id),
                 )
                 system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
-                conversation = await llm.build_conversation(conn, input.turn_id, system_prompt)
+                conversation, context_tokens = await llm.build_conversation(conn, input.turn_id, system_prompt)
+
+                # docs/components/model-registry.md, "Resolved: Selection
+                # Mechanism" + "Resolved: Escalate-on-Retry" — the previous
+                # step's hint picks the tier (bootstrap default if this is
+                # the turn's first call); a Temporal-driven retry of this
+                # same activity attempt escalates it by one tier per
+                # attempt, capped at expert, regardless of what the hint
+                # said — a fast-tier model producing unparseable output is
+                # exactly the failure this exists to recover from.
+                hint_modality = input.hint_modality or model_registry.default_hint()[0]
+                hint_tier = input.hint_tier or model_registry.default_hint()[1]
+                attempt = activity.info().attempt
+                for _ in range(attempt - 1):
+                    hint_tier = model_registry.escalate(hint_tier)
+                model_config = model_registry.resolve(hint_modality, hint_tier)
+                context_window = model_config.context_window
+
                 # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
                 # real provider round-trip time only; the fixture path above isn't
                 # real work and would just add noise to the histogram.
@@ -72,9 +97,10 @@ class ModelCallActivity:
                     "model_call_latency_seconds", unit="s"
                 )
                 started = time.monotonic()
-                real = await llm.call_model(self._openai_client, conversation)
+                real = await llm.call_model(self._openai_client, conversation, model_config.model)
                 histogram.record(time.monotonic() - started)
                 content, raw_tool_calls, usage = real.content, real.raw_tool_calls, real.usage
+                next_hint_modality, next_hint_tier = real.next_hint_modality, real.next_hint_tier
 
             logger.info(
                 "ModelCall[%s:%d] -> %r (tool_calls=%d)",
@@ -151,4 +177,12 @@ class ModelCallActivity:
                     )
                     refs.append(ToolCallRef(tool_call_id=tool_call_id, tool_name=tool_name, is_subagent=is_subagent))
 
-            return ModelCallOutput(has_tool_calls=len(refs) > 0, tool_calls=refs, usage=usage)
+            return ModelCallOutput(
+                has_tool_calls=len(refs) > 0,
+                tool_calls=refs,
+                usage=usage,
+                context_tokens=context_tokens,
+                context_window=context_window,
+                next_hint_modality=next_hint_modality,
+                next_hint_tier=next_hint_tier,
+            )

@@ -8,9 +8,14 @@ dependencies = [
     "asyncpg>=0.29,<1",
     "openai>=1.40,<2",
     # docs/components/memory-slot.md — direct agent-brain MCP integration
-    # (agent_brain.py). Official SDK, not a hand-rolled JSON-RPC/streamable-
-    # HTTP session-handshake implementation.
+    # (agent_brain.py). Same SDK also used for mcp-hub (mcp_hub.py).
+    # Official SDK, not a hand-rolled JSON-RPC/streamable-HTTP
+    # session-handshake implementation.
     "mcp>=1.0,<3",
+    # docs/components/tool-registry.md, "Resolved: Native-Tool Discovery" —
+    # shell_hub.py's in-process hybrid vector+FTS index. Verified real
+    # (https://github.com/alibaba/zvec, Apache-2.0) before adopting.
+    "zvec>=0.6,<1",
 ]
 
 [build-system]

@@ -1,7 +1,7 @@
 # Component: State Layer
 ## (Postgres — Sessions, Messages, Routing)
 
-> STATUS: SCAFFOLD — to be filled in as we design.
+> STATUS: IMPLEMENTED — the full schema below is real and in active production use: `activities/migrations/001_initial_schema.sql` (applied via `postgres-migrate-hook.yaml`'s filename-ordered `schema_migrations` mechanism), directly exercised throughout this project's live cluster verification (every table below has been queried or written against a real Postgres instance, not just designed). See Notes Log for the 2026-08-23 correction.
 
 ### Role (one line)
 The shared networked datastore that replaces Hermes' single SQLite file, giving many gateways and workers real row-level concurrency and a durable record of sessions, messages, and routing.
@@ -171,6 +171,8 @@ CREATE TABLE _test_scripted_responses (
 );
 ```
 
+**Also part of this schema, defined in its own migration/doc rather than duplicated here:** `context_summaries` (`activities/migrations/002_context_summaries.sql`, LCM's Summary DAG — see `components/context-slot.md`, "Resolved: Summary Storage Schema") — added 2026-08-23, after the table block above was originally written.
+
 **Removed: `session_routing`.** Originally designed to store which gateway instance owns a session, for the deliver activity to address. Superseded by `components/gateway.md`'s resolved design: delivery is dispatched via a Temporal task queue computed *deterministically* from static shard config (or just platform, for webhook-based platforms) — a computation, not a stored, potentially-stale fact. No routing table needed.
 
 **Full-text search:** Postgres-native `tsvector`/GIN, generated column on `messages.content` — resolves the "tsvector vs. external" question in favor of native, reasonable at single-user scale; revisit only if search quality demands more (e.g. `pg_trgm`, or an external engine) later.
@@ -200,6 +202,7 @@ Not a new design decision — mostly making explicit what earlier docs already i
 - Multi-tenant scoping — resolved in `components/multi-tenancy.md`: **revised 2026-08-14** from "separate database per tenant" (implying a shared/managed Postgres service) to "one self-hosted Postgres instance per tenant, backed by that tenant's own PersistentVolume" (`components/session-filesystem.md`) — avoids any unified Postgres layer across tenants, not just a unified database. Affects deployment topology only; the schema above is unchanged either way.
 
 ### Notes Log
+- 2026-08-23: **Doc correction, not a new decision.** STATUS line was stale ("SCAFFOLD"), despite this schema having been implemented since 2026-08-07 (below) and in continuous real use since — corrected to reflect actual state. Also added a cross-reference to `context_summaries` (added later by `002_context_summaries.sql`, owned by `components/context-slot.md`), which existed in the real schema but wasn't listed here.
 - 2026-08-07: Added the session filesystem lease/metadata index as a state-layer responsibility, resolving subagent filesystem coordination without worker pinning — see new `components/session-filesystem.md`.
 - 2026-08-07: Added the `delivered_responses` idempotency ledger as a state-layer responsibility, resolving deliver-path double-send safety — see `components/activities-outbound-delivery.md`.
 - 2026-08-07: Resolved the full schema. Core decision: primary keys are Temporal workflow/activity IDs verbatim rather than separately-minted UUIDs — `turns.turn_id` is the workflow ID, `tool_calls.tool_call_id` is the (fully-qualified) activity ID or, for subagents, the child workflow's own turn_id directly. This collapses "only the parent id matters" into the schema itself: one `parent_id` per table, no redundant child-reference columns. `turns` covers top-level turns and subagents in one self-referencing table via a `parent_type` discriminator (session vs. turn), since they're the same workflow type recursively. FTS resolved as native `tsvector`/GIN. Write pattern resolved as per-turn upsert-by-primary-key, `READ COMMITTED`, no cross-session contention by construction.
