@@ -16,6 +16,27 @@ import (
 // (02-architecture-temporal-execution.md §3).
 const NewMessageSignalName = "NewMessage"
 
+// WriteMemoryWorkflow is a thin wrapper whose only job is to await the
+// WriteMemory activity itself. It exists because a bare
+// workflow.ExecuteActivity(...) without Get() is NOT genuinely fire-and-forget
+// when the calling workflow closes moments later (as TurnWorkflow does,
+// right after Persist/Deliver): the activity's completion is reported back
+// against a workflow that's already closed, gets silently discarded
+// server-side, and never appears as completed in the UI — confirmed via a
+// real "Activity not found on completion... workflow execution already
+// completed" warning while testing docs/components/memory-slot.md's
+// write-path, even though the real memory_write call had genuinely
+// succeeded. TurnWorkflow starts THIS workflow as a detached child
+// (ParentClosePolicy: ABANDON) and does not await its result — the child
+// keeps running independently after the parent closes, so the activity's
+// completion gets recorded against the child's own still-open history
+// instead.
+func WriteMemoryWorkflow(ctx workflow.Context, turnID string) error {
+	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+	actx := workflow.WithActivityOptions(ctx, ao)
+	return workflow.ExecuteActivity(actx, "WriteMemory", turnID).Get(actx, nil)
+}
+
 const (
 	maxIterations         = 20        // components/temporal-workflow.md, Resolved: Stop-Condition Default Values
 	maxRetries            = 5         // turn-level cumulative cap, distinct from per-activity MaximumAttempts
@@ -257,15 +278,26 @@ loop:
 	if input.ParentType == "session" {
 		// docs/components/memory-slot.md, "Resolved: Write-Path Construction"
 		// + "Resolved: Subagent-Turn Write Scope" — top-level turns only,
-		// genuinely fire-and-forget: ExecuteActivity schedules it (the
-		// ScheduleActivityTask command is part of this workflow task's
-		// completion regardless of whether Get() is ever called), but this
-		// workflow doesn't wait on or gate on its result. Still gets
-		// Temporal's normal tracking/retry — its outcome just doesn't affect
-		// this turn.
-		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
-		actx := workflow.WithActivityOptions(ctx, ao)
-		workflow.ExecuteActivity(actx, "WriteMemory", input.TurnID)
+		// genuinely fire-and-forget. Started as a DETACHED CHILD WORKFLOW
+		// (ParentClosePolicy: ABANDON), not a bare ExecuteActivity — a bare
+		// unawaited activity is NOT reliably fire-and-forget when the
+		// calling workflow (this one) closes moments later: the activity's
+		// completion gets reported against an already-closed workflow and is
+		// silently discarded, leaving it stuck showing as pending forever
+		// even though the real work succeeded (confirmed via a live test —
+		// see WriteMemoryWorkflow's own doc comment). The child keeps
+		// running independently after this workflow closes, so its
+		// completion is recorded against its own still-open history
+		// instead. Only waits for the child to have STARTED
+		// (GetChildWorkflowExecution — a real, documented two-phase future,
+		// not this workflow's own invention), not for it to finish.
+		cwo := workflow.ChildWorkflowOptions{
+			WorkflowID:        input.TurnID + ":write-memory",
+			ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
+		}
+		cctx := workflow.WithChildOptions(ctx, cwo)
+		childFuture := workflow.ExecuteChildWorkflow(cctx, WriteMemoryWorkflow, input.TurnID)
+		_ = childFuture.GetChildWorkflowExecution().Get(cctx, nil)
 	}
 	if input.ParentType == "session" {
 		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
