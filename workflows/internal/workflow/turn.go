@@ -255,6 +255,19 @@ loop:
 		_ = workflow.ExecuteActivity(actx, "Persist", input.TurnID, "completed").Get(actx, nil)
 	}
 	if input.ParentType == "session" {
+		// docs/components/memory-slot.md, "Resolved: Write-Path Construction"
+		// + "Resolved: Subagent-Turn Write Scope" — top-level turns only,
+		// genuinely fire-and-forget: ExecuteActivity schedules it (the
+		// ScheduleActivityTask command is part of this workflow task's
+		// completion regardless of whether Get() is ever called), but this
+		// workflow doesn't wait on or gate on its result. Still gets
+		// Temporal's normal tracking/retry — its outcome just doesn't affect
+		// this turn.
+		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+		actx := workflow.WithActivityOptions(ctx, ao)
+		workflow.ExecuteActivity(actx, "WriteMemory", input.TurnID)
+	}
+	if input.ParentType == "session" {
 		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 		actx := workflow.WithActivityOptions(ctx, ao)
 		_ = workflow.ExecuteActivity(actx, "Deliver", input.TurnID).Get(actx, nil)

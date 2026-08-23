@@ -133,11 +133,14 @@ successfully from the published registry, both workers came up healthy, and
 a real turn ran end to end with correct Postgres state confirmed via direct
 query, not just "pods are Running."
 
-**Known gap:** neither chart runs the Postgres schema migration
-(`activities/migrations/001_initial_schema.sql`) automatically — it has to
-be applied by hand against a fresh tenant Postgres instance before its
-tenant worker can do anything useful. No init job/mechanism for this
-exists yet.
+`agent-harness-tenant`'s own Postgres schema
+(`activities/migrations/001_initial_schema.sql`) is applied automatically by
+a post-install/pre-upgrade Job (`templates/postgres-migrate-hook.yaml`,
+idempotent via an explicit `turns`-table existence check) — no more manual
+`psql` step against a fresh tenant Postgres instance. The SQL file is
+duplicated into the chart's own `files/` directory since Helm charts can't
+reference files outside themselves; keep both in sync if a `002_*.sql` is
+ever added.
 
 ## A note on heartbeat timing (if you tune `tool_call.py` or the `HeartbeatTimeout`)
 

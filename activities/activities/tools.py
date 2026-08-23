@@ -20,6 +20,16 @@ simulated delay, same cancellability) purely for backward compatibility with
 that already-verified scenario suite. This is NOT a fallback for arbitrary
 unregistered names — tool_call.py's "unknown tool" error path is real and
 applies to anything not explicitly listed here.
+
+`memory_search`/`memory_expand` (docs/components/memory-slot.md, "Resolved:
+Search/Expand Tools — Both Unrestricted") are named to match agent-brain's
+own MCP tool names directly, NOT memory-slot.md's proposed generic
+`search`/`expand` — that generic `search` name is already taken by the
+fixture stub above (predates this feature, and workflows/scenarios/ depends
+on it staying a stub). No tier of its own: both are quick request/response
+network calls with no cancellable subprocess or session-filesystem lease to
+hold, so they fall back to tool_tiers.go's defaultToolTiming on the Go side
+(no entry needed there) and don't call activity.heartbeat() here.
 """
 
 from __future__ import annotations
@@ -34,7 +44,7 @@ import asyncpg
 from temporalio import activity
 from temporalio.exceptions import CancelledError
 
-from . import leases
+from . import agent_brain, leases
 
 _SESSION_ROOT_ENV = "SESSION_ROOT"
 # Local-dev fallback; real deployments set SESSION_ROOT to match the Helm
@@ -192,6 +202,25 @@ async def shell_exec(arguments: dict, ctx: ToolContext) -> dict:
     }
 
 
+async def memory_search(arguments: dict, ctx: ToolContext) -> dict:
+    """docs/components/memory-slot.md's `search` — shallow, unrestricted
+    (available to both the main agent and subagents; tool-level access
+    control, if ever added, is components/tool-registry.md's concern, not
+    this handler's). arguments passed straight through as agent-brain's own
+    memory_search params (query, limit) — the model already speaks
+    agent-brain's schema directly, no reshaping needed."""
+    return await agent_brain.call_tool("memory_search", arguments)
+
+
+async def memory_expand(arguments: dict, ctx: ToolContext) -> dict:
+    """docs/components/memory-slot.md's `expand` — deep, also unrestricted
+    (agent-brain's memory_expand has no depth parameter to escalate through,
+    so the unbounded-re-expansion risk that would motivate a subagent-only
+    restriction doesn't apply — see that doc's "Resolved: Search/Expand
+    Tools"). arguments passed straight through (node_id, node_type, limit)."""
+    return await agent_brain.call_tool("memory_expand", arguments)
+
+
 async def _demo_echo_stub(arguments: dict, ctx: ToolContext) -> dict:
     """Reproduces the pre-real-tool-registry stub's exact behavior: a fixed
     ~4s simulated delay with heartbeats (real cancellation demonstrable), no
@@ -223,4 +252,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "search": _DEMO_TOOL_SPEC,
     "slow_tool": _DEMO_TOOL_SPEC,
     "noop_tool": _DEMO_TOOL_SPEC,
+    "memory_search": ToolSpec(
+        handler=memory_search,
+        heartbeat_interval_seconds=5.0,
+        heartbeat_timeout_seconds=15.0,
+        start_to_close_timeout_seconds=30.0,
+    ),
+    "memory_expand": ToolSpec(
+        handler=memory_expand,
+        heartbeat_interval_seconds=5.0,
+        heartbeat_timeout_seconds=15.0,
+        start_to_close_timeout_seconds=30.0,
+    ),
 }

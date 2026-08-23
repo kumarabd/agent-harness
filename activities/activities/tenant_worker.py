@@ -1,6 +1,7 @@
 """Tenant worker entrypoint. Registers ModelCall, ToolCall, InsertMessage,
-Persist, Deliver, and CompressContext on the configured task queue and polls a
-Temporal server for activity tasks. Run alongside the shared loop-worker
+Persist, Deliver, WriteMemory, and CompressContext on the configured task
+queue and polls a Temporal server for activity tasks. Run alongside the
+shared loop-worker
 (workflows/cmd/loop-worker), which registers the Session Coordinator and Turn
 Workflow on the same task queue and dispatches activities to this process by
 name.
@@ -32,6 +33,15 @@ deploy/docker/tenant-worker.Dockerfile and deploy/helm/agent-harness-tenant:
                          on. Default: 0.0.0.0:9090. See
                          docs/components/budget-guardrails.md, "Resolved:
                          Metrics Export" — plain scrape, no ServiceMonitor.
+    AGENT_BRAIN_BASE_URL/AGENT_BRAIN_API_KEY/AGENT_BRAIN_AGENT_ID
+                         docs/components/memory-slot.md's memory backend
+                         (agent_brain.py, tools.py's memory_search/
+                         memory_expand, write_memory.py). Not required —
+                         a session that never touches memory works fine
+                         without these set; memory_search/memory_expand/
+                         WriteMemory all degrade to a no-op (or, for a
+                         mid-session tool call, a clear error observation)
+                         rather than failing the turn.
 
 Usage:
     python -m activities.tenant_worker
@@ -55,6 +65,7 @@ from .insert_message import InsertMessageActivity
 from .model_call import ModelCallActivity
 from .persist import PersistActivity
 from .tool_call import ToolCallActivity
+from .write_memory import WriteMemoryActivity
 
 
 async def main() -> None:
@@ -107,6 +118,7 @@ async def main() -> None:
             InsertMessageActivity(pool).__call__,
             PersistActivity(pool).__call__,
             DeliverActivity(pool).__call__,
+            WriteMemoryActivity(pool).__call__,
             compress_context,
         ],
     )
