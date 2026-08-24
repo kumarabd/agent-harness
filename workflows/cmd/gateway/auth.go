@@ -40,10 +40,24 @@ func userIDFromContext(ctx context.Context) string {
 	return id
 }
 
-// sessionKeyFor mirrors gateway/web.md's "Resolved: One Continuous Session
-// Per User" scheme — one session_key per user, forever, no thread/conversation
-// concept. Only place this string gets built, so the format only needs to be
-// right in one location.
-func sessionKeyFor(clerkUserID string) string {
-	return "agent:main:web:user:" + clerkUserID
+// sessionKeyFor derives a session_key from a MessageEvent's Platform +
+// ChannelID (inbound.go) — the session-scoping identity, deliberately NOT a
+// function of User too (a group channel's session is shared across every
+// user posting in it; see MessageEvent's own doc comment). Only place this
+// string gets built, so the format only needs to be right in one location.
+//
+// The actual per-platform FORMAT is deliberately not generalized yet — only
+// "web" exists, mirroring gateway/web.md's "Resolved: One Continuous Session
+// Per User" scheme unchanged from before this refactor (changing the format
+// would orphan already-running real sessions, a real behavior change this
+// refactor isn't making). A second platform will need its own case here,
+// almost certainly a different shape (gateway.md's own illustrative example,
+// "agent:main:discord:guild:123", has a middle segment this one doesn't).
+func sessionKeyFor(platform, channelID string) string {
+	switch platform {
+	case "web":
+		return "agent:main:web:user:" + channelID
+	default:
+		panic("sessionKeyFor: unsupported platform " + platform)
+	}
 }

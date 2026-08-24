@@ -28,14 +28,21 @@ class PermissionRule:
 
 
 def _load_permission_list() -> list[PermissionRule]:
-    # Deployment-config-style, same convention as shell_hub.py's
-    # MANUAL_OVERRIDES / model_registry.py's env-var storage — not a
-    # Postgres-backed policy engine. Empty by default: no tools populated
-    # yet, deliberately (docs/components/user-input.md).
-    raw = os.environ.get("TOOL_PERMISSION_LIST", "[]")
+    # A plain file on the tenant's own PV (deploy/helm/agent-harness-tenant's
+    # tenantVolume, TOOL_PERMISSION_LIST_FILE) rather than a Helm-templated
+    # env var — nothing tenant-identity-shaped about a mutable policy list,
+    # and a Helm value would just be a second, driftable copy of whatever's
+    # actually on disk. Edited directly at runtime; missing file (the normal
+    # starting state — nothing pre-populates it) or invalid JSON both mean
+    # empty, not an error, same tolerance the old env-var version had for a
+    # missing/malformed TOOL_PERMISSION_LIST.
+    path = os.environ.get("TOOL_PERMISSION_LIST_FILE", "")
+    if not path:
+        return []
     try:
-        entries = json.loads(raw)
-    except json.JSONDecodeError:
+        with open(path, encoding="utf-8") as f:
+            entries = json.load(f)
+    except (OSError, json.JSONDecodeError):
         return []
     return [PermissionRule(server=e["server"], tool=e["tool"]) for e in entries if "server" in e and "tool" in e]
 

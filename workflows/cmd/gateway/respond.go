@@ -37,7 +37,7 @@ func (s *server) handleRespond(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := userIDFromContext(r.Context())
-	sessionKey := sessionKeyFor(userID)
+	sessionKey := sessionKeyFor("web", userID)
 	ctx := r.Context()
 
 	// Resolve workflow_id AND confirm this request actually belongs to the
