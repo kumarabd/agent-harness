@@ -6,18 +6,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "tenant-worker") }}
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "worker") }}
   labels:
-    {{- include "agent-harness.componentLabels" (dict "context" . "component" "tenant-worker") | nindent 4 }}
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "worker") | nindent 4 }}
 spec:
   replicas: {{ .Values.tenantWorker.replicaCount }}
   selector:
     matchLabels:
-      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "tenant-worker") | nindent 6 }}
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "worker") | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "tenant-worker") | nindent 8 }}
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "worker") | nindent 8 }}
       {{- if or .Values.tenantWorker.metrics.enabled .Values.tenantWorker.podAnnotations }}
       annotations:
         {{- if .Values.tenantWorker.metrics.enabled }}
@@ -36,7 +36,7 @@ spec:
       # Postgres and mounts this tenant's own session filesystem PV.
       automountServiceAccountToken: false
       containers:
-        - name: tenant-worker
+        - name: worker
           image: "{{ .Values.tenantWorker.image.repository }}:{{ .Values.tenantWorker.image.tag }}"
           imagePullPolicy: {{ .Values.tenantWorker.image.pullPolicy }}
           {{- if .Values.tenantWorker.metrics.enabled }}
@@ -47,34 +47,26 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "agent-harness.fullname" . }}-config
-          {{- if or .Values.postgres.enabled .Values.llm.enabled }}
+          {{- if or .Values.postgresql .Values.llm.enabled .Values.agentBrain.enabled }}
           env:
-          {{- if .Values.postgres.enabled }}
-            # {statefulset-name}-0.{headless-service-name} — the stable
-            # per-pod DNS name the headless postgres-service.yaml gives pod 0
-            # (the only pod, since postgres replicas is fixed at 1). Just the
-            # bare service name would also resolve via headless-service DNS
-            # round-robin across ready pods, but the explicit -0 form is what
-            # actually documents "there is exactly one Postgres pod" rather
-            # than relying on that being true only because replicas happens
-            # to be 1 today.
+            # Bitnami postgresql subchart's own generated Service/Secret
+            # naming — {release-name}-postgresql, NOT nested through this
+            # chart's own fullname helper. Each subchart computes its own
+            # fullname independently from .Release.Name + its own Chart.Name
+            # (confirmed by rendering, not assumed — see Notes Log).
             - name: POSTGRES_HOST
-              value: "{{ include "agent-harness.componentFullname" (dict "context" . "component" "postgres") }}-0.{{ include "agent-harness.componentFullname" (dict "context" . "component" "postgres") }}"
+              value: "{{ .Release.Name }}-postgresql"
             - name: POSTGRES_PORT
               value: "5432"
             - name: POSTGRES_DB
-              value: {{ .Values.postgres.database | quote }}
+              value: {{ .Values.postgresql.auth.database | quote }}
             - name: POSTGRES_USER
-              value: {{ .Values.postgres.username | quote }}
-            # Mounting the same Secret the Postgres instance itself uses,
-            # rather than duplicating the password into a second Secret —
-            # one credential, one source, shared by both sides.
+              value: {{ .Values.postgresql.auth.username | quote }}
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgres.existingSecret | default (printf "%s-postgres" (include "agent-harness.fullname" .)) }}
-                  key: {{ .Values.postgres.existingSecretPasswordKey }}
-          {{- end }}
+                  name: "{{ .Release.Name }}-postgresql"
+                  key: password
           {{- if .Values.llm.enabled }}
             # Real ModelCall calls only (activities/activities/llm.py) —
             # turns with a _test_scripted_responses fixture never touch this.
@@ -89,6 +81,134 @@ spec:
                 secretKeyRef:
                   name: {{ include "agent-harness.fullname" . }}-llm
                   key: PIONEER_API_KEY
+            # docs/components/model-registry.md — only rendered when set, so
+            # a tenant that hasn't configured per-tier models keeps
+            # today's exact single-model behavior (model_registry.py's own
+            # fallback to PIONEER_MODEL, not duplicated here).
+            {{- if .Values.llm.tiers.fast.model }}
+            - name: LANGUAGE_FAST_MODEL
+              value: {{ .Values.llm.tiers.fast.model | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.fast.contextWindow }}
+            - name: LANGUAGE_FAST_CONTEXT_WINDOW
+              value: {{ .Values.llm.tiers.fast.contextWindow | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.fast.costPerMillionTokens.input }}
+            - name: LANGUAGE_FAST_INPUT_COST_PER_MILLION_TOKENS
+              value: {{ .Values.llm.tiers.fast.costPerMillionTokens.input | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.fast.costPerMillionTokens.output }}
+            - name: LANGUAGE_FAST_OUTPUT_COST_PER_MILLION_TOKENS
+              value: {{ .Values.llm.tiers.fast.costPerMillionTokens.output | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.fast.costPerMillionTokens.cachedInput }}
+            - name: LANGUAGE_FAST_CACHED_INPUT_COST_PER_MILLION_TOKENS
+              value: {{ .Values.llm.tiers.fast.costPerMillionTokens.cachedInput | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.medium.model }}
+            - name: LANGUAGE_MEDIUM_MODEL
+              value: {{ .Values.llm.tiers.medium.model | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.medium.contextWindow }}
+            - name: LANGUAGE_MEDIUM_CONTEXT_WINDOW
+              value: {{ .Values.llm.tiers.medium.contextWindow | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.medium.costPerMillionTokens.input }}
+            - name: LANGUAGE_MEDIUM_INPUT_COST_PER_MILLION_TOKENS
+              value: {{ .Values.llm.tiers.medium.costPerMillionTokens.input | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.medium.costPerMillionTokens.output }}
+            - name: LANGUAGE_MEDIUM_OUTPUT_COST_PER_MILLION_TOKENS
+              value: {{ .Values.llm.tiers.medium.costPerMillionTokens.output | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.medium.costPerMillionTokens.cachedInput }}
+            - name: LANGUAGE_MEDIUM_CACHED_INPUT_COST_PER_MILLION_TOKENS
+              value: {{ .Values.llm.tiers.medium.costPerMillionTokens.cachedInput | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.expert.model }}
+            - name: LANGUAGE_EXPERT_MODEL
+              value: {{ .Values.llm.tiers.expert.model | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.expert.contextWindow }}
+            - name: LANGUAGE_EXPERT_CONTEXT_WINDOW
+              value: {{ .Values.llm.tiers.expert.contextWindow | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.expert.costPerMillionTokens.input }}
+            - name: LANGUAGE_EXPERT_INPUT_COST_PER_MILLION_TOKENS
+              value: {{ .Values.llm.tiers.expert.costPerMillionTokens.input | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.expert.costPerMillionTokens.output }}
+            - name: LANGUAGE_EXPERT_OUTPUT_COST_PER_MILLION_TOKENS
+              value: {{ .Values.llm.tiers.expert.costPerMillionTokens.output | quote }}
+            {{- end }}
+            {{- if .Values.llm.tiers.expert.costPerMillionTokens.cachedInput }}
+            - name: LANGUAGE_EXPERT_CACHED_INPUT_COST_PER_MILLION_TOKENS
+              value: {{ .Values.llm.tiers.expert.costPerMillionTokens.cachedInput | quote }}
+            {{- end }}
+          {{- end }}
+          {{- if .Values.agentBrain.enabled }}
+            # components/memory-slot.md — WriteMemory/search/expand calls
+            # only; nothing here if a session never touches memory. Computed,
+            # not a value — the agent-brain subchart is installed under
+            # nameOverride "memory" (values.yaml's agent-brain.nameOverride),
+            # so its Service renders as <release>-memory-server
+            # (charts/agent-brain/templates/service-server.yaml), deterministic
+            # from this release's own name. No /sse or /mcp suffix here —
+            # activities/activities/agent_brain.py appends /mcp itself
+            # (streamable-HTTP transport, not the classic SSE transport that
+            # chart's own TRANSPORT=sse config also serves alongside it at
+            # /sse).
+            - name: AGENT_BRAIN_BASE_URL
+              value: "http://{{ .Release.Name }}-memory-server:8080"
+            - name: AGENT_BRAIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-harness.fullname" . }}-agent-brain
+                  key: AGENT_BRAIN_API_KEY
+            # -- REQUIRED by agent-brain's own auth (internal/mcp/tenant.go's
+            # "agent_id required" check, whenever that chart's
+            # AUTH_REQUIRED=true) — not a secret, a plain per-install
+            # identifier ("the same for every install" per agent-brain's own
+            # domain.TenantContext.AgentID comment).
+            - name: AGENT_BRAIN_AGENT_ID
+              value: {{ .Values.agentBrain.agentID | quote }}
+          {{- end }}
+          {{- if .Values.mcpHub.enabled }}
+            # docs/components/tool-registry.md's mcp-hub-mediated tier — no
+            # native/Python dispatch code calls this yet (not built), this
+            # only makes the endpoint reachable. Named MCP_HUB_URL, not
+            # MCP_HUB_BASE_URL — the mcp-hub Deployment itself already uses
+            # that exact name for a different purpose (its own OAuth
+            # redirect base URL, oauth.mcpHubBaseUrl), and while they're
+            # separate pods so there's no real conflict, reusing the name
+            # would be confusing to read later. Computed, not a value —
+            # mcp-hub is installed under nameOverride "tools" (values.yaml's
+            # mcp-hub.nameOverride), so its Service renders as
+            # <release>-tools (charts/mcp-hub/templates/_helpers.tpl's
+            # mcp-hub.fullname), deterministic from this release's own name.
+            # Port 8000 hardcoded matching that chart's own service.port
+            # default, same convention as AGENT_BRAIN_BASE_URL's hardcoded
+            # 8080 above — if mcp-hub.service.port is ever overridden
+            # per-tenant, update this too.
+            - name: MCP_HUB_URL
+              value: "http://{{ .Release.Name }}-tools:8000"
+            # docs/components/tool-registry.md's "Resolved: Native-Tool
+            # Discovery" — shell_hub.py's own embedding provider, reusing
+            # mcp-hub's own LiteLLM config rather than a third credential.
+            # Read via `index` since a parent-chart template can't dot into
+            # a hyphenated key ("mcp-hub"), same reasoning as
+            # agent-brain-creds-secret.yaml's $agentBrainSub.
+            - name: EMBEDDING_BASE_URL
+              value: {{ (index .Values "mcp-hub" "embedding" "baseUrl") | quote }}
+            - name: EMBEDDING_MODEL
+              value: {{ (index .Values "mcp-hub" "embedding" "model") | quote }}
+            - name: EMBEDDING_DIM
+              value: {{ (index .Values "mcp-hub" "embedding" "dimensions") | quote }}
+            - name: EMBEDDING_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-tools
+                  key: EMBEDDING_API_KEY
           {{- end }}
           {{- end }}
           {{- if .Values.tenantVolume.enabled }}

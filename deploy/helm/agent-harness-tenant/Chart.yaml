@@ -12,3 +12,22 @@ description: >-
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+# Postgres (real Bitnami dependency, same as ../../../infra/postgres's own
+# pattern), agent-brain, and mcp-hub (both real dependencies, published to
+# oci://ghcr.io/realnighthawk/agent-brain and
+# oci://ghcr.io/realnighthawk/infra/charts/mcp-hub respectively — the
+# registry is private, `helm registry login ghcr.io` is required to pull) are
+# subcharts of this release: one tenant release now deploys the
+# tenant-worker, its dedicated Postgres, its dedicated agent-brain instance,
+# AND its dedicated mcp-hub instance (docs/components/tool-registry.md,
+# "Resolved: Per-Tenant Deployment") together.
+dependencies:
+  - name: postgresql
+    version: "18.5.24"
+    repository: "https://charts.bitnami.com/bitnami"
+  - name: agent-brain
+    version: "0.1.1"
+    repository: "oci://ghcr.io/realnighthawk"
+  - name: mcp-hub
+    version: "0.1.1"
+    repository: "oci://ghcr.io/realnighthawk/infra/charts"

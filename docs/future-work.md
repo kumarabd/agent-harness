@@ -52,29 +52,11 @@ The tension:
 
 ---
 
-## 4. Permission Gating for Destructive Tool Calls
-**Status: OPEN — parked for later design.**
-
-Surfaced while closing out the retry-policy work (`components/activities-outbound-delivery.md`): destructive-command *safety* (should this specific `shell_exec` call, e.g. `rm -rf`, even be allowed to run) is a genuinely different concern from retry-*safety* (should a failed call be automatically retried), and got conflated during design before being split back apart. Retry-safety is resolved (static idempotency ceiling, `shell_exec` defaults to `non_idempotent`, no per-invocation cleverness — see the tracker doc's note on why that's standard Temporal practice, not a gap). Destructive-command safety itself is not designed at all yet.
-
-**Working hypothesis, based on how other harnesses handle this:** in-process harnesses (Claude Code, Codex, Cursor) use permission-gating *before execution* — an allow/deny policy (and often a human-in-the-loop prompt) checked against the proposed command before it ever runs — not anything to do with retries after the fact. That's likely the right pattern to adopt here too, but it interacts with things already decided (cooperative cancellation, activity boundaries, the turn workflow's loop) in ways not yet worked out — e.g. does a gating check happen inside the tool-call activity, or as a separate step before the activity is even started; does it ever need a human-approval round-trip mid-turn (which would look like a new kind of interrupt/signal, not covered by the existing interrupt design).
-
-**To revisit:** design as its own topic once the core execution path is settled — likely needs its own section in `components/activities-outbound-delivery.md` or a dedicated component doc.
-
-**2026-08-16: a dedicated component doc now exists — `components/tool-registry.md`** — named as the natural home for this, since permission/destructive-command policy is inherently per-tool data. Not yet resolved there either; this section's working hypothesis and open interactions (human-in-the-loop mid-turn approval, activity-boundary placement) still apply verbatim.
-
----
-
-## 5. `delivered_responses` Pruning
-**Status: DEFERRED — deliberately not building this.**
-
-Originally listed as an open question in `components/state-layer.md` on the assumption that an unbounded table needs a retention policy. Checked against actual scope and rejected: the table is two columns (a text PK, a timestamp), the only access pattern is a primary-key point lookup before sending a response, and PK lookups don't degrade with table size. At single-user scale (and even at realistic multi-tenant scale per tenant database — each tenant gets its own copy of this table, see `components/multi-tenancy.md`) there's no actual storage or performance cost to leaving it unbounded — pruning would be solving a problem that doesn't exist rather than a real requirement.
-
-**To revisit:** only if this table is ever observed to actually cost something in practice (unlikely) — not a default assumption that unbounded tables need cleanup.
-
 ---
 
 ## Notes Log
+- 2026-08-23 (later): Promoted permission gating (formerly §4) out of this file entirely — real design work has now genuinely started, via direct conversation, generalized beyond just permission gating into a reusable mid-turn human-interaction primitive. Full design lives in the new `components/user-input.md`. This section's original working hypothesis (permission-gating before execution, not a retry concern) held up; the open interaction it flagged (human-approval round-trip mid-turn, "a new kind of interrupt/signal, not covered by the existing interrupt design") turned out to be exactly right — resolved as a workflow-level signal wait, not an activity-level block.
+- 2026-08-23: Promoted `delivered_responses` pruning (formerly §5) out of this file entirely, at the user's direction — it was already a fully-resolved decision ("deliberately not building this," with real reasoning and a stated revisit condition) sitting in a "future work to still design" list rather than living in the schema it's about. Full reasoning now lives in `components/state-layer.md`'s own schema comment and Notes Log; nothing left open here to track.
 - 2026-08-07: Parked the voice/real-time exploration and the Temporal-necessity reasoning here for later tracing.
 - 2026-08-06: Resolved the previously-undefined workflow lifecycle question via brainstorming: split into a long-lived Session Coordinator (workflow ID = session key, control-plane only) and short-lived Turn Workflows (child workflows, one per turn, recursing into the same shape for subagents). Parallel tool calls within a reasoning step are concurrent activities, not separate workflows. No depth/fan-out cap on subagent recursion. Details in `02-architecture-temporal-execution.md` §§2–4 and the new `components/session-coordinator.md`.
 - 2026-08-06: Closed out the remaining coordinator-lifecycle questions: TTL = 5–15 min idle (never fires mid-turn), `WorkflowIDReusePolicy = AllowDuplicate`, `ParentClosePolicy = ABANDON` for coordinator→turn (vs. `REQUEST_CANCEL` for turn→subagent), and confirmed the coordinator persists nothing to Postgres on exit — everything it would need is either already flushed per-turn or cheaply recomputed on the next coordinator's startup.

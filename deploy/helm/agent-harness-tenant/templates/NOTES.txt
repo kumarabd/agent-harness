@@ -2,14 +2,23 @@ agent-harness-tenant has been deployed.
 
 This is a PER-TENANT release (docs/components/multi-tenancy.md) — one
 `helm install` per tenant, each with its own release name and
-`temporal.namespace`. It deploys:
-{{- if .Values.postgres.enabled }}
-  - {{ include "agent-harness.componentFullname" (dict "context" . "component" "postgres") }}
-    (Postgres — one self-hosted instance for this tenant, PV-backed)
-{{- end }}
-  - {{ include "agent-harness.componentFullname" (dict "context" . "component" "tenant-worker") }}
+`temporal.namespace`. It deploys the whole tenant stack:
+  - {{ include "agent-harness.fullname" . }}-postgresql
+    (Postgres — Bitnami subchart, one dedicated instance for this tenant;
+    hosts both agent-harness's own database and agent-brain's, see
+    values.yaml's postgresql.* comment)
+  - {{ include "agent-harness.componentFullname" (dict "context" . "component" "worker") }}
     (Python — ModelCall/ToolCall/InsertMessage/Persist/Deliver/CompressContext
     activities; this tenant's dedicated fleet, holds this tenant's credentials)
+  - {{ .Release.Name }}-memory-server / {{ .Release.Name }}-memory-worker-temporal
+    (agent-brain, installed under nameOverride "memory" — components/
+    memory-slot.md's memory backend, vendored subchart under
+    charts/agent-brain/, one dedicated instance for this tenant)
+  - {{ .Release.Name }}-tools (mcp-hub, installed under nameOverride "tools";
+    see values.yaml's mcp-hub.* comment)
+    (docs/components/tool-registry.md's mcp-hub-mediated tool tier, one
+    dedicated instance for this tenant. Reachable at MCP_HUB_BASE_URL; no
+    native/Python dispatch code calls it yet)
 
 It does NOT deploy Temporal server itself, and does NOT deploy the
 loop-worker pool (Session Coordinator + Turn Workflow) — that's the
@@ -26,7 +35,7 @@ This release's tenant worker is configured to poll:
 
 Check it's actually connecting:
 
-  kubectl logs -l app.kubernetes.io/component=tenant-worker
+  kubectl logs -l app.kubernetes.io/component=worker
 
 You should see a line like:
   "tenant worker starting: temporal=... namespace=... task_queue=..."
@@ -35,21 +44,23 @@ If it's crash-looping, the most common cause at this stage is
 `temporal.address` being unreachable from inside the cluster (check network
 policy / DNS) or pointing at a namespace it doesn't have access to.
 
-{{- if .Values.postgres.enabled }}
+Check Postgres came up (Bitnami subchart, standard naming):
 
-Check Postgres came up:
+  kubectl logs -l app.kubernetes.io/name=postgresql,app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl get pvc -l app.kubernetes.io/instance={{ .Release.Name }}
 
-  kubectl logs -l app.kubernetes.io/component=postgres -c postgres
-  kubectl get pvc {{ include "agent-harness.fullname" . }}-data
+Then check the init-roles Job (creates agent-brain's and mcp-hub's databases
+on that same instance) succeeded:
 
-A StatefulSet stuck Pending usually means the PVC never bound — check
-`kubectl describe pvc` for a storage-class/capacity error. If
-tenantWorker.replicaCount > 1, the PVC's storageClassName MUST support
-ReadWriteMany (the session filesystem tree is mounted by every replica
+  kubectl logs -l job-name={{ include "agent-harness.fullname" . }}-postgres-init-roles
+
+If tenantWorker.replicaCount > 1, the session-filesystem PVC's
+storageClassName MUST support ReadWriteMany (mounted by every replica
 simultaneously) — most cloud block-storage classes (EBS, PD-SSD, Azure
 Managed Disks) do NOT support this; you need a file-storage-backed class
-(EFS, Filestore, Azure Files, or equivalent).
-{{- end }}
+(EFS, Filestore, Azure Files, or equivalent). Postgres's own PVC (the
+subchart's default) doesn't need this — it's ReadWriteOnce, mounted by a
+single Postgres pod only.
 
 {{- if .Values.llm.enabled }}
 

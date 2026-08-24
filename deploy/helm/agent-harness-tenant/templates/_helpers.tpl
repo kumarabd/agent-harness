@@ -6,16 +6,17 @@ sets one. Standard Helm chart convention.
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{/*
+This chart is always installed one release per tenant, with the release name
+SET TO the tenant name (deploy/helm/tenants/README.md) — so the base name for
+every resource here is just the release name itself, no chart-name suffix
+appended. fullnameOverride is still honored as the standard escape hatch.
+*/}}
 {{- define "agent-harness.fullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
-{{- $name := default .Chart.Name .Values.nameOverride -}}
-{{- if contains $name .Release.Name -}}
 {{- .Release.Name | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
 {{- end -}}
 {{- end -}}
 
@@ -45,7 +46,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
-Per-component name, e.g. "agent-harness-tenant-tenant-worker".
+Per-component name, e.g. "<tenant>-worker".
 */}}
 {{- define "agent-harness.componentFullname" -}}
 {{- printf "%s-%s" (include "agent-harness.fullname" .context) .component -}}

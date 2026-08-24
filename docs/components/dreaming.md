@@ -1,7 +1,7 @@
 # Component: Dreaming
 ## (Session Consolidation — Offline Memory Integration)
 
-> STATUS: IN PROGRESS — base mechanism resolved. This is explicitly a first layer, not the full memory system; deeper design (retrieval, episode schema, cross-session linking) is intentionally deferred.
+> STATUS: SUPERSEDED — this component's batch-job role is redundant with agent-brain's own real, already-deployed consolidation pipeline. Not deleted (kept as history, same treatment `memory-slot.md` gave its own OKF pivot) — see "Superseded: This Component's Batch-Job Role" below and Notes Log (2026-08-23).
 
 ### Role (one line)
 A periodic, per-tenant batch job that finds idle sessions, compacts and summarizes them into durable "episodes," and pushes those episodes to a memory backend — the piece of this architecture that turns raw, ever-accumulating session transcripts into something a future turn (or a human) can actually draw on, without keeping every session's full detail live forever.
@@ -9,7 +9,27 @@ A periodic, per-tenant batch job that finds idle sessions, compacts and summariz
 ### Why this exists (recap)
 Raised while resolving subagent filesystem isolation (`components/session-filesystem.md`): sessions are deliberately never force-deleted (see that doc and `future-work.md`'s original framing), which means raw transcripts and file diffs accumulate indefinitely. Left alone, that's just growing storage with no compounding value — the point of this component is to periodically distill that raw accumulation into something durable and useful (memory), decoupled from whether the raw session itself is ever cleaned up. Explicitly framed as **part of the harness's memory integration**, not a housekeeping/cleanup mechanism — compaction is a side effect of the process, not its purpose.
 
-### Resolved: Base Mechanism
+### Superseded: This Component's Batch-Job Role
+**2026-08-23.** This doc's entire premise — agent-harness owns a periodic, per-tenant batch job that reads raw session data and pushes consolidated episodes to a memory backend — was designed against a hypothetical backend (OKF-on-PV) this project would have had to build all the consolidation logic for. That premise stopped being true on 2026-08-17 when `components/memory-slot.md` adopted agent-brain (hippocampus) as the real backend, and further when it built a real-time `WriteMemory` write-path: every top-level turn already extracts and pushes events to agent-brain immediately (fire-and-forget), not batched by session-idleness at all.
+
+Separately, and more decisively: **agent-brain already runs its own real, already-deployed consolidation pipeline** — checked directly against its source (`/Users/abishekkumar/Documents/agent-brain/workers/temporal-worker/schedules.py`), not assumed. Seven real Temporal Schedules:
+```
+mining-entities     every 6h
+mining-facts        every 6h   (after entities)
+mining-rules        every 6h
+mining-generalize   daily      — "a consolidation pass, not per-event"
+prototypes          every 6h
+emu-construction    every 6h   — "community detection -> episode reconstruction -> EMU building"
+emu-lifecycle       daily      — "debias/decay/status/merge/split/drift/reindex"
+```
+`emu-construction` performs literal episode reconstruction from raw events; `emu-lifecycle` is an ongoing consolidation/maintenance pass. This is the job this doc set out to design, already built, already running, on agent-brain's own side — not something agent-harness needs a second copy of.
+
+**What's left, reassigned rather than left dangling:**
+- Episode schema/granularity, idle-threshold sizing, batch-failure handling — all moot, there's no batch job left to design them for.
+- Interaction with session filesystem archival — was never really this component's concern once it stopped being the active gate; `components/session-filesystem.md` already independently tracks this as its own open question.
+- Cross-session linking / entity resolution — the one genuinely still-open item, moved to live solely in `components/memory-slot.md` (not duplicated here) — see that doc's Open Questions and its 2026-08-23 entry for why this is a real gap, not just inherited staleness.
+
+### Resolved: Base Mechanism (historical — describes the superseded design, not current architecture)
 - **One job per tenant**, run on a daily cadence (not hours — daily is the base cadence; sub-daily is not needed at this layer). Implemented as a **Temporal Schedule** (native cron), consistent with how periodic work is already modeled elsewhere in this design (e.g. the `delivered_responses`/`ingested_messages` retention discussion considered and rejected scheduling machinery only because those specific tables didn't need it — this job genuinely does).
 - **Runs inside the tenant's own namespace and worker fleet** (`components/multi-tenancy.md`) — this is tenant-scoped batch work, not a shared cross-tenant job, consistent with every other per-tenant isolation boundary already established.
 - **Scans that tenant's Postgres for sessions idle past a threshold** — same idle-since-last-turn measurement already used for the session coordinator's own TTL (`components/session-coordinator.md`), just a much longer window (days), and **not yet consolidated past their latest turn** (requires a watermark — see schema below).
@@ -35,16 +55,17 @@ ALTER TABLE sessions ADD COLUMN last_consolidated_turn_seq int;
 ```
 A session is a candidate when idle past the threshold **and** `last_consolidated_turn_seq` is null or less than its latest `turn_seq`. The consolidation job advances this watermark after a successful push to the memory backend, which is what makes the next run's read incremental rather than a full replay.
 
-### Open Questions / To Design (substantial — this is intentionally a first pass)
-- Episode schema — what an episode actually contains, its granularity (one per session, one per meaningful sub-arc within a long session, etc.). **2026-08-17: format resolved in `components/memory-slot.md` — an episode is an OKF document (`type: episode`, markdown + YAML frontmatter).** Granularity, and the exact frontmatter fields beyond OKF's mandatory `type`, still open.
-- Memory backend — what system episodes are pushed to, and the integration contract (push API, format, auth). **2026-08-17: resolved in `components/memory-slot.md` — an OKF bundle stored on the tenant's existing session-filesystem PV, using the already-resolved Postgres-backed lease mechanism for concurrent-writer safety.** No new infrastructure; this job's push step now targets that location. Exact directory layout/`index.md` conventions still open.
-- Retrieval — how a future turn's context-hydration step actually draws on consolidated episodes. **2026-08-16: now tracked as its own component, `components/memory-slot.md`** — confirmed to be a separate, later capability rather than folded in here.
-- Exact idle threshold (days) — not yet numerically decided, only established as "much longer than the coordinator's own TTL."
-- Cross-session linking / entity resolution (e.g. recognizing the same ongoing project across multiple sessions) — not addressed at all yet.
-- Interaction with session filesystem archival (`components/session-filesystem.md`'s open question: if raw files are ever archived, context-hydration needs to notice and rehydrate) — this component is the natural gate for that, but the archival mechanism itself remains undesigned.
-- Failure handling for a single session's summarization step failing mid-batch (skip and retry next run, presumably — not yet decided explicitly).
+### Open Questions / To Design (historical — see "Superseded" above; none of these are active anymore)
+- Episode schema — moot, agent-brain's own EMU pipeline owns episode shape now.
+- Memory backend — resolved: agent-brain, not OKF (see `memory-slot.md`'s own "Superseded: OKF" section).
+- Retrieval — owned by `components/memory-slot.md`.
+- Exact idle threshold (days) — moot, no batch job needs one.
+- Cross-session linking / entity resolution — the one item that outlived this doc's own relevance; tracked solely in `components/memory-slot.md` now.
+- Interaction with session filesystem archival — reassigned to `components/session-filesystem.md`, which already tracks it independently.
+- Failure handling for a single session's summarization step failing mid-batch — moot, no batch job.
 
 ### Notes Log
+- 2026-08-23: **Superseded.** In a live conversation the question "isn't this already covered by the memory backend?" prompted checking agent-brain's actual scheduling code directly rather than assuming — confirmed agent-brain runs its own real, already-deployed 7-schedule consolidation pipeline (`mining-entities/facts/rules/generalize`, `prototypes`, `emu-construction`, `emu-lifecycle`) that already does episode reconstruction and ongoing consolidation maintenance, combined with `memory-slot.md`'s real-time `WriteMemory` write-path (every top-level turn pushes events immediately, no batching by session-idleness). This component's entire premise — agent-harness owning a separate per-tenant batch consolidation job — was designed before agent-brain was adopted as the backend and never revisited afterward, the same stale-premise pattern found and fixed on several other docs this session (`session-coordinator.md`, `state-layer.md`, `session-filesystem.md`, `multi-tenancy.md`). Marked superseded rather than deleted; cross-session linking/entity resolution is the one item that outlived this doc's relevance, moved to live solely in `memory-slot.md`.
 - 2026-08-07: Introduced as a scaffold while resolving subagent filesystem isolation — parked in `future-work.md` §3 pending a real design pass.
 - 2026-08-07: Promoted to a full component doc. Resolved the base mechanism: daily per-tenant Temporal Schedule, incremental consolidation via a `last_consolidated_turn_seq` watermark on `sessions`, output framed explicitly as "episodes" pushed to an external memory backend. Deliberately kept episode schema, memory backend choice, and retrieval out of scope for this pass — this is the base layer of memory integration, not the full system.
 - 2026-08-16: Retrieval split out into its own component doc, `components/memory-slot.md` — this doc stays scoped to the producer/consolidation side only.

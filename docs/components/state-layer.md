@@ -122,11 +122,15 @@ CREATE TABLE delivered_responses (
   response_id   text PRIMARY KEY REFERENCES turns(turn_id),
   delivered_at  timestamptz NOT NULL DEFAULT now()
 );
--- Retention: functionally safe to prune once the referenced turn is older than the
--- delivery pipeline's max plausible redelivery window (e.g. 24h) — but deliberately
--- left unbounded for now. Row is tiny (two columns) and the only access pattern is a
--- PK point lookup, which stays fast regardless of table size — no actual storage or
--- performance cost to leaving it unpruned. See future-work.md for the deferred item.
+-- Retention: DECIDED NOT TO PRUNE (2026-08-23, closed out of future-work.md §5,
+-- reasoning moved here) — functionally safe to prune once the referenced turn is
+-- older than the delivery pipeline's max plausible redelivery window (e.g. 24h), but
+-- deliberately staying unbounded. Row is tiny (two columns) and the only access
+-- pattern is a PK point lookup, which stays fast regardless of table size at any
+-- realistic scale (single-user, or even per-tenant-database multi-tenant scale —
+-- components/multi-tenancy.md) — pruning would solve a problem that doesn't exist.
+-- Revisit only if this table is ever actually observed to cost something in
+-- practice, not as a default assumption that unbounded tables need cleanup.
 
 -- Inbound dedup ledger (components/gateway.md). Symmetric to delivered_responses
 -- on the outbound side: webhook platforms redeliver at-least-once, so the gateway
@@ -202,6 +206,7 @@ Not a new design decision — mostly making explicit what earlier docs already i
 - Multi-tenant scoping — resolved in `components/multi-tenancy.md`: **revised 2026-08-14** from "separate database per tenant" (implying a shared/managed Postgres service) to "one self-hosted Postgres instance per tenant, backed by that tenant's own PersistentVolume" (`components/session-filesystem.md`) — avoids any unified Postgres layer across tenants, not just a unified database. Affects deployment topology only; the schema above is unchanged either way.
 
 ### Notes Log
+- 2026-08-23 (later): Closed `delivered_responses` pruning out of `future-work.md` §5 entirely — it was a fully-resolved decision ("deliberately not building this," with real reasoning) sitting in a "future work to design" list rather than living in the schema it's about. Moved the reasoning into this doc's own schema comment (above); `future-work.md` no longer carries it as an open item.
 - 2026-08-23: **Doc correction, not a new decision.** STATUS line was stale ("SCAFFOLD"), despite this schema having been implemented since 2026-08-07 (below) and in continuous real use since — corrected to reflect actual state. Also added a cross-reference to `context_summaries` (added later by `002_context_summaries.sql`, owned by `components/context-slot.md`), which existed in the real schema but wasn't listed here.
 - 2026-08-07: Added the session filesystem lease/metadata index as a state-layer responsibility, resolving subagent filesystem coordination without worker pinning — see new `components/session-filesystem.md`.
 - 2026-08-07: Added the `delivered_responses` idempotency ledger as a state-layer responsibility, resolving deliver-path double-send safety — see `components/activities-outbound-delivery.md`.

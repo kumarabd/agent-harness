@@ -8,10 +8,12 @@ metadata:
 spec:
   # ReadWriteMany by default: this PV is mounted by the whole tenant-worker
   # fleet simultaneously (docs/components/session-filesystem.md — the session
-  # tree must be reachable by any replica), not just by the single-instance
-  # Postgres StatefulSet. Most cloud block-storage classes (EBS gp3, PD-SSD,
-  # Azure managed disks) only support RWO — this requires a file-storage-backed
-  # class (EFS, Azure Files, Filestore, or an equivalent CSI driver). Set
+  # tree must be reachable by any replica). Postgres no longer shares this PV
+  # (the postgresql subchart provisions its own dedicated PVC — see
+  # values.yaml's postgresql.* comment), so this volume is session-filesystem
+  # only now. Most cloud block-storage classes (EBS gp3, PD-SSD, Azure managed
+  # disks) only support RWO — this requires a file-storage-backed class (EFS,
+  # Azure Files, Filestore, or an equivalent CSI driver). Set
   # tenantVolume.accessMode: ReadWriteOnce only if tenantWorker.replicaCount
   # is pinned to 1, which defeats the point of a worker fleet.
   accessModes:

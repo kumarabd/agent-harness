@@ -1,18 +1,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "agent-harness-shared.fullname" . }}
+  name: {{ include "agent-harness.fullname" . }}
   labels:
-    {{- include "agent-harness-shared.labels" . | nindent 4 }}
+    {{- include "agent-harness.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "agent-harness-shared.selectorLabels" . | nindent 6 }}
+      {{- include "agent-harness.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "agent-harness-shared.selectorLabels" . | nindent 8 }}
+        {{- include "agent-harness.selectorLabels" . | nindent 8 }}
       {{- if or .Values.metrics.enabled .Values.podAnnotations }}
       annotations:
         {{- if .Values.metrics.enabled }}
@@ -25,7 +25,7 @@ spec:
         {{- end }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "agent-harness-shared.fullname" . }}
+      serviceAccountName: {{ include "agent-harness.fullname" . }}
       # This worker never calls the Kubernetes API — it only polls Temporal.
       automountServiceAccountToken: false
       containers:
@@ -39,7 +39,7 @@ spec:
           {{- end }}
           envFrom:
             - configMapRef:
-                name: {{ include "agent-harness-shared.fullname" . }}-config
+                name: {{ include "agent-harness.fullname" . }}-config
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}

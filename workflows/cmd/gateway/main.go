@@ -10,9 +10,12 @@
 // webhook-like/polling, not connection-based, so delivery collapses to a
 // direct Postgres read (gateway/web.md's "Resolved: Delivery" section):
 //
-//	POST /send  — verify Clerk JWT, resolve session_key, dedup, SignalWithStart, ack.
-//	GET  /poll  — verify Clerk JWT, resolve session_key, read new turns +
-//	              any pending user_input_requests directly from Postgres.
+//	POST /send     — verify Clerk JWT, resolve session_key, dedup, SignalWithStart, ack.
+//	GET  /poll     — verify Clerk JWT, resolve session_key, read new turns +
+//	                 any pending user_input_requests directly from Postgres.
+//	POST /respond  — verify Clerk JWT, answer a pending user_input_requests
+//	                 row via SignalWorkflow against its own workflow_id
+//	                 (docs/components/user-input.md).
 //
 // Scoped to Web only for this first pass — the connection-lease mechanism
 // gateway.md designs for a future connection-based platform is deliberately
@@ -95,6 +98,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("POST /send", requireClerkAuth(http.HandlerFunc(s.handleSend)))
 	mux.Handle("GET /poll", requireClerkAuth(http.HandlerFunc(s.handlePoll)))
+	mux.Handle("POST /respond", requireClerkAuth(http.HandlerFunc(s.handleRespond)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	addr := envOrDefault("GATEWAY_BIND_ADDRESS", "0.0.0.0:8090")

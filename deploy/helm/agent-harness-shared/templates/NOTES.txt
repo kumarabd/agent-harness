@@ -1,10 +1,10 @@
-agent-harness-shared has been deployed.
+agent-harness has been deployed.
 
 This is the SHARED, tenant-agnostic loop-worker pool
 (docs/components/multi-tenancy.md) — deployed ONCE for the whole cluster,
 unlike agent-harness-tenant which is one release per tenant. It deploys:
 
-  - {{ include "agent-harness-shared.fullname" . }}
+  - {{ include "agent-harness.fullname" . }}
     (Go — Session Coordinator + Turn Workflow; serves every namespace listed
     in temporal.namespaces from every replica)
 

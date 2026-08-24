@@ -57,6 +57,7 @@ tenantWorker:
     port: 9090
     path: "/metrics"
 
+<<<<<<< Updated upstream
 # -- Web platform inbound/outbound path (deploy/docker/gateway.Dockerfile,
 # workflows/cmd/gateway, docs/components/gateway/web.md). One gateway per
 # tenant, never shared — it holds this tenant's Clerk secret key and talks
@@ -74,19 +75,89 @@ gateway:
 # not a scaling dimension, it's the isolation boundary.
 postgres:
   enabled: true
+=======
+# -- The Web platform's inbound/outbound path (docs/components/gateway.md,
+# docs/components/gateway/web.md) — workflows/cmd/gateway. One per tenant,
+# same isolation reasoning as tenantWorker above: this process holds this
+# tenant's Clerk secret key and talks directly to this tenant's own Postgres,
+# so it is never shared across tenants. Disabled by default — a tenant with
+# no Web client configured yet has nothing for this to serve.
+gateway:
+  enabled: false
+>>>>>>> Stashed changes
   image:
-    repository: "postgres"
-    tag: "16-alpine"
+    repository: "gcr.io/kumarabd/agent-harness/gateway"
+    tag: "latest"
     pullPolicy: IfNotPresent
-  database: "agent_harness"
-  username: "agent_harness"
-  # -- Name of a pre-existing Secret to use instead of the chart generating
-  # one (templates/postgres-secret.yaml). Leave empty to let the chart
-  # generate and manage a random password, stable across `helm upgrade`
-  # (see that template's comment on `helm.sh/resource-policy: keep`).
-  existingSecret: ""
-  existingSecretPasswordKey: "POSTGRES_PASSWORD"
+  replicaCount: 1
+  port: 8090
+  # -- REQUIRED when gateway.enabled=true — docs/components/gateway/web.md's
+  # "Resolved: Auth" (reuse agent-web's existing Clerk project). Do NOT
+  # commit a real value here; set it per tenant in
+  # deploy/helm/tenants/<tenant>.yaml instead, same discipline as
+  # llm.openai.apiKey above.
+  clerkSecretKey: ""
   resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- One self-hosted Postgres instance for this tenant — now a real subchart
+# dependency (Bitnami's postgresql, same as ../../../infra/postgres's own
+# pattern; see Chart.yaml) rather than a hand-rolled StatefulSet. Deliberately
+# NOT a managed/shared Postgres service — see
+# docs/components/multi-tenancy.md's 2026-08-14 revision for why. Provisions
+# its own dedicated PVC (Bitnami's own default) rather than reusing
+# tenantVolume below — a deliberate simplification over the earlier
+# hand-rolled chart's subPath-on-the-shared-PV approach, traded for staying
+# on the subchart's own well-tested defaults instead of fighting them.
+#
+# This is agent-harness's OWN role/database, created automatically by the
+# subchart from auth.* below. agent-brain's separate role/database on this
+# SAME server is provisioned by templates/postgres-init-roles-hook.yaml
+# instead (mirrors ../../../infra/postgres's own init-roles Job, trimmed to
+# the one extra role this chart needs).
+postgresql:
+  auth:
+    # -- Do NOT commit real passwords here — this is the chart's own tracked
+    # default values file. Set real values per tenant in
+    # deploy/helm/tenants/<tenant>.yaml instead.
+    postgresPassword: ""
+    username: "agent_harness"
+    password: ""
+    database: "agent_harness"
+  primary:
+    persistence:
+      size: "10Gi"
+
+# -- Controls the init-roles Job and tenant-worker's own AGENT_BRAIN_* env
+# vars (templates/tenant-worker-deployment.yaml) — NOT whether the `agent-brain`
+# subchart itself deploys. It has no enabled-gating of its own (vendored
+# as-is, see charts/agent-brain/), so it always deploys whenever this chart
+# is installed — matching "this release deploys the whole tenant stack"
+# rather than treating agent-brain as optional. Leave true unless you
+# specifically want tenant-worker to skip calling it.
+agentBrain:
+  enabled: true
+  # -- Password for the SECOND role/database the shared Postgres server
+  # above hosts, for agent-brain — created by
+  # templates/postgres-init-roles-hook.yaml, and the single source
+  # templates/agent-brain-creds-secret.yaml uses to build agent-brain's own
+  # postgres-dsn (no separate hand-composed DSN to keep in sync). Do NOT
+  # commit a real value here.
+  postgres:
+    password: ""
+  # -- tenant-worker's own calling credential (AGENT_BRAIN_API_KEY,
+  # agent-brain-secret.yaml) AND the single source
+  # templates/agent-brain-creds-secret.yaml uses to build agent-brain's own
+  # api-keys bootstrap value ("<this value>:tenant-worker") — one value,
+  # both sides. Do NOT commit a real value here.
+  apiKey: ""
+  # -- Not a secret — the X-Agent-ID header agent-brain's own auth requires
+  # on every call (internal/mcp/tenant.go's "agent_id required" check).
+  # Identifies this calling product, not a per-tenant value in the usual
+  # sense — fine to leave at the chart default for every tenant.
+  agentID: "agent-harness"
 
 # -- Real LLM provider config for ModelCall (activities/activities/llm.py).
 # Only needed for turns with no _test_scripted_responses fixture row — pure
@@ -103,7 +174,7 @@ llm:
   # only provider this chart (and activities/activities/llm.py) knows how to
   # configure.
   openai:
-    baseURL: "https://api.pioneer.ai/v1"
+    baseURL: "https://api.inference.crusoecloud.com/v1/"
     # -- REQUIRED if llm.enabled — no safe default. The specific provider's
     # model catalog isn't known ahead of time, so guessing one would likely
     # just be wrong (matches llm.py's own runtime check).
@@ -119,12 +190,192 @@ llm:
     # deploy/helm/tenants/<tenant>.yaml instead (see that directory's
     # README.md), which stays out of the chart's own tracked defaults.
     apiKey: ""
+  # -- docs/components/model-registry.md — per-tier model overrides. All
+  # optional: a tier left as "" falls back to llm.openai.model
+  # (model_registry.py's own behavior, not re-implemented here), so a
+  # tenant that hasn't configured this at all keeps behaving exactly like
+  # today's single-model setup — every tier just resolves to the same
+  # model. contextWindow similarly falls back to a conservative 128000
+  # default if left at 0. Set real values per tenant only if you actually
+  # want different models per tier.
+  tiers:
+    # costPerMillionTokens.* — docs/components/model-registry.md's pricing
+    # table, in $/1M tokens (how providers publish pricing). "" (unset) means
+    # no cost data for that rate, not free — budget-guardrails.md's
+    # cost-based metrics stay honestly absent until a real number is filled
+    # in, same as an unset model/contextWindow falls back rather than guessing.
+    fast:
+      model: ""
+      contextWindow: 0
+      costPerMillionTokens:
+        input: ""
+        output: ""
+        cachedInput: ""
+    medium:
+      model: ""
+      contextWindow: 0
+      costPerMillionTokens:
+        input: ""
+        output: ""
+        cachedInput: ""
+    expert:
+      model: ""
+      contextWindow: 0
+      costPerMillionTokens:
+        input: ""
+        output: ""
+        cachedInput: ""
 
-# -- The shared PV for this tenant: hosts Postgres's data directory AND the
-# session filesystem tree (docs/components/session-filesystem.md), under
-# disjoint subpaths — see templates/postgres-statefulset.yaml and
-# templates/tenant-worker-deployment.yaml for how each side is confined to
-# its own subpath via `subPath`.
+# -- agent-brain (hippocampus) subchart itself — components/memory-slot.md's
+# memory backend, a real dependency published to
+# oci://ghcr.io/realnighthawk/agent-brain (see Chart.yaml). Key name matches
+# that chart's own `name:` exactly ("agent-brain", hyphenated) — this is how
+# Helm passes values into a subchart, not a naming choice.
+#
+# Only the fields this deployment actually needs to override from that
+# chart's own defaults are set here; everything else (cors, explorer, iam,
+# config) keeps its vendored default. Do NOT commit real secret values here —
+# set them per tenant in deploy/helm/tenants/<tenant>.yaml instead.
+agent-brain:
+  # -- Renders this subchart's resources as <release>-memory(-server/...)
+  # instead of the default <release>-agent-brain — this tenant's memory
+  # instance, named for what it does rather than the vendored chart's own
+  # name. Referenced directly (not computed) by
+  # templates/tenant-worker-deployment.yaml's AGENT_BRAIN_BASE_URL.
+  nameOverride: "memory"
+  image:
+    registry: "ghcr.io"
+    repositoryOwner: "realnighthawk"
+    tag: "latest"
+  secret:
+    # -- create: false + existingSecret below — postgres-dsn and api-keys are
+    # NOT set here. Helm values can't reference other values (no
+    # interpolation in values.yaml), so rather than hand-composing those as
+    # separate literal strings that duplicate agentBrain.postgres.password /
+    # agentBrain.apiKey above, templates/agent-brain-creds-secret.yaml
+    # computes them (real Go-template interpolation) directly from those two
+    # values into a Secret this subchart reads via existingSecret instead of
+    # generating its own. Set the password/key once, in ONE place.
+    create: false
+    # -- REQUIRED. This tenant's embedding provider key (LiteLLM or direct) —
+    # genuinely independent of anything else in this file, no single source
+    # to derive it from.
+    litellmAPIKey: ""
+    # -- REQUIRED. Any random per-tenant secret; do not reuse across tenants.
+    jwtSecret: ""
+    # -- Guards agent-brain's /admin/reset-memory endpoint. Explicitly
+    # overridden to empty here — the vendored subchart's own default
+    # ("random-admin-secret") is a known/insecure placeholder that would
+    # otherwise silently enable that endpoint. Empty means the endpoint
+    # always 401s (that chart's own documented behavior) and agent-brain's
+    # env template skips emitting ADMIN_SECRET entirely, so no matching key
+    # is needed in templates/agent-brain-creds-secret.yaml either. Set a real
+    # value per tenant (deploy/helm/tenants/<tenant>.yaml) only if that
+    # endpoint is actually needed.
+    adminSecret: ""
+  # -- Fixed name, not per-release — safe because each tenant already gets
+  # its own Kubernetes namespace (deploy/helm/tenants/README.md's
+  # `-n <k8s-namespace>`), so no cross-tenant collision risk. Must match
+  # templates/agent-brain-creds-secret.yaml's metadata.name exactly.
+  existingSecret: "agent-brain-creds"
+  embed:
+    enabled: true
+    litellmBaseURL: "http://litellm-service.core.svc:4000"
+    model: "bge-m3"
+    dim: 1024
+  # -- No Temporal namespace isolation of its own — reuses this tenant's own
+  # namespace (temporal.namespace above), since agent-brain's mining/EMU
+  # pipeline is already scoped to this tenant by virtue of this whole release
+  # being per-tenant.
+  temporal:
+    address: ""
+    namespace: ""
+  cors:
+    enabled: false
+
+# -- Controls the init-roles Job and (once native/Python-side dispatch code
+# exists — not yet built, see docs/components/tool-registry.md's Open
+# Questions) tenant-worker's own calls into it — NOT whether the `mcp-hub`
+# subchart itself deploys, same shape as agentBrain above. Leave true unless
+# you specifically want mcp-hub to not be part of this tenant's stack.
+mcpHub:
+  enabled: true
+  # -- Password for the THIRD role/database the shared Postgres server above
+  # hosts, for mcp-hub — created by templates/postgres-init-roles-hook.yaml.
+  # Unlike agent-brain, mcp-hub's own chart has no existingSecret escape
+  # hatch (its Secret is unconditionally self-generated from
+  # mcp-hub.database.* below) — so this value has NO single-source link to
+  # mcp-hub.database.password the way agent-brain's postgres-dsn does; the
+  # two literally must be set to the same value by hand. Do NOT commit a
+  # real value here.
+  postgres:
+    password: ""
+
+# -- mcp-hub subchart itself — docs/components/tool-registry.md's
+# "Resolved: Leverage mcp-hub" / "Resolved: Per-Tenant Deployment", published
+# to oci://ghcr.io/realnighthawk/infra/charts/mcp-hub (private registry —
+# `helm registry login ghcr.io` required before `helm dependency update`).
+# Key name matches that chart's own `name:` exactly, same reasoning as
+# agent-brain above.
+#
+# SECURITY: that chart's own tracked default values.yaml bakes in several
+# live-looking credentials under `manifests` (a GitHub PAT among them,
+# docs/components/tool-registry.md's Notes Log) — verified by rendering,
+# Helm's normal map-merge does NOT clear a subchart's default map entries
+# just because the parent sets the same key to `{}`; only an explicit `null`
+# per child key actually deletes it. Every default manifest entry that
+# chart ships is nulled out below for exactly that reason — do not remove
+# these nullifications without confirming (by rendering, not assuming) that
+# the upstream chart's own defaults are no longer live secrets. Add back only
+# the manifests this tenant actually needs, with this tenant's own
+# credentials, in deploy/helm/tenants/<tenant>.yaml.
+#
+# Requires mcp-hub chart >= 0.1.1 (Chart.yaml's dependencies) — earlier
+# versions hardcode their fullname to the bare release name and ignore
+# nameOverride/fullnameOverride entirely.
+mcp-hub:
+  # -- Renders this subchart's resources as <release>-tools instead of the
+  # upstream default of just <release> — this tenant's tool-registry
+  # instance, named for what it does. Requires >= 0.1.1 (see above).
+  # Referenced directly (not computed) by
+  # templates/tenant-worker-deployment.yaml's MCP_HUB_URL and
+  # EMBEDDING_API_KEY.
+  nameOverride: "tools"
+  database:
+    name: "mcphub"
+    user: "mcphub"
+    # -- Do NOT commit a real value here — see mcpHub.postgres.password
+    # above; the two must match.
+    password: ""
+    # -- REQUIRED, per-tenant (can't be set here — Helm values can't
+    # reference .Release.Name, and unlike the Bitnami postgresql subchart's
+    # generated Secret, mcp-hub's own chart has no existingSecret mechanism
+    # to route a computed value through). Set to
+    # "{release-name}-postgresql.{k8s-namespace}.svc.cluster.local" in
+    # deploy/helm/tenants/<tenant>.yaml, matching whatever release
+    # name/namespace that tenant is actually installed under.
+    host: ""
+  embedding:
+    # -- REQUIRED. Do NOT leave the upstream chart's own insecure default
+    # ("sk-change-this-to-a-secure-key") — set a real value per tenant.
+    apiKey: ""
+  manifests:
+    agent-brain.yaml: null
+    maps-engine.yaml: null
+    notion.yaml: null
+    trek.yaml: null
+    finance.yaml: null
+    exa.yaml: null
+    github.yaml: null
+    grafana.yaml: null
+    health.yaml: null
+    utility.yaml: null
+    abrp.yaml: null
+
+# -- The shared PV for this tenant: the session filesystem tree
+# (docs/components/session-filesystem.md). No longer also hosts Postgres's
+# data directory — the postgresql subchart above provisions its own
+# dedicated PVC instead (see that block's comment).
 tenantVolume:
   enabled: true
   size: "10Gi"
@@ -137,5 +388,4 @@ tenantVolume:
   # cluster's default StorageClass.
   storageClassName: ""
   accessMode: "ReadWriteMany"
-  postgresSubPath: "postgres"
   sessionsSubPath: "sessions"
