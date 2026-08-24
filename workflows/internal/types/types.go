@@ -98,6 +98,22 @@ type ToolCallRef struct {
 	ToolCallID string `json:"tool_call_id"`
 	ToolName   string `json:"tool_name"`
 	IsSubagent bool   `json:"is_subagent"`
+	// docs/components/user-input.md — computed by ModelCall at mint time,
+	// since that's the one place in this call chain that has the real
+	// arguments in memory (workflow code never does, under the
+	// reference-passing contract). Never true at the same time as
+	// IsSubagent in this first pass — deliberately not designed for that
+	// combination yet.
+	RequiresApproval bool `json:"requires_approval"`
+	// The resolved {server, tool} identity behind this call — "shell" +
+	// the reduced command-name token for shell_exec, or the real
+	// {server,tool} pair for call_tool. Crosses the reference-passing
+	// boundary the same way ToolName already does (dispatch/routing
+	// metadata, not the call's actual arguments — components/multi-tenancy.md's
+	// "tool name... is workflow-visible by design, not an accepted leak").
+	// Only populated when RequiresApproval is true; empty otherwise.
+	Server string `json:"server,omitempty"`
+	Tool   string `json:"tool,omitempty"`
 }
 
 // ModelCallOutput is ModelCall's only output — refs and usage, never content
@@ -160,4 +176,69 @@ type InsertMessageInput struct {
 	ParentID    string  `json:"parent_id"`
 	ParentType  string  `json:"parent_type"`
 	TurnSeq     *int    `json:"turn_seq,omitempty"`
+}
+
+// UserInputOption is one selectable choice in a UserInputRequest.
+// docs/components/user-input.md.
+type UserInputOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+// UserInputRequest is UserInputRequestWorkflow's input — kind-agnostic; the
+// only thing this workflow does is durably wait for a response, however long
+// that takes (docs/components/user-input.md, "Resolved: Why an Activity
+// Can't Do This, a Workflow Can"). Context is opaque here — carries whatever
+// the specific consumer (permission gating, a future decision-request
+// consumer) needs, never interpreted by this workflow itself.
+type UserInputRequest struct {
+	RequestID     string            `json:"request_id"`
+	TurnID        string            `json:"turn_id"`
+	Kind          string            `json:"kind"` // "permission" | "decision" | ...
+	Prompt        string            `json:"prompt"`
+	Options       []UserInputOption `json:"options"`
+	AllowFreeText bool              `json:"allow_free_text"`
+	Context       map[string]any    `json:"context"`
+}
+
+// UserInputResponse is what the human actually answered.
+type UserInputResponse struct {
+	RequestID        string  `json:"request_id"`
+	SelectedOptionID *string `json:"selected_option_id"`
+	FreeText         *string `json:"free_text"`
+}
+
+// ApprovalGatedCallSpec is set on UserInputRequestWorkflowInput only when
+// this request IS permission gating (docs/components/user-input.md,
+// "Resolved: Permission Gating as the First Consumer" — an approval request
+// is one case of a user input request, not a separate workflow type; an
+// earlier version of this design kept them as two nested workflow types
+// specifically so a plain decision request wouldn't carry tool-call-dispatch
+// behavior it didn't need — an optional field on one workflow does that just
+// as well, without an extra child-workflow hop). Nil for a plain decision
+// request. ToolName is the real top-level tool ("shell_exec" | "call_tool"),
+// needed for toolTimingFor once/if approved.
+type ApprovalGatedCallSpec struct {
+	ToolCallID string `json:"tool_call_id"`
+	ToolName   string `json:"tool_name"`
+}
+
+// UserInputRequestWorkflowInput/Output wrap UserInputRequest/Response with
+// the workflow-dispatch-only ApprovalGatedCall concern — kept off
+// UserInputRequest itself, since that struct is also what's persisted
+// verbatim to Postgres by the RequestUserInput activity and shouldn't carry
+// a field that activity has no use for.
+type UserInputRequestWorkflowInput struct {
+	Request           UserInputRequest       `json:"request"`
+	ApprovalGatedCall *ApprovalGatedCallSpec `json:"approval_gated_call,omitempty"`
+}
+
+type UserInputRequestWorkflowOutput struct {
+	Response UserInputResponse `json:"response"`
+	// Set only when ApprovalGatedCall was set on the input — the real
+	// ToolCall activity's own result if approved, or a synthesized
+	// "cancelled" result if denied/expired/interrupted. turn.go's
+	// drainResult reads this directly; plain UserInputRequestWorkflow
+	// consumers (a future decision-request use) never see it set.
+	ToolCallOutput *ToolCallOutput `json:"tool_call_output,omitempty"`
 }

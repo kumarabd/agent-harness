@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "In one paragraph, explain why per-subagent filesystem subdirectories are isolated by default rather than automatically merged into the parent."
+  }
+}

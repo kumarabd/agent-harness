@@ -58,6 +58,16 @@ class ToolCallRef:
     tool_call_id: str = ""
     tool_name: str = ""
     is_subagent: bool = False
+    # docs/components/user-input.md — computed here, at mint time, since
+    # this is the one place with the real arguments in memory (workflow code
+    # never has them). Never true alongside is_subagent in this first pass.
+    requires_approval: bool = False
+    # Resolved {server, tool} identity behind this call — dispatch/routing
+    # metadata crossing the reference-passing boundary the same way
+    # tool_name already does, not the call's actual arguments. Only set
+    # when requires_approval is True.
+    server: str = ""
+    tool: str = ""
 
 
 @dataclass
@@ -130,3 +140,31 @@ class SignalPayload:
     through the workflow (see workflows/cmd/starter)."""
 
     message: Message = field(default_factory=Message)
+
+
+@dataclass
+class UserInputOption:
+    id: str = ""
+    label: str = ""
+
+
+@dataclass
+class UserInputRequest:
+    """docs/components/user-input.md — kind-agnostic; context is opaque here,
+    interpreted only by whichever consumer built the request (permission
+    gating, a future decision-request consumer)."""
+
+    request_id: str = ""
+    turn_id: str = ""
+    kind: str = ""
+    prompt: str = ""
+    options: list[UserInputOption] = field(default_factory=list)
+    allow_free_text: bool = False
+    context: dict = field(default_factory=dict)
+
+
+@dataclass
+class UserInputResponse:
+    request_id: str = ""
+    selected_option_id: str | None = None
+    free_text: str | None = None

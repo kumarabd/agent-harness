@@ -75,7 +75,8 @@ from .get_max_turn_seq import GetMaxTurnSeqActivity
 from .insert_message import InsertMessageActivity
 from .model_call import ModelCallActivity
 from .persist import PersistActivity
-from .tool_call import ToolCallActivity
+from .tool_call import DenyToolCallActivity, ToolCallActivity
+from .user_input import CloseUserInputActivity, RequestUserInputActivity
 from .write_memory import WriteMemoryActivity
 
 
@@ -137,6 +138,9 @@ async def main() -> None:
             DeliverActivity(pool).__call__,
             WriteMemoryActivity(pool).__call__,
             CompressContextActivity(pool, openai_client).__call__,
+            DenyToolCallActivity(pool).__call__,
+            RequestUserInputActivity(pool).__call__,
+            CloseUserInputActivity(pool).__call__,
         ],
     )
     logging.getLogger(__name__).info(

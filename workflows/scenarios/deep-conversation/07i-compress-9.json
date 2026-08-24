@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "In two or three sentences, explain why escalate-on-retry caps at the expert tier instead of retrying the expert tier forever, and what should happen if the expert tier also fails."
+  }
+}

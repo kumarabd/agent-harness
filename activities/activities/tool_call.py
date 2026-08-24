@@ -130,3 +130,25 @@ class ToolCallActivity:
             json.dumps({"error": message}),
         )
         return ToolCallOutput(tool_call_id=tool_call_id, status="error")
+
+
+class DenyToolCallActivity:
+    """docs/components/user-input.md — ApprovalGatedToolCallWorkflow's own
+    exit path when a call is denied or its approval wait is cancelled before
+    ever reaching the real ToolCall activity. The tool_calls row was minted
+    by ModelCall at status='pending' (see the schema's own note on why that
+    default exists) — nothing else transitions it out of 'pending' if
+    ToolCall itself never runs."""
+
+    def __init__(self, pool):
+        self._pool = pool
+
+    @activity.defn(name="DenyToolCall")
+    async def __call__(self, tool_call_id: str, reason: str) -> None:
+        await self._pool.execute(
+            "UPDATE tool_calls SET status = 'cancelled', reason = $2, side_effect = 'none', "
+            "completed_at = now() WHERE tool_call_id = $1",
+            tool_call_id,
+            reason,
+        )
+        logger.info("DenyToolCall[%s]: reason=%s", tool_call_id, reason)

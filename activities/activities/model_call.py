@@ -26,7 +26,7 @@ import time
 
 from temporalio import activity
 
-from . import ids, llm, model_registry
+from . import ids, llm, model_registry, permissions
 from .types import ModelCallInput, ModelCallOutput, ToolCallRef, Usage
 
 logger = logging.getLogger(__name__)
@@ -175,7 +175,19 @@ class ModelCallActivity:
                         json.dumps(arguments),
                         is_subagent,
                     )
-                    refs.append(ToolCallRef(tool_call_id=tool_call_id, tool_name=tool_name, is_subagent=is_subagent))
+                    approval_needed, gated_server, gated_tool = (
+                        _resolve_gating(tool_name, arguments) if not is_subagent else (False, "", "")
+                    )
+                    refs.append(
+                        ToolCallRef(
+                            tool_call_id=tool_call_id,
+                            tool_name=tool_name,
+                            is_subagent=is_subagent,
+                            requires_approval=approval_needed,
+                            server=gated_server,
+                            tool=gated_tool,
+                        )
+                    )
 
             return ModelCallOutput(
                 has_tool_calls=len(refs) > 0,
@@ -186,3 +198,39 @@ class ModelCallActivity:
                 next_hint_modality=next_hint_modality,
                 next_hint_tier=next_hint_tier,
             )
+
+
+def _resolve_gating(tool_name: str, arguments: dict) -> tuple[bool, str, str]:
+    """docs/components/user-input.md — the {server, tool} identity being
+    gated depends on how the model actually invoked things, since
+    permissions.requires_approval needs a real {server, tool} pair and
+    neither shell_exec nor call_tool's own top-level tool_name IS that pair
+    directly. Returns (requires_approval, server, tool) — server/tool are
+    only meaningful when requires_approval is True, threaded through to
+    ToolCallRef so turn.go can build a human-facing approval prompt without
+    ever seeing the call's actual arguments (crosses the reference-passing
+    boundary as routing metadata, same category as tool_name itself).
+
+      - shell_exec: server is always "shell" (matching shell_hub.search()'s
+        own result shape); tool is deliberately just the first
+        whitespace-delimited token of the command string — a known, accepted
+        simplification, not real shell parsing (won't catch a compound
+        command or one invoked via `sh -c "..."`).
+      - call_tool: server/tool are already explicit in its own arguments —
+        this is the one case with an exact, unambiguous identity.
+      - anything else (memory_search, search_tools, declare_next_step_hint,
+        ...): never gateable, these aren't side-effecting.
+    """
+    if tool_name == "shell_exec":
+        command = str(arguments.get("command", "")).strip()
+        first_token = command.split(maxsplit=1)[0] if command else ""
+        if permissions.requires_approval("shell", first_token):
+            return True, "shell", first_token
+        return False, "", ""
+    if tool_name == "call_tool":
+        server = arguments.get("server", "")
+        tool = arguments.get("tool", "")
+        if permissions.requires_approval(server, tool):
+            return True, server, tool
+        return False, "", ""
+    return False, "", ""

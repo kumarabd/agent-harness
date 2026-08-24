@@ -5,7 +5,7 @@
 -- different kind of object, same reasoning already applied to
 -- session_filesystem_leases/_test_scripted_responses.
 
-CREATE TABLE context_summaries (
+CREATE TABLE IF NOT EXISTS context_summaries (
   summary_id    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   session_key   text NOT NULL REFERENCES sessions(session_key),
   kind          text NOT NULL CHECK (kind IN ('leaf', 'condensed')),
@@ -14,4 +14,4 @@ CREATE TABLE context_summaries (
   token_count   int NOT NULL,
   created_at    timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX ON context_summaries (session_key, created_at);
+CREATE INDEX IF NOT EXISTS context_summaries_session_key_created_at_idx ON context_summaries (session_key, created_at);

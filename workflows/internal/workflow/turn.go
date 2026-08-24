@@ -267,16 +267,32 @@ loop:
 		// turn" the way the old single-threshold check was): compaction
 		// genuinely shrinks content, so if context is still over threshold
 		// after one pass, triggering again is correct, not a bug.
-		switch compressionState(mcOut.ContextTokens, mcOut.ContextWindow) {
-		case "hard":
+		//
+		// Found via live testing (context-slot.md's Notes Log): the soft
+		// path used to be gated on the SAME context_tokens the hard path
+		// checks, but that count is structurally capped at lcm's
+		// VERBATIM_WINDOW_MESSAGES — it can sit under the soft threshold
+		// indefinitely while real content silently falls out of the window
+		// with no summary ever written to preserve it. Fix: the soft
+		// (fire-and-forget) path no longer waits for a token threshold at
+		// all — it fires every iteration, unconditionally, relying on
+		// lcm.compact's own cheap "nothing new to compact" no-op (already
+		// live-verified this session) the same way WriteMemory already
+		// fires unconditionally every turn below, and the same "simplicity
+		// over a wasted-call-cost pre-check" call context-slot.md already
+		// made for session-start memory retrieval. Hard stays
+		// threshold-gated and blocking — a genuinely separate concern
+		// (protect the model's actual context window right now), correctly
+		// proportional to context_window.
+		if compressionState(mcOut.ContextTokens, mcOut.ContextWindow) == "hard" {
 			// Blocks until compaction completes, so the *next* ModelCall in
 			// this same turn assembles a smaller context.
 			cctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
 			_ = workflow.ExecuteActivity(cctx, "CompressContext", input.TurnID).Get(cctx, nil)
-		case "soft":
+		} else {
 			// Fire-and-forget — detached child workflow, same reasoning as
 			// the WriteMemory dispatch below. Per-iteration unique
-			// WorkflowID since soft could fire on more than one iteration
+			// WorkflowID since this can fire on more than one iteration
 			// within the same turn.
 			cwo := workflow.ChildWorkflowOptions{
 				WorkflowID:        input.TurnID + ":compress-context:" + strconv.Itoa(iterations),
@@ -298,14 +314,44 @@ loop:
 		// concurrently, not as a queue of independent workflows. IDs are
 		// already minted by ModelCall — the workflow only reuses them.
 		type pendingCall struct {
-			toolCallID string
-			future     workflow.Future
-			isSubagent bool
+			toolCallID      string
+			future          workflow.Future
+			isSubagent      bool
+			isApprovalGated bool
 		}
 		var calls []pendingCall
 
 		for _, tc := range mcOut.ToolCalls {
-			if tc.IsSubagent {
+			if tc.RequiresApproval {
+				// docs/components/user-input.md — dispatched as a child
+				// workflow (never a plain activity — an activity can't
+				// durably block for up to UserInputRequestTimeout). An
+				// approval request IS a user input request, not a separate
+				// workflow type — ApprovalGatedCall is this call's opt-in use
+				// of the same generic UserInputRequestWorkflow every other
+				// consumer would use.
+				cwo := workflow.ChildWorkflowOptions{
+					WorkflowID:        tc.ToolCallID + ":approval",
+					ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
+				}
+				cctx := workflow.WithChildOptions(cancelCtx, cwo)
+				req := types.UserInputRequest{
+					RequestID: tc.ToolCallID,
+					TurnID:    input.TurnID,
+					Kind:      "permission",
+					Prompt:    "Approve calling " + tc.Server + "/" + tc.Tool + "?",
+					Options: []types.UserInputOption{
+						{ID: "approve", Label: "Approve"},
+						{ID: "deny", Label: "Deny"},
+					},
+					Context: map[string]any{"server": tc.Server, "tool": tc.Tool, "tool_call_id": tc.ToolCallID},
+				}
+				fut := workflow.ExecuteChildWorkflow(cctx, UserInputRequestWorkflow, types.UserInputRequestWorkflowInput{
+					Request:           req,
+					ApprovalGatedCall: &types.ApprovalGatedCallSpec{ToolCallID: tc.ToolCallID, ToolName: tc.ToolName},
+				})
+				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isApprovalGated: true})
+			} else if tc.IsSubagent {
 				childInput := types.TurnInput{
 					SessionKey: input.SessionKey,
 					TurnID:     tc.ToolCallID, // subagent's turn_id IS its tool_call_id
@@ -367,7 +413,7 @@ loop:
 			// is already durably recorded in tool_calls by the activities
 			// themselves — nothing to fold into workflow memory).
 			for _, c := range calls {
-				drainResult(ctx, c.toolCallID, c.future, c.isSubagent)
+				drainResult(ctx, c.toolCallID, c.future, c.isSubagent, c.isApprovalGated)
 			}
 
 			// Dequeue exactly ONE pending message — never batch multiple
@@ -386,7 +432,7 @@ loop:
 
 		cancel()
 		for _, c := range calls {
-			status := drainResult(ctx, c.toolCallID, c.future, c.isSubagent)
+			status := drainResult(ctx, c.toolCallID, c.future, c.isSubagent, c.isApprovalGated)
 			if status == "error" {
 				retries++
 			}
@@ -450,13 +496,29 @@ loop:
 // tool_calls row, written by the ToolCall activity itself. For a subagent,
 // status is inferred the same way from TurnResult/error — its actual content
 // lives in Postgres under its own turn_id, same as any other turn.
-func drainResult(ctx workflow.Context, toolCallID string, f workflow.Future, isSubagent bool) string {
+func drainResult(ctx workflow.Context, toolCallID string, f workflow.Future, isSubagent bool, isApprovalGated bool) string {
 	if isSubagent {
 		var subResult types.TurnResult
 		if err := f.Get(ctx, &subResult); err != nil {
 			return statusFromError(err)
 		}
 		return "ok"
+	}
+	if isApprovalGated {
+		// docs/components/user-input.md — UserInputRequestWorkflow's result
+		// wraps the real ToolCallOutput (set whenever ApprovalGatedCall was
+		// on the input, which it always is for this dispatch path); a
+		// workflow-level error here means the workflow itself failed before
+		// producing any output at all (e.g. a genuine cancellation that
+		// short-circuited before ToolCallOutput was ever assigned).
+		var out types.UserInputRequestWorkflowOutput
+		if err := f.Get(ctx, &out); err != nil {
+			return statusFromError(err)
+		}
+		if out.ToolCallOutput != nil {
+			return out.ToolCallOutput.Status
+		}
+		return "cancelled"
 	}
 	var out types.ToolCallOutput
 	if err := f.Get(ctx, &out); err != nil {

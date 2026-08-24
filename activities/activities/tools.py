@@ -241,9 +241,19 @@ async def search_tools(arguments: dict, ctx: ToolContext) -> dict:
     catalog still works, just with fewer discoverable tools."""
     query = arguments.get("query", "")
     top_k = arguments.get("top_k", 5)
+    # top_k is documented (TOOLS_SCHEMA) as "max results to return" — the
+    # combined total, not a per-source budget. Found via live testing
+    # (docs/components/tool-registry.md's Notes Log): passing the full
+    # top_k to both sources independently and concatenating meant a "top 5"
+    # request actually returned up to 10. Split evenly, mcp-hub (the
+    # curated, primary discovery tier) taking the remainder on an odd
+    # split — shell-hub is the supplementary, uncurated local tier, not an
+    # equally-weighted peer corpus.
+    mcp_hub_top_k = top_k - top_k // 2
+    shell_hub_top_k = top_k // 2
 
     try:
-        raw = await mcp_hub.call_tool("search_tools", {"query": query, "top_k": top_k})
+        raw = await mcp_hub.call_tool("search_tools", {"query": query, "top_k": mcp_hub_top_k})
     except mcp_hub.McpHubNotConfiguredError:
         raw = []
     # FastMCP (mcp-hub's own server framework) wraps a tool's non-object
@@ -252,7 +262,7 @@ async def search_tools(arguments: dict, ctx: ToolContext) -> dict:
     # by a real call against the live cluster, not assumed from the spec
     # text alone.
     mcp_hub_results = raw["result"] if isinstance(raw, dict) and "result" in raw else raw
-    shell_hub_results = await shell_hub.search(query, top_k)
+    shell_hub_results = await shell_hub.search(query, shell_hub_top_k)
 
     return {"results": list(mcp_hub_results) + shell_hub_results}
 

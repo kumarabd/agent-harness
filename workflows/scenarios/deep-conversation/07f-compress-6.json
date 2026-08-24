@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "In one paragraph, explain why the deliver activity needs an idempotency ledger given Temporal's at-least-once activity execution guarantee."
+  }
+}

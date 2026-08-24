@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "In one paragraph, explain why a reference-passing contract (IDs only, not raw content) makes a shared worker process safe for multi-tenant data."
+  }
+}

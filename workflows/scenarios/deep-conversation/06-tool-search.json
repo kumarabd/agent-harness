@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "Search your available tools for something that could look up GitHub repository information. Just tell me what you find (server, tool name, and a one-line description) — do not call or invoke anything yet."
+  }
+}

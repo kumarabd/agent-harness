@@ -43,6 +43,7 @@ import asyncio
 import logging
 import hashlib
 import os
+import re
 import shutil
 
 import zvec
@@ -142,12 +143,36 @@ def _discover_path_commands() -> list[str]:
     return names
 
 
-async def _describe_command(name: str) -> str:
-    """Best-effort one-line description via `<name> --help`. Falls back to
-    just the bare name if --help fails, times out, or produces nothing
-    usable — a command with no extractable description still gets indexed
-    (under its bare name), it just won't semantically match much beyond
-    literal name mentions."""
+_VERSION_BANNER_RE = re.compile(r"\bversion\s+[\d.]", re.IGNORECASE)
+_MIN_DESCRIPTION_WORDS = 3
+_MIN_DESCRIPTION_CHARS = 15
+_MAX_HELP_LINES_SCANNED = 8
+
+
+def _is_substantial(line: str) -> bool:
+    """A description line has to actually describe something to be worth
+    indexing — found necessary by live testing against the real embedding
+    endpoint (docs/components/tool-registry.md's Notes Log), not assumed: a
+    version banner ("GNU bash, version 5.2.37...") or a near-empty stub
+    ("help:") embeds just as plausibly-close to an unrelated query as a real
+    description does, because there's no real semantic content in either to
+    actually separate them — a short, generic technical string just isn't
+    distinctive enough for the embedding space to place it accurately."""
+    if _VERSION_BANNER_RE.search(line):
+        return False
+    return len(line) >= _MIN_DESCRIPTION_CHARS and len(line.split()) >= _MIN_DESCRIPTION_WORDS
+
+
+async def _describe_command(name: str) -> str | None:
+    """Best-effort one-line description via `<name> --help`. Scans the first
+    few non-empty lines (not just the first) for one that's actually
+    substantial — some real tools lead `--help` with a version banner before
+    the real usage synopsis (bash-family tools do this consistently).
+    Returns None — not the bare name — when nothing substantial is found:
+    indexing a zero-signal entry doesn't just fail to help, it actively adds
+    noise (see _is_substantial's docstring); a command shell_exec can't be
+    usefully searched for is still callable directly, so nothing is lost by
+    leaving it out of the index."""
     try:
         proc = await asyncio.create_subprocess_exec(
             name,
@@ -158,14 +183,15 @@ async def _describe_command(name: str) -> str:
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_HELP_TIMEOUT_SECONDS)
         text = (stdout or stderr).decode("utf-8", errors="replace")
-        first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
-        if first_line:
-            return f"{name}: {first_line}"
+        candidates = [line.strip() for line in text.splitlines() if line.strip()][:_MAX_HELP_LINES_SCANNED]
+        for line in candidates:
+            if _is_substantial(line):
+                return f"{name}: {line}"
     except (asyncio.TimeoutError, OSError):
         pass
     except Exception:  # noqa: BLE001 - a misbehaving discovered binary must never break startup
         logger.warning("shell_hub: --help failed unexpectedly for %r", name, exc_info=True)
-    return name
+    return None
 
 
 async def _build_catalog() -> list[dict[str, str]]:
@@ -174,6 +200,7 @@ async def _build_catalog() -> list[dict[str, str]]:
     catalog = [
         {"name": name, "description": MANUAL_OVERRIDES.get(name, description)}
         for name, description in zip(names, descriptions)
+        if name in MANUAL_OVERRIDES or description is not None
     ]
     for name, description in MANUAL_OVERRIDES.items():
         if name not in names:

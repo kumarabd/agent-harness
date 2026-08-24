@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "In one paragraph, explain why escalating model tier on retry (fast, then medium, then expert) is a reasonable fallback strategy for an unparseable tool-call response."
+  }
+}

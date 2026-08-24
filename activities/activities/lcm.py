@@ -227,15 +227,45 @@ async def _summarize(openai_client, model: str, transcript: str, aggressive: boo
 
 
 async def _fold_leaves_if_due(conn, session_key: str, openai_client, model: str) -> None:
-    leaves = await conn.fetch(
-        "SELECT summary_id, content FROM context_summaries "
-        "WHERE session_key = $1 AND kind = 'leaf' ORDER BY created_at",
-        session_key,
-    )
-    if len(leaves) < LEAF_FOLD_THRESHOLD:
-        return
+    """Recursively folds the summary DAG once any level crosses
+    LEAF_FOLD_THRESHOLD — leaves first, then repeatedly condensed-of-condensed
+    while condensed count is still at/above threshold (a leaf-fold can itself
+    push condensed count over threshold, and folding condensed rows produces
+    one new condensed row, which could — over a long enough session — push
+    it over threshold again).
 
-    combined = "\n".join(row["content"] for row in leaves)
+    Found necessary via a real conversation about long-running-session cost,
+    not assumed: the previous version only ever folded 'leaf' rows — condensed
+    rows were never re-folded, so `context_summaries` for a session that
+    never resets would accumulate an ever-growing flat list of condensed
+    rows, and assemble() sums every one of their token_count unconditionally
+    into every call's context. That's the opposite of what "hierarchical"
+    (LCM §2.1's summary-of-summaries DAG) was supposed to buy — DAG height
+    should grow logarithmically with total summary count, not stay flat
+    while the row count grows linearly forever. No schema change needed:
+    `context_summaries.covers` was already documented as "condensed: child
+    summary_ids", i.e. a condensed row folding other condensed rows was
+    always the intended shape, just never implemented."""
+    await _fold_kind_if_due(conn, session_key, openai_client, model, "leaf")
+    while await _fold_kind_if_due(conn, session_key, openai_client, model, "condensed"):
+        pass
+
+
+async def _fold_kind_if_due(conn, session_key: str, openai_client, model: str, kind: str) -> bool:
+    """Folds every `kind` row into one new 'condensed' row, if at least
+    LEAF_FOLD_THRESHOLD of them exist. Returns whether a fold happened, so
+    the recursive condensed-of-condensed loop above knows whether to keep
+    going."""
+    rows = await conn.fetch(
+        "SELECT summary_id, content FROM context_summaries "
+        "WHERE session_key = $1 AND kind = $2 ORDER BY created_at",
+        session_key,
+        kind,
+    )
+    if len(rows) < LEAF_FOLD_THRESHOLD:
+        return False
+
+    combined = "\n".join(row["content"] for row in rows)
     condensed_content = await _escalating_summarize(openai_client, model, combined)
 
     async with conn.transaction():
@@ -243,12 +273,13 @@ async def _fold_leaves_if_due(conn, session_key: str, openai_client, model: str)
             "INSERT INTO context_summaries (session_key, kind, covers, content, token_count) "
             "VALUES ($1, 'condensed', $2, $3, $4)",
             session_key,
-            [row["summary_id"] for row in leaves],
+            [row["summary_id"] for row in rows],
             condensed_content,
             estimate_tokens(condensed_content),
         )
         await conn.execute(
             "DELETE FROM context_summaries WHERE summary_id = ANY($1::uuid[])",
-            [row["summary_id"] for row in leaves],
+            [row["summary_id"] for row in rows],
         )
-    logger.info("lcm._fold_leaves_if_due[%s]: folded %d leaves into one condensed summary", session_key, len(leaves))
+    logger.info("lcm._fold_kind_if_due[%s]: folded %d %r summaries into one condensed summary", session_key, len(rows), kind)
+    return True

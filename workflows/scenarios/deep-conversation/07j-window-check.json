@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "What's my favorite hiking trail? Answer in one short sentence, or say you don't know if you genuinely can't recall it."
+  }
+}

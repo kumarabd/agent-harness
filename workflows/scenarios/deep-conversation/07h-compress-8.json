@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "In two or three sentences, explain why a detached child workflow with ParentClosePolicy ABANDON is the correct Temporal pattern for genuine fire-and-forget, instead of a bare unawaited ExecuteActivity call."
+  }
+}

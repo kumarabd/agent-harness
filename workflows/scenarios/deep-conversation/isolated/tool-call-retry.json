@@ -1,0 +1,20 @@
+{
+  "message": {
+    "role": "user",
+    "content": "run a tool that will fail"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Running that now.",
+      "tool_calls": [
+        { "name": "definitely_not_a_real_tool", "arguments": { "foo": "bar" }, "is_subagent": false }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 20 }
+    },
+    {
+      "content": "That command failed as expected — wrapping up.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 120, "output_tokens": 20 }
+    }
+  ]
+}

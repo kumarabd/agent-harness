@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "Summarize everything we've discussed in this conversation so far, in 3 short bullet points. Also remind me what my favorite hiking trail is."
+  }
+}

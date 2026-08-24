@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "In one paragraph, explain why Temporal workflow code must be deterministic and how activities solve that."
+  }
+}

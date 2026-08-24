@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "In one paragraph, explain the tradeoff between fixed-TTL locks and renewal-based leases for coordinating concurrent writers."
+  }
+}

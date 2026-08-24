@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "user",
+    "content": "In one paragraph, explain why row-level security is weaker isolation than a separate database per tenant."
+  }
+}
