@@ -7,10 +7,11 @@ import (
 )
 
 type polledTurn struct {
-	TurnSeq int    `json:"turn_seq"`
-	TurnID  string `json:"turn_id"`
-	Status  string `json:"status"`
-	Content string `json:"content"`
+	TurnSeq     int    `json:"turn_seq"`
+	TurnID      string `json:"turn_id"`
+	Status      string `json:"status"`
+	UserContent string `json:"user_content"`
+	Content     string `json:"content"`
 }
 
 type pendingInput struct {
@@ -48,14 +49,24 @@ func (s *server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	// Only completed/failed/cancelled turns — a still-'running' turn has
 	// nothing to show yet (this harness has no token-level streaming,
 	// gateway/web.md's own "Separately, worth being explicit about" note —
-	// a turn's content only exists once it's actually done).
+	// a turn's content only exists once it's actually done). Both the
+	// inbound user content and the final assistant reply are read back here
+	// — a chat page reconstructing full history on load (not just live
+	// delivery) needs both sides of the turn, not just the reply; the
+	// user's own content was never otherwise returned to the client that
+	// sent it (turn.go's InsertMessage call writes it, nothing reads it
+	// back before this).
 	rows, err := s.pool.Query(ctx,
-		"SELECT t.turn_seq, t.turn_id, t.status, COALESCE(m.content, '') "+
+		"SELECT t.turn_seq, t.turn_id, t.status, COALESCE(u.content, ''), COALESCE(a.content, '') "+
 			"FROM turns t "+
+			"LEFT JOIN LATERAL ("+
+			"  SELECT content FROM messages WHERE parent_id = t.turn_id AND role = 'user' "+
+			"  ORDER BY seq ASC LIMIT 1"+
+			") u ON true "+
 			"LEFT JOIN LATERAL ("+
 			"  SELECT content FROM messages WHERE parent_id = t.turn_id AND role = 'assistant' "+
 			"  ORDER BY seq DESC LIMIT 1"+
-			") m ON true "+
+			") a ON true "+
 			"WHERE t.parent_id = $1 AND t.parent_type = 'session' AND t.turn_seq > $2 "+
 			"AND t.status != 'running' ORDER BY t.turn_seq",
 		sessionKey, sinceTurnSeq,
@@ -67,7 +78,7 @@ func (s *server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	var turns []polledTurn
 	for rows.Next() {
 		var t polledTurn
-		if err := rows.Scan(&t.TurnSeq, &t.TurnID, &t.Status, &t.Content); err != nil {
+		if err := rows.Scan(&t.TurnSeq, &t.TurnID, &t.Status, &t.UserContent, &t.Content); err != nil {
 			rows.Close()
 			http.Error(w, "failed to read turns", http.StatusInternalServerError)
 			return
