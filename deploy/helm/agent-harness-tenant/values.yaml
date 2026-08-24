@@ -57,25 +57,6 @@ tenantWorker:
     port: 9090
     path: "/metrics"
 
-<<<<<<< Updated upstream
-# -- Web platform inbound/outbound path (deploy/docker/gateway.Dockerfile,
-# workflows/cmd/gateway, docs/components/gateway/web.md). One gateway per
-# tenant, never shared — it holds this tenant's Clerk secret key and talks
-# to this tenant's own Postgres directly.
-gateway:
-  image:
-    repository: "gcr.io/kumarabd/agent-harness/gateway"
-    tag: "latest"
-    pullPolicy: IfNotPresent
-
-# -- One self-hosted Postgres instance for this tenant, backed by
-# tenantVolume below. Deliberately NOT a managed/shared Postgres service —
-# see docs/components/multi-tenancy.md's 2026-08-14 revision for why. Fixed
-# at exactly one replica (see templates/postgres-statefulset.yaml) — this is
-# not a scaling dimension, it's the isolation boundary.
-postgres:
-  enabled: true
-=======
 # -- The Web platform's inbound/outbound path (docs/components/gateway.md,
 # docs/components/gateway/web.md) — workflows/cmd/gateway. One per tenant,
 # same isolation reasoning as tenantWorker above: this process holds this
@@ -84,7 +65,6 @@ postgres:
 # no Web client configured yet has nothing for this to serve.
 gateway:
   enabled: false
->>>>>>> Stashed changes
   image:
     repository: "gcr.io/kumarabd/agent-harness/gateway"
     tag: "latest"
