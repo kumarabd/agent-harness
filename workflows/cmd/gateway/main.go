@@ -34,7 +34,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/clerk/clerk-sdk-go/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
 )
@@ -44,14 +43,6 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func envRequired(key string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		log.Fatalf("%s is required", key)
-	}
-	return v
 }
 
 type server struct {
@@ -84,10 +75,16 @@ func main() {
 	}
 	defer temporalClient.Close()
 
-	// docs/components/gateway/web.md, "Resolved: Auth" — the Clerk secret
-	// key is global SDK config (clerk.SetKey), not threaded through every
-	// call; jwt.Verify's default JWKSClient reads it from here.
-	clerk.SetKey(envRequired("CLERK_SECRET_KEY"))
+	// docs/components/gateway/web.md, "Resolved: Auth" — clerk.go, "Resolved
+	// via agent-brain's own pattern": read once at startup, not re-read per
+	// request. Fails loudly (not per-request 503s) if neither env var is
+	// set — a Gateway that can never verify anyone is not a degraded state
+	// worth serving traffic in, same as the Postgres/Temporal dial calls
+	// above.
+	clerkCfg := clerkConfigFromEnv()
+	if clerkCfg.JWKSURL == "" {
+		log.Fatalf("CLERK_JWKS_URL or CLERK_ISSUER is required")
+	}
 
 	s := &server{
 		pool:      pool,
@@ -96,9 +93,9 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /send", requireClerkAuth(http.HandlerFunc(s.handleSend)))
-	mux.Handle("GET /poll", requireClerkAuth(http.HandlerFunc(s.handlePoll)))
-	mux.Handle("POST /respond", requireClerkAuth(http.HandlerFunc(s.handleRespond)))
+	mux.Handle("POST /send", requireClerkAuth(clerkCfg, http.HandlerFunc(s.handleSend)))
+	mux.Handle("GET /poll", requireClerkAuth(clerkCfg, http.HandlerFunc(s.handlePoll)))
+	mux.Handle("POST /respond", requireClerkAuth(clerkCfg, http.HandlerFunc(s.handleRespond)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	addr := envOrDefault("GATEWAY_BIND_ADDRESS", "0.0.0.0:8090")

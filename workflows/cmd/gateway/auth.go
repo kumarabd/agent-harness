@@ -4,20 +4,18 @@ import (
 	"context"
 	"net/http"
 	"strings"
-
-	"github.com/clerk/clerk-sdk-go/v2/jwt"
 )
 
 type contextKey string
 
 const clerkUserIDKey contextKey = "clerk_user_id"
 
-// requireClerkAuth verifies the bearer token against Clerk's own JWKS
-// (docs/components/gateway/web.md, "Resolved: Auth — Reuse agent-web's
-// Existing Clerk Integration") and resolves the real Clerk user_id from the
-// token's Subject claim — session_key is built from this, never trusted
-// from anything the client sends directly.
-func requireClerkAuth(next http.Handler) http.Handler {
+// requireClerkAuth verifies the bearer token against the Clerk project's own
+// public JWKS (clerk.go, docs/components/gateway/web.md "Resolved: Auth —
+// Reuse agent-web's Existing Clerk Integration") and resolves the real Clerk
+// user_id from the token's sub claim — session_key is built from this, never
+// trusted from anything the client sends directly.
+func requireClerkAuth(cfg clerkConfig, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		token := strings.TrimPrefix(authHeader, "Bearer ")
@@ -26,13 +24,13 @@ func requireClerkAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		claims, err := jwt.Verify(r.Context(), &jwt.VerifyParams{Token: token})
+		sub, err := verifyClerkSessionJWT(r.Context(), cfg, token)
 		if err != nil {
 			http.Error(w, "invalid session token", http.StatusUnauthorized)
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), clerkUserIDKey, claims.Subject)
+		ctx := context.WithValue(r.Context(), clerkUserIDKey, sub)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
