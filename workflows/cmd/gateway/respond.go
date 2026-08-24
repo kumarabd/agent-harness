@@ -12,6 +12,7 @@ type respondRequest struct {
 	RequestID        string  `json:"request_id"`
 	SelectedOptionID *string `json:"selected_option_id"`
 	FreeText         *string `json:"free_text"`
+	SessionID        string  `json:"session_id"`
 }
 
 type respondResponse struct {
@@ -37,7 +38,7 @@ func (s *server) handleRespond(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := userIDFromContext(r.Context())
-	sessionKey := sessionKeyFor("web", userID)
+	sessionKey := sessionKeyFor("web", userID, webDiscriminator(userID, req.SessionID))
 	ctx := r.Context()
 
 	// Resolve workflow_id AND confirm this request actually belongs to the

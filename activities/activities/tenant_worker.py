@@ -75,6 +75,7 @@ from .get_max_turn_seq import GetMaxTurnSeqActivity
 from .insert_message import InsertMessageActivity
 from .model_call import ModelCallActivity
 from .persist import PersistActivity
+from .seed_child_session import SeedChildSessionContextActivity
 from .tool_call import DenyToolCallActivity, ToolCallActivity
 from .user_input import CloseUserInputActivity, RequestUserInputActivity
 from .write_memory import WriteMemoryActivity
@@ -141,6 +142,7 @@ async def main() -> None:
             DenyToolCallActivity(pool).__call__,
             RequestUserInputActivity(pool).__call__,
             CloseUserInputActivity(pool).__call__,
+            SeedChildSessionContextActivity(pool).__call__,
         ],
     )
     logging.getLogger(__name__).info(

@@ -44,6 +44,19 @@ type MessageEvent struct {
 	// same-request HTTP POST); for a webhook platform it would be that
 	// platform's own message/event id.
 	PlatformMessageID string
+	// Discriminator — gateway.md's "Resolved: Multi-Session Channels" —
+	// which of possibly-many sessions in ChannelID this event belongs to.
+	// ALWAYS populated by the caller, never empty: "channel:{channelID}" for
+	// a channel's own main session, or "<type>:<id>" (e.g. Discord's
+	// "reply_to_platform_message_id:{rootID}") for a reply/thread-scoped
+	// one. Fed into sessionKeyFor alongside Platform/ChannelID.
+	Discriminator string
+	// ParentSessionKey — gateway.md's "Resolved: Multi-Session Channels" —
+	// set only when Discriminator resolves to a session that doesn't exist
+	// yet (detected via the sessions INSERT's own RowsAffected below, not a
+	// separate lookup): which session this new one branched from. Empty for
+	// a channel's own main session, which has no parent.
+	ParentSessionKey string
 }
 
 // submitMessageEvent implements gateway.md's "Resolved: Inbound Flow" steps
@@ -52,7 +65,7 @@ type MessageEvent struct {
 // "accepted" or "already_accepted" (step 4's dedup short-circuit) — the
 // same response shape /send has always returned.
 func (s *server) submitMessageEvent(ctx context.Context, event MessageEvent) (string, error) {
-	sessionKey := sessionKeyFor(event.Platform, event.ChannelID)
+	sessionKey := sessionKeyFor(event.Platform, event.ChannelID, event.Discriminator)
 
 	// Upsert with real values, before SignalWithStart — replaces the real
 	// Gateway InsertMessageActivity's own 'unknown'/'unknown' placeholder
@@ -60,13 +73,34 @@ func (s *server) submitMessageEvent(ctx context.Context, event MessageEvent) (st
 	// Notes Log). ON CONFLICT DO NOTHING on both writes below means
 	// whichever write lands first wins — since this runs before the signal
 	// that eventually triggers InsertMessageActivity, this one wins.
-	if _, err := s.pool.Exec(ctx,
-		"INSERT INTO sessions (session_key, platform, channel_id) VALUES ($1, $2, $3) "+
+	//
+	// parent_session_key: NULL when ParentSessionKey is unset (a channel's
+	// own main session has no parent); ON CONFLICT DO NOTHING means this
+	// only ever takes effect on the FIRST insert for a given session_key —
+	// exactly genesis, never overwritten by a later message for the same
+	// session.
+	var parentSessionKey *string
+	if event.ParentSessionKey != "" {
+		parentSessionKey = &event.ParentSessionKey
+	}
+	// gateway.md's "Resolved: Multi-Session Channels" — genesis detection is
+	// free from state already being written: RowsAffected() > 0 means this
+	// is genuinely the first message this session_key has ever seen. This
+	// is the one moment CoordinatorWorkflow's own LCM-copy context injection
+	// (coordinator.go) needs to fire — CoordinatorInput.ParentSessionKey
+	// below is set ONLY on this exact condition, never on a later message
+	// for an already-existing session, regardless of what event.ParentSessionKey
+	// itself carries (harmless if the caller sends it on every message for
+	// a branch — this check is what actually gates the effect).
+	sessionsTag, err := s.pool.Exec(ctx,
+		"INSERT INTO sessions (session_key, platform, channel_id, parent_session_key) VALUES ($1, $2, $3, $4) "+
 			"ON CONFLICT (session_key) DO NOTHING",
-		sessionKey, event.Platform, event.ChannelID,
-	); err != nil {
+		sessionKey, event.Platform, event.ChannelID, parentSessionKey,
+	)
+	if err != nil {
 		return "", err
 	}
+	isGenesis := sessionsTag.RowsAffected() > 0
 
 	// Real PRIMARY KEY, not an app-level check — a race between two
 	// identical sends (e.g. a client retry) is resolved by the second
@@ -90,6 +124,18 @@ func (s *server) submitMessageEvent(ctx context.Context, event MessageEvent) (st
 	// SignalWithStart is the durable submission; the gateway never writes
 	// the message body to Postgres itself (that happens later, inside the
 	// coordinator/turn flow, sourced from the signal payload).
+	//
+	// coordinatorInput.ParentSessionKey only set on isGenesis — these
+	// start-args are only actually consulted by Temporal if this call is
+	// the one that truly starts the workflow (an already-running execution
+	// just gets signaled, ignoring them), which for a brand-new session_key
+	// always coincides with isGenesis anyway; gating on isGenesis explicitly
+	// rather than relying on that coincidence is what keeps this correct
+	// across this session's OWN later idle-timeout restarts too.
+	coordinatorInput := wf.CoordinatorInput{SessionKey: sessionKey}
+	if isGenesis {
+		coordinatorInput.ParentSessionKey = event.ParentSessionKey
+	}
 	opts := client.StartWorkflowOptions{
 		ID:                    sessionKey,
 		TaskQueue:             s.taskQueue,
@@ -98,7 +144,7 @@ func (s *server) submitMessageEvent(ctx context.Context, event MessageEvent) (st
 	payload := types.SignalPayload{Message: types.Message{Role: "user", Content: event.Content}}
 	if _, err := s.temporal.SignalWithStartWorkflow(
 		ctx, sessionKey, wf.NewMessageSignalName, payload, opts,
-		wf.CoordinatorWorkflow, wf.CoordinatorInput{SessionKey: sessionKey},
+		wf.CoordinatorWorkflow, coordinatorInput,
 	); err != nil {
 		return "", err
 	}

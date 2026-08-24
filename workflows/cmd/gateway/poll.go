@@ -36,7 +36,7 @@ type pollResponse struct {
 // thing this same read checks for, no separate delivery mechanism needed.
 func (s *server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
-	sessionKey := sessionKeyFor("web", userID)
+	sessionKey := sessionKeyFor("web", userID, webDiscriminator(userID, r.URL.Query().Get("session_id")))
 	ctx := r.Context()
 
 	sinceTurnSeq := 0

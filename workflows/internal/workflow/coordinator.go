@@ -21,6 +21,16 @@ const idleTTL = 30 * time.Second
 // SignalWithStart handles that) a Session Coordinator.
 type CoordinatorInput struct {
 	SessionKey string `json:"session_key"`
+	// ParentSessionKey — gateway.md's "Resolved: Multi-Session Channels".
+	// Set ONLY by the Gateway's own genuine genesis check (its sessions-table
+	// INSERT's RowsAffected — never re-derived here), so this workflow can
+	// trust its mere presence as proof this is genuinely this session_key's
+	// first-ever execution, safe to act on unconditionally rather than
+	// needing its own genesis check. A later restart of this SAME session
+	// (idleTTL, SignalWithStart's ALLOW_DUPLICATE reuse) never carries this
+	// — the Gateway only sets it once, at true genesis — so seeding never
+	// re-fires on an ordinary restart.
+	ParentSessionKey string `json:"parent_session_key,omitempty"`
 }
 
 // CoordinatorWorkflow is the long-lived, nearly-stateless control-plane
@@ -30,6 +40,20 @@ type CoordinatorInput struct {
 func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 	logger := workflow.GetLogger(ctx)
 	logger.Info("coordinator started", "session_key", input.SessionKey)
+
+	// gateway.md's "Resolved: Multi-Session Channels" — LCM-copy genesis
+	// context injection. Best-effort, same fire-and-forget tolerance as
+	// Persist/Deliver's own end-of-turn bookkeeping calls elsewhere in this
+	// codebase: a failed seed means this child session just starts with no
+	// injected parent context (the pre-this-feature behavior), not a hard
+	// failure of the whole session.
+	if input.ParentSessionKey != "" {
+		sao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+		sctx := workflow.WithActivityOptions(ctx, sao)
+		if err := workflow.ExecuteActivity(sctx, "SeedChildSessionContext", input.ParentSessionKey, input.SessionKey).Get(sctx, nil); err != nil {
+			logger.Error("failed to seed child session context", "session_key", input.SessionKey, "parent_session_key", input.ParentSessionKey, "error", err)
+		}
+	}
 
 	// Seed turnSeq from the real Postgres-backed maximum rather than always
 	// starting at 0 — a fresh CoordinatorWorkflow execution (workflow ID =

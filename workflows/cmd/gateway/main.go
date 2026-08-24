@@ -6,9 +6,10 @@
 // deployed alongside tenant-worker and that tenant's own Postgres in the
 // agent-harness-tenant chart, not agent-harness-shared.
 //
-// Two plain HTTP endpoints, no embedded Temporal worker — Web is
-// webhook-like/polling, not connection-based, so delivery collapses to a
-// direct Postgres read (gateway/web.md's "Resolved: Delivery" section):
+// Web (webhook-like/polling) and Discord (connection-based, leased) both run
+// in this one process — docs/components/gateway.md's "Resolved: Per-Tenant
+// Deployment", one goroutine per platform kind this tenant has actually
+// configured, not one process per (tenant × platform):
 //
 //	POST /send     — verify Clerk JWT, resolve session_key, dedup, SignalWithStart, ack.
 //	GET  /poll     — verify Clerk JWT, resolve session_key, read new turns +
@@ -16,13 +17,10 @@
 //	POST /respond  — verify Clerk JWT, answer a pending user_input_requests
 //	                 row via SignalWorkflow against its own workflow_id
 //	                 (docs/components/user-input.md).
-//
-// Scoped to Web only for this first pass — the connection-lease mechanism
-// gateway.md designs for a future connection-based platform is deliberately
-// not built here, since nothing needs it yet (this project's standing
-// discipline against building ahead of real need, same reasoning already
-// applied to model-registry's multi-provider question and memory-slot's
-// dropped MemoryBackend interface).
+//	Discord goroutine (discord.go) — only starts if DISCORD_BOT_TOKEN is
+//	set; connects only while holding this platform's connection lease
+//	(gateway_connection_leases, leases.go), per gateway.md's "Resolved:
+//	Connection Leasing".
 package main
 
 import (
@@ -34,6 +32,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
 )
@@ -52,7 +51,8 @@ type server struct {
 }
 
 func main() {
-	ctx := context.Background()
+	ctx, stopPlatforms := context.WithCancel(context.Background())
+	defer stopPlatforms()
 
 	pgURL := "postgres://" +
 		envOrDefault("POSTGRES_USER", "agent_harness") + ":" +
@@ -96,7 +96,18 @@ func main() {
 	mux.Handle("POST /send", requireClerkAuth(clerkCfg, http.HandlerFunc(s.handleSend)))
 	mux.Handle("GET /poll", requireClerkAuth(clerkCfg, http.HandlerFunc(s.handlePoll)))
 	mux.Handle("POST /respond", requireClerkAuth(clerkCfg, http.HandlerFunc(s.handleRespond)))
+	mux.Handle("GET /sessions", requireClerkAuth(clerkCfg, http.HandlerFunc(s.handleListSessions)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	// discord.go — only this tenant's configured platform kinds run, per
+	// gateway.md's per-tenant, one-goroutine-per-platform model. holderID
+	// identifies this specific process to gateway_connection_leases; a fresh
+	// one each process start is fine — the lease is about which process
+	// currently holds the live connection, not about recognizing a process
+	// across restarts.
+	if botToken := os.Getenv("DISCORD_BOT_TOKEN"); botToken != "" {
+		go s.startDiscordPlatform(ctx, botToken, uuid.NewString())
+	}
 
 	addr := envOrDefault("GATEWAY_BIND_ADDRESS", "0.0.0.0:8090")
 	httpServer := &http.Server{Addr: addr, Handler: mux}
@@ -111,6 +122,7 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
+	stopPlatforms() // signals the Discord goroutine (if running) to release its lease and disconnect
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

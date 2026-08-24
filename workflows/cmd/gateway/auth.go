@@ -41,22 +41,52 @@ func userIDFromContext(ctx context.Context) string {
 }
 
 // sessionKeyFor derives a session_key from a MessageEvent's Platform +
-// ChannelID (inbound.go) — the session-scoping identity, deliberately NOT a
-// function of User too (a group channel's session is shared across every
-// user posting in it; see MessageEvent's own doc comment). Only place this
-// string gets built, so the format only needs to be right in one location.
+// ChannelID + Discriminator (inbound.go) — the session-scoping identity,
+// deliberately NOT a function of User too (a group channel's session is
+// shared across every user posting in it; see MessageEvent's own doc
+// comment). Only place this string gets built, so the format only needs to
+// be right in one location.
 //
-// The actual per-platform FORMAT is deliberately not generalized yet — only
-// "web" exists, mirroring gateway/web.md's "Resolved: One Continuous Session
-// Per User" scheme unchanged from before this refactor (changing the format
-// would orphan already-running real sessions, a real behavior change this
-// refactor isn't making). A second platform will need its own case here,
-// almost certainly a different shape (gateway.md's own illustrative example,
-// "agent:main:discord:guild:123", has a middle segment this one doesn't).
-func sessionKeyFor(platform, channelID string) string {
+// discriminator is always populated by the caller (gateway.md's "Resolved:
+// Multi-Session Channels" — never a magic empty string), "channel:{id}" for
+// a channel's main session or "<type>:<id>" for a reply/thread-scoped one
+// (e.g. Discord's "reply_to_platform_message_id:{rootID}", Web's own
+// client-generated "session:{id}" — see websession.go). Whether that shows
+// up in the actual session_key STRING is a separate, per-platform choice
+// from whether the concept exists:
+//   - "web": "channel:{channelID}" (the default/main session) produces the
+//     EXACT unchanged "agent:main:web:user:{id}" format, byte-for-byte, to
+//     avoid orphaning the already-running real production session. Any
+//     other discriminator ("session:{id}", a client-generated branch —
+//     websession.go's own webDiscriminator) embeds directly, same as
+//     Discord — no backward-compatibility constraint on a NEW branch, only
+//     on the pre-existing default.
+//   - "discord": no backward-compatibility constraint at all (nothing real
+//     was ever running before Discriminator existed), so it's always
+//     embedded directly.
+func sessionKeyFor(platform, channelID, discriminator string) string {
 	switch platform {
 	case "web":
-		return "agent:main:web:user:" + channelID
+		if discriminator == "channel:"+channelID {
+			return "agent:main:web:user:" + channelID
+		}
+		_, id, ok := strings.Cut(discriminator, ":")
+		if !ok {
+			panic("sessionKeyFor: malformed discriminator " + discriminator)
+		}
+		return "agent:main:web:user:" + channelID + ":session:" + id
+	case "discord":
+		if discriminator == "channel:"+channelID {
+			return "agent:main:discord:channel:" + channelID
+		}
+		// "<type>:<id>" — only the id half goes into the key; the type half
+		// (e.g. "reply_to_platform_message_id") is resolution metadata, not
+		// part of the session's own identity.
+		_, id, ok := strings.Cut(discriminator, ":")
+		if !ok {
+			panic("sessionKeyFor: malformed discriminator " + discriminator)
+		}
+		return "agent:main:discord:channel:" + channelID + ":thread:" + id
 	default:
 		panic("sessionKeyFor: unsupported platform " + platform)
 	}
