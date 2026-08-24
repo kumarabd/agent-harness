@@ -57,6 +57,16 @@ tenantWorker:
     port: 9090
     path: "/metrics"
 
+# -- Web platform inbound/outbound path (deploy/docker/gateway.Dockerfile,
+# workflows/cmd/gateway, docs/components/gateway/web.md). One gateway per
+# tenant, never shared — it holds this tenant's Clerk secret key and talks
+# to this tenant's own Postgres directly.
+gateway:
+  image:
+    repository: "gcr.io/kumarabd/agent-harness/gateway"
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
 # -- One self-hosted Postgres instance for this tenant, backed by
 # tenantVolume below. Deliberately NOT a managed/shared Postgres service —
 # see docs/components/multi-tenancy.md's 2026-08-14 revision for why. Fixed
