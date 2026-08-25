@@ -156,8 +156,17 @@ func (s *server) discordMessageCreate(session *discordgo.Session, m *discordgo.M
 	repliesToBot := botUser != nil && replyTo != nil &&
 		m.ReferencedMessage != nil && m.ReferencedMessage.Author != nil &&
 		m.ReferencedMessage.Author.ID == botUser.ID
+	// gateway/discord.md's "Resolved: DMs" — a personal (1:1) DM has no
+	// "other people talking" ambiguity for the mention/reply gate above to
+	// resolve in the first place (the whole reason that gate exists — see
+	// "Resolved: Response Scope"), so every message there is an implicit
+	// trigger. A GROUP DM still requires an explicit mention/reply, same as
+	// a guild channel — more than one human means the same ambiguity a
+	// guild channel has. m.GuildID alone can't distinguish a personal DM
+	// from a group DM (both are empty), hence the extra isPersonalDM check.
+	personalDM := m.GuildID == "" && isPersonalDM(session, m.ChannelID)
 
-	if !mentioned && !repliesToBot {
+	if !mentioned && !repliesToBot && !personalDM {
 		return
 	}
 
@@ -214,6 +223,26 @@ func discordMentionsUser(mentions []*discordgo.User, userID string) bool {
 		}
 	}
 	return false
+}
+
+// isPersonalDM reports whether channelID is a 1:1 DM (discordgo.ChannelTypeDM),
+// as opposed to a group DM (discordgo.ChannelTypeGroupDM) — both have an
+// empty GuildID on a message, so that alone doesn't distinguish them. Checks
+// the local state cache first (discordgo maintains it automatically as
+// channels are observed over the gateway connection) before falling back to
+// a REST call for a channel not yet seen this way.
+func isPersonalDM(session *discordgo.Session, channelID string) bool {
+	if ch, err := session.State.Channel(channelID); err == nil {
+		return ch.Type == discordgo.ChannelTypeDM
+	}
+	ch, err := session.Channel(channelID)
+	if err != nil {
+		// Can't determine — default to requiring an explicit mention/reply
+		// instead (the safer failure mode: under-triggering, not an
+		// unexpected reply in a channel that turns out to be a group DM).
+		return false
+	}
+	return ch.Type == discordgo.ChannelTypeDM
 }
 
 // resolveDiscordThreadRoot walks reply_to_platform_message_id backward
