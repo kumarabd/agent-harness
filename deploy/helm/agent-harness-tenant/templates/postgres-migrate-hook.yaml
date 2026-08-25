@@ -1,0 +1,117 @@
+# Applies every activities/migrations/*.sql file (verbatim copies under
+# files/ — Helm charts can't reference files outside their own directory,
+# so this has to be duplicated; keep both in sync) against this tenant's own
+# agent_harness database, in filename order (001_, 002_, ...). Bitnami's
+# postgresql subchart creates that database/role automatically from
+# postgresql.auth.* as part of its own (non-hook) StatefulSet bring-up — no
+# separate provisioning hook needed for it, unlike agent-brain's agentbrain
+# role/database (postgres-init-roles-hook.yaml).
+#
+# post-install,pre-upgrade (not pre-install) — needs the postgresql
+# StatefulSet, a normal resource, to already exist; same reasoning as
+# agent-brain's own job-migrate.yaml fix.
+#
+# Idempotent via a real schema_migrations tracking table (filename ->
+# applied_at), not the single "does the turns table exist" check this used
+# to do — that only ever worked for exactly one migration file. Each
+# individual .sql file is still NOT idempotent on its own (plain CREATE
+# TABLE, no IF NOT EXISTS), so schema_migrations is what makes re-running
+# this Job on every upgrade safe, by skipping files already recorded as
+# applied rather than by asking Postgres itself whether the change already
+# landed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agent-harness.fullname" . }}-migrations
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "postgres-migrate") | nindent 4 }}
+  annotations:
+    # Must exist before the migrate Job below (weight 0) mounts it — as a
+    # plain resource it would only be created during the normal apply phase,
+    # which runs AFTER hooks, so it wouldn't exist yet on first rollout (same
+    # class of ordering bug agent-brain-creds-secret.yaml fixes for its own
+    # consumer).
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  {{- range $path, $_ := .Files.Glob "files/*.sql" }}
+  {{ base $path }}: |
+{{ $.Files.Get $path | indent 4 }}
+  {{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "agent-harness.fullname" . }}-postgres-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "postgres-migrate") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: "{{ .Values.postgresql.image.registry }}/{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .Release.Name }}-postgresql"
+                  key: password
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              HOST={{ .Release.Name }}-postgresql.{{ .Release.Namespace }}.svc.cluster.local
+              USER={{ .Values.postgresql.auth.username | quote }}
+              DB={{ .Values.postgresql.auth.database | quote }}
+              PSQL="psql -h $HOST -U $USER -d $DB -v ON_ERROR_STOP=1"
+
+              $PSQL -c "CREATE TABLE IF NOT EXISTS schema_migrations (filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());"
+
+              # One-time backfill for a tenant that already had 001's tables
+              # applied before schema_migrations existed at all (every tenant
+              # deployed before this migrate-hook rewrite) — without this,
+              # the loop below would try to re-apply 001_initial_schema.sql's
+              # non-idempotent CREATE TABLEs and fail on "already exists".
+              # Safe to run on every upgrade: only fires once, since after
+              # the first backfill 001 is genuinely recorded in
+              # schema_migrations and this condition never matches again.
+              turns_exists=$($PSQL -tAc "SELECT to_regclass('public.turns')")
+              already_recorded=$($PSQL -tAc "SELECT 1 FROM schema_migrations WHERE filename = '001_initial_schema.sql'")
+              if [ -n "$turns_exists" ] && [ -z "$already_recorded" ]; then
+                echo "backfilling schema_migrations for pre-existing 001_initial_schema.sql"
+                $PSQL -c "INSERT INTO schema_migrations (filename) VALUES ('001_initial_schema.sql');"
+              fi
+
+              for f in $(ls /migrations/*.sql | sort); do
+                name=$(basename "$f")
+                already=$($PSQL -tAc "SELECT 1 FROM schema_migrations WHERE filename = '$name'")
+                if [ -z "$already" ]; then
+                  echo "applying $name"
+                  # Apply the file and record it in one transaction (-1) so a
+                  # crash between the two (pod killed, OOM, etc.) can't leave
+                  # the table created but unrecorded — that combination is
+                  # what sends the next run's non-idempotent CREATE TABLE
+                  # into "already exists" on retry, crash-looping forever.
+                  { cat "$f"; printf "\nINSERT INTO schema_migrations (filename) VALUES ('%s');\n" "$name"; } | $PSQL -1
+                else
+                  echo "$name already applied, skipping"
+                fi
+              done
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+      volumes:
+        - name: migrations
+          configMap:
+            name: {{ include "agent-harness.fullname" . }}-migrations

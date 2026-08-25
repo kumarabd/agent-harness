@@ -3,6 +3,7 @@ package workflow
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -127,7 +128,7 @@ func compressionState(contextTokens, contextWindow int) string {
 // synthetic error message insert fails its FK against turns(turn_id) and the
 // Persist/Deliver calls become harmless no-ops — there's nothing more
 // meaningful to do when the turn never existed in the first place.
-func failTurn(ctx workflow.Context, turnID string, parentType string, cause error) (types.TurnResult, error) {
+func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, parentType string, cause error) (types.TurnResult, error) {
 	logger := workflow.GetLogger(ctx)
 	logger.Error("turn failed", "turn_id", turnID, "error", cause)
 
@@ -142,8 +143,55 @@ func failTurn(ctx workflow.Context, turnID string, parentType string, cause erro
 	_ = workflow.ExecuteActivity(actx, "Persist", turnID, "failed").Get(actx, nil)
 	if parentType == "session" {
 		_ = workflow.ExecuteActivity(actx, "Deliver", turnID).Get(actx, nil)
+		deliverToConnectionBasedPlatform(ctx, sessionKey, connectionID, turnID)
 	}
 	return types.TurnResult{}, cause
+}
+
+// deliverToConnectionBasedPlatform — gateway.md's "Resolved: Outbound Flow"
+// (2026-08-25 correction). Purely additive to the "Deliver" activity call
+// above, which stays exactly as-is for every platform (a harmless no-op stub
+// for Web — gateway/web.md's "delivery collapses" finding, Web gets
+// responses via polling Postgres directly and never needed a real send
+// here). Only a connection-based platform (Discord today) needs this: routed
+// to that specific connection's own task queue, addressed by connectionID
+// (never platform alone — a tenant can run more than one connection of the
+// same platform kind, e.g. two Discord bots, so platform alone would be
+// ambiguous about which live socket to send over).
+func deliverToConnectionBasedPlatform(ctx workflow.Context, sessionKey, connectionID, turnID string) {
+	if connectionID == "" {
+		return
+	}
+	platform := platformFromSessionKey(sessionKey)
+	if !isConnectionBasedPlatform(platform) {
+		return
+	}
+	ao := workflow.ActivityOptions{
+		StartToCloseTimeout: activityTimeoutTierA,
+		TaskQueue:           "deliver:" + platform + ":" + connectionID,
+	}
+	actx := workflow.WithActivityOptions(ctx, ao)
+	_ = workflow.ExecuteActivity(actx, "DiscordDeliver", turnID).Get(actx, nil)
+}
+
+// platformFromSessionKey extracts the platform segment from a session_key of
+// the form "agent:main:{platform}:...". gateway.md's "Resolved: Multi-Session
+// Channels" — every platform's session key format agrees on this prefix.
+func platformFromSessionKey(sessionKey string) string {
+	parts := strings.SplitN(sessionKey, ":", 4)
+	if len(parts) < 3 {
+		return ""
+	}
+	return parts[2]
+}
+
+// isConnectionBasedPlatform — gateway.md's "Resolved: Outbound Flow": only a
+// connection-based platform needs the embedded-worker delivery path at all.
+// A literal check, not a registry — Discord is the only one that exists
+// today, and adding a second is a one-line change when it happens, not a
+// reason to build an abstraction for a case that doesn't exist yet.
+func isConnectionBasedPlatform(platform string) bool {
+	return platform == "discord"
 }
 
 // TurnWorkflow implements the reason-act-observe loop. One workflow *type* for
@@ -194,7 +242,7 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 			TurnSeq:     input.TurnSeq,
 		}
 		if err := workflow.ExecuteActivity(actx, "InsertMessage", insertInput).Get(actx, nil); err != nil {
-			return failTurn(ctx, input.TurnID, input.ParentType, err)
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err)
 		}
 	}
 
@@ -254,7 +302,7 @@ loop:
 		}
 		if err := workflow.ExecuteActivity(mctx, "ModelCall", modelInput).Get(mctx, &mcOut); err != nil {
 			cancel()
-			return failTurn(ctx, input.TurnID, input.ParentType, err)
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err)
 		}
 		contextSeq++
 		hintModality, hintTier = mcOut.NextHintModality, mcOut.NextHintTier
@@ -425,7 +473,7 @@ loop:
 			iactx := workflow.WithActivityOptions(ctx, iao)
 			insertInput := types.InsertMessageInput{TurnID: input.TurnID, Message: next.Message}
 			if err := workflow.ExecuteActivity(iactx, "InsertMessage", insertInput).Get(iactx, nil); err != nil {
-				return failTurn(ctx, input.TurnID, input.ParentType, err)
+				return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err)
 			}
 			continue loop
 		}
@@ -482,6 +530,7 @@ loop:
 		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 		actx := workflow.WithActivityOptions(ctx, ao)
 		_ = workflow.ExecuteActivity(actx, "Deliver", input.TurnID).Get(actx, nil)
+		deliverToConnectionBasedPlatform(ctx, input.SessionKey, input.ConnectionID, input.TurnID)
 	}
 
 	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations)

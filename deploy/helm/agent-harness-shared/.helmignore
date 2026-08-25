@@ -2,4 +2,7 @@
 .DS_Store
 .git/
 .gitignore
-*.tgz
+# NOT *.tgz — see agent-harness-tenant/.helmignore's comment: Helm's chart
+# loader respects .helmignore on install/upgrade/template too, not just
+# packaging, so a blanket *.tgz here would silently break any dependency
+# this chart vendors under charts/ in the future (none today).

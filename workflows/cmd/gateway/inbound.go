@@ -57,6 +57,13 @@ type MessageEvent struct {
 	// separate lookup): which session this new one branched from. Empty for
 	// a channel's own main session, which has no parent.
 	ParentSessionKey string
+	// ConnectionID — gateway.md's "Resolved: Outbound Flow" (2026-08-25
+	// correction). Set only on a connection-based platform (Discord: the
+	// bot's own user id, resolved by the caller once at startup via GET
+	// /users/@me — never re-derived here); empty for Web. Unlike
+	// ParentSessionKey, passed to CoordinatorInput on EVERY call, not just
+	// genesis — see CoordinatorInput's own doc comment for why.
+	ConnectionID string
 }
 
 // submitMessageEvent implements gateway.md's "Resolved: Inbound Flow" steps
@@ -132,7 +139,7 @@ func (s *server) submitMessageEvent(ctx context.Context, event MessageEvent) (st
 	// always coincides with isGenesis anyway; gating on isGenesis explicitly
 	// rather than relying on that coincidence is what keeps this correct
 	// across this session's OWN later idle-timeout restarts too.
-	coordinatorInput := wf.CoordinatorInput{SessionKey: sessionKey}
+	coordinatorInput := wf.CoordinatorInput{SessionKey: sessionKey, ConnectionID: event.ConnectionID}
 	if isGenesis {
 		coordinatorInput.ParentSessionKey = event.ParentSessionKey
 	}

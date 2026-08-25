@@ -2,4 +2,10 @@
 .DS_Store
 .git/
 .gitignore
-*.tgz
+# NOT *.tgz — Helm's chart loader applies .helmignore when LOADING a chart
+# for install/upgrade/template, not just when packaging one. This chart
+# vendors its dependencies (postgresql/agent-brain/mcp-hub) as .tgz files
+# under charts/ via `helm dependency update` — a blanket *.tgz pattern here
+# silently excludes those from the loaded chart, which is exactly what
+# produced "found in Chart.yaml, but missing in charts/ directory" even
+# though dependency update had just written them to disk successfully.

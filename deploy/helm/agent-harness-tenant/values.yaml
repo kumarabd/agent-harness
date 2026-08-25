@@ -59,10 +59,10 @@ tenantWorker:
 
 # -- The Web platform's inbound/outbound path (docs/components/gateway.md,
 # docs/components/gateway/web.md) — workflows/cmd/gateway. One per tenant,
-# same isolation reasoning as tenantWorker above: this process holds this
-# tenant's Clerk secret key and talks directly to this tenant's own Postgres,
-# so it is never shared across tenants. Disabled by default — a tenant with
-# no Web client configured yet has nothing for this to serve.
+# same isolation reasoning as tenantWorker above: this process talks
+# directly to this tenant's own Postgres, so it is never shared across
+# tenants. Disabled by default — a tenant with no Web client configured yet
+# has nothing for this to serve.
 gateway:
   enabled: false
   image:
@@ -71,12 +71,65 @@ gateway:
     pullPolicy: IfNotPresent
   replicaCount: 1
   port: 8090
-  # -- REQUIRED when gateway.enabled=true — docs/components/gateway/web.md's
-  # "Resolved: Auth" (reuse agent-web's existing Clerk project). Do NOT
-  # commit a real value here; set it per tenant in
-  # deploy/helm/tenants/<tenant>.yaml instead, same discipline as
-  # llm.openai.apiKey above.
-  clerkSecretKey: ""
+  # -- Per-platform config, one block per Gateway platform kind
+  # (docs/components/gateway.md's "Resolved: Multi-Session Channels" —
+  # Platform is "web"/"discord"/... on MessageEvent). Every block below is
+  # independently optional; the single Deployment above starts only the
+  # goroutines its own platform block actually configures (main.go). Split
+  # out from flat gateway.* keys (gateway.clerkIssuer, gateway.discordBotToken)
+  # specifically so adding a third platform later is a new block here, not a
+  # renegotiation of what's namespaced under what.
+  web:
+    # -- One of these two is REQUIRED when gateway.enabled=true —
+    # docs/components/gateway/web.md's "Resolved: Auth" (reuse agent-web's
+    # existing Clerk project). Neither is secret — the gateway verifies
+    # session tokens against the project's own public JWKS endpoint, the same
+    # mechanism agent-brain's own explorer API already uses for this exact
+    # Clerk project (see charts/agent-brain's own clerkIssuer default, which
+    # is likewise committed in plain text) — there is no Clerk secret key
+    # anywhere in this deployment. clerkJwksUrl, if set, wins over
+    # clerkIssuer (clerk.go's own precedence).
+    clerkJwksUrl: ""
+    clerkIssuer: ""
+  discord:
+    # -- Optional — docs/components/gateway/discord.md's "Resolved: Auth".
+    # Only starts the Discord goroutine (discord.go) if set; a tenant with no
+    # Discord bot configured leaves this empty and gets Web only. A real bot
+    # token, unlike web.clerkIssuer/web.clerkJwksUrl above — rendered into a
+    # Secret (templates/gateway-discord-secret.yaml), not a plain value. Do
+    # NOT commit a real value here; set it per tenant in
+    # deploy/helm/tenants/<tenant>.yaml instead, same discipline as
+    # llm.openai.apiKey above.
+    botToken: ""
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- This tenant's own agent-web instance (chat UI + agent-brain memory
+# explorer) — a plain template in THIS chart (templates/agent-web-*.yaml),
+# deliberately NOT the standalone agent-web/charts/agent-web subchart: the
+# only thing a tenant needs to control here is which agent-brain/gateway
+# URLs it points at, both already computable from values this chart already
+# has (agent-brain's own nameOverride, gateway.port below) — no shared
+# dependency-management benefit a real subchart would give the way
+# agent-brain/mcp-hub's actually-third-party charts get from being subcharts.
+# Uses the PUBLISHED agent-web image (ghcr.io/realnighthawk/agent-web) —
+# this repo doesn't build or own that image; see values.yaml's own comment
+# on `image.tag` below before enabling.
+agentWeb:
+  enabled: false
+  image:
+    repository: "ghcr.io/realnighthawk/agent-web"
+    # -- No default that's known-good for THIS chart's own use of the image:
+    # the chat page (docs/components/gateway/web.md) and its /gateway/ nginx
+    # proxy were added to agent-web's source this same session but have not
+    # yet been built into any published tag — set this to whatever tag
+    # agent-web's own CI (.gitlab-ci.yml) publishes once that lands, not
+    # left at a stale default here.
+    tag: "internal"
+    pullPolicy: IfNotPresent
+  replicaCount: 1
   resources: {}
   nodeSelector: {}
   tolerations: []
@@ -138,6 +191,22 @@ agentBrain:
   # Identifies this calling product, not a per-tenant value in the usual
   # sense — fine to leave at the chart default for every tenant.
   agentID: "agent-harness"
+  # -- Not a secret — the user_id agent-brain's IAM binds tenant-worker's
+  # apiKey to at bootstrap (templates/agent-brain-creds-secret.yaml's
+  # api-keys value, "<apiKey>:<this value>"). internal/iam/service.go's
+  # SeedFromEnv is insert-only: this is the identity every memory write
+  # tenant-worker makes gets attributed to, permanently, from the first
+  # deploy onward — it does NOT get reconciled later if changed (a key
+  # already seeded keeps its original binding; changing this value only
+  # affects a brand-new apiKey/deployment). For every write to land under
+  # the SAME user_id the real Clerk-authenticated explorer UI queries by
+  # (agent-brain's JWT auth path resolves user_id from the token's own
+  # claims — internal/auth/credentials.go's tenantFromJWT — a completely
+  # separate identity from this API-key bootstrap unless set to match), set
+  # this to that real Clerk user_id. Left at the literal "tenant-worker"
+  # placeholder by default since a real Clerk user_id isn't knowable at the
+  # chart level.
+  ownerUserID: "tenant-worker"
 
 # -- Real LLM provider config for ModelCall (activities/activities/llm.py).
 # Only needed for turns with no _test_scripted_responses fixture row — pure
@@ -253,6 +322,17 @@ agent-brain:
     # value per tenant (deploy/helm/tenants/<tenant>.yaml) only if that
     # endpoint is actually needed.
     adminSecret: ""
+  # -- Chat-completion provider for agent-brain's mining pipeline (entity/fact/rule
+  # extraction — see agent-brain's own charts/agent-brain/values.yaml comment on
+  # mining.llm for why this is a direct provider call, not the shared LiteLLM proxy).
+  # baseURL/model are plain values here (not secrets); the actual API key is NOT
+  # set here — templates/agent-brain-creds-secret.yaml computes it directly from
+  # llm.openai.apiKey below (same real Crusoe credential tenant-worker's own
+  # ModelCall already uses — one credential, not a second hand-copied one).
+  mining:
+    llm:
+      baseURL: ""
+      model: ""
   # -- Fixed name, not per-release — safe because each tenant already gets
   # its own Kubernetes namespace (deploy/helm/tenants/README.md's
   # `-n <k8s-namespace>`), so no cross-tenant collision risk. Must match
@@ -369,3 +449,10 @@ tenantVolume:
   storageClassName: ""
   accessMode: "ReadWriteMany"
   sessionsSubPath: "sessions"
+  # -- docs/components/user-input.md's PERMISSION_LIST — disjoint from
+  # sessionsSubPath above so a runtime-edited policy file never collides
+  # with real session data. Mounted at /config; TOOL_PERMISSION_LIST_FILE
+  # (tenant-worker-deployment.yaml) points at permission_list.json inside
+  # it. The file's own content is not a Helm value — edited directly on the
+  # PV at runtime, starts empty (missing file) until someone writes one.
+  configSubPath: "config"

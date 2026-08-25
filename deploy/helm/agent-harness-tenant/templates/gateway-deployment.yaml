@@ -1,0 +1,101 @@
+{{- if .Values.gateway.enabled -}}
+{{- if and (not .Values.gateway.web.clerkJwksUrl) (not .Values.gateway.web.clerkIssuer) }}
+{{- fail "gateway.web.clerkJwksUrl or gateway.web.clerkIssuer is required when gateway.enabled=true — the gateway can't verify any session token without one." }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "gateway") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "gateway") | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "gateway") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "gateway") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "agent-harness.fullname" . }}
+      # Same reasoning as tenant-worker: this process never calls the
+      # Kubernetes API, only Temporal and this tenant's own Postgres.
+      automountServiceAccountToken: false
+      containers:
+        - name: gateway
+          image: "{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}"
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.gateway.port }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "agent-harness.fullname" . }}-config
+          env:
+            - name: GATEWAY_BIND_ADDRESS
+              value: {{ printf "0.0.0.0:%d" (int .Values.gateway.port) | quote }}
+            # Bitnami postgresql subchart's own generated Service/Secret
+            # naming, same as tenant-worker-deployment.yaml's identical block
+            # — this is the gateway's own Postgres connection for the
+            # dedup/session-upsert writes and the direct poll reads
+            # (docs/components/gateway/web.md's "delivery collapses" finding),
+            # never a shared connection with tenant-worker.
+            - name: POSTGRES_HOST
+              value: "{{ .Release.Name }}-postgresql"
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .Release.Name }}-postgresql"
+                  key: password
+            # docs/components/gateway/web.md, "Resolved: Auth" — plain,
+            # non-secret values (clerk.go: verified against the project's own
+            # public JWKS endpoint, no Clerk secret key involved — same
+            # mechanism agent-brain's own explorer API already uses for this
+            # exact Clerk project). Not a Secret for the same reason
+            # agent-brain's own chart renders these as plain env vars too.
+            {{- if .Values.gateway.web.clerkJwksUrl }}
+            - name: CLERK_JWKS_URL
+              value: {{ .Values.gateway.web.clerkJwksUrl | quote }}
+            {{- end }}
+            {{- if .Values.gateway.web.clerkIssuer }}
+            - name: CLERK_ISSUER
+              value: {{ .Values.gateway.web.clerkIssuer | quote }}
+            {{- end }}
+            # docs/components/gateway/discord.md, "Resolved: Auth" — a real
+            # bot token, unlike Clerk's issuer/JWKS above: leaks it and
+            # someone can impersonate this bot in every server it's in. A
+            # Secret, not a plain value (this project already made the
+            # opposite mistake once with a Clerk secret key that turned out
+            # not to need to be one — not repeating that misjudgment in the
+            # other direction here). Optional — Discord is one of possibly
+            # several platform kinds this tenant's Gateway runs; only starts
+            # the goroutine (discord.go) if this is actually set.
+            {{- if .Values.gateway.discord.botToken }}
+            - name: DISCORD_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-harness.fullname" . }}-gateway-discord
+                  key: DISCORD_BOT_TOKEN
+            {{- end }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+      {{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,16 @@
+{{- if .Values.agentWeb.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "web") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "web") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "web") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+{{- end }}

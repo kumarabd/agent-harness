@@ -8,6 +8,8 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/jackc/pgx/v5"
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/worker"
 )
 
 // discordConnectionLeaseTTL is a real starting value, not claimed to be the
@@ -25,19 +27,40 @@ const discordReplyChainMaxDepth = 50
 
 // startDiscordPlatform runs the Discord goroutine for this tenant's Gateway
 // process — docs/components/gateway.md's "one goroutine per platform kind
-// that tenant has actually configured" per-tenant deployment model. Connects
-// only while holding this platform's connection lease
-// (gateway_connection_leases, leases.go) — retries acquisition on a fixed
-// interval otherwise, never blocking, matching leases.go's own
-// never-blocks contract.
+// that tenant has actually configured" per-tenant deployment model.
+//
+// connectionID (gateway.md's "Resolved: Outbound Flow", 2026-08-25
+// correction) is resolved ONCE here, before the lease loop even starts — a
+// plain REST call (GET /users/@me), no live gateway/websocket connection
+// needed — since the lease itself is keyed on it (leases.go). The same
+// discordgo.Session is reused across every reconnect attempt rather than
+// rebuilt each time, since its REST client (and thus connectionID) doesn't
+// need re-resolving on a reconnect.
 func (s *server) startDiscordPlatform(ctx context.Context, botToken, holderID string) {
+	dg, err := discordgo.New("Bot " + botToken)
+	if err != nil {
+		log.Printf("discord: failed to create session: %v", err)
+		return
+	}
+	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent | discordgo.IntentsDirectMessages
+
+	botUser, err := dg.User("@me")
+	if err != nil {
+		log.Printf("discord: failed to resolve bot identity (GET /users/@me): %v", err)
+		return
+	}
+	connectionID := botUser.ID
+	dg.AddHandler(func(session *discordgo.Session, m *discordgo.MessageCreate) {
+		s.discordMessageCreate(session, m, connectionID)
+	})
+
 	for {
-		ok, err := s.acquireOrRenewConnectionLease(ctx, "discord", holderID, discordConnectionLeaseTTL)
+		ok, err := s.acquireOrRenewConnectionLease(ctx, "discord", connectionID, holderID, discordConnectionLeaseTTL)
 		if err != nil {
 			log.Printf("discord: lease acquire error: %v", err)
 		}
 		if ok {
-			s.runDiscordConnection(ctx, botToken, holderID)
+			s.runDiscordConnection(ctx, dg, connectionID, holderID)
 			// runDiscordConnection blocks until the connection drops or the
 			// lease is lost; on return, loop back and retry acquisition.
 		}
@@ -49,23 +72,34 @@ func (s *server) startDiscordPlatform(ctx context.Context, botToken, holderID st
 	}
 }
 
-func (s *server) runDiscordConnection(ctx context.Context, botToken, holderID string) {
-	dg, err := discordgo.New("Bot " + botToken)
-	if err != nil {
-		log.Printf("discord: failed to create session: %v", err)
-		return
-	}
-	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent | discordgo.IntentsDirectMessages
-	dg.AddHandler(s.discordMessageCreate)
-
+// runDiscordConnection holds one connection cycle: opens the live socket,
+// starts this connection's own embedded Temporal worker (registered for
+// "DiscordDeliver" on deliver:discord:{connectionID} — gateway.md's
+// "Resolved: Outbound Flow" — only for as long as this replica actually
+// holds the lease, since the worker closes over this specific *discordgo.Session*
+// and a lease loss means that session is about to be closed too), and renews
+// the lease on a ticker until either the lease is lost or ctx is cancelled.
+func (s *server) runDiscordConnection(ctx context.Context, dg *discordgo.Session, connectionID, holderID string) {
 	if err := dg.Open(); err != nil {
 		log.Printf("discord: failed to open connection: %v", err)
 		return
 	}
 	defer dg.Close()
-	defer s.releaseConnectionLease(context.Background(), "discord", holderID)
+	defer s.releaseConnectionLease(context.Background(), "discord", connectionID, holderID)
 
-	log.Printf("discord: connected, holding connection lease as %s", holderID)
+	log.Printf("discord: connected as %s, holding connection lease as %s", connectionID, holderID)
+
+	deliverActivity := &discordDeliverActivity{session: dg, pool: s.pool, connectionID: connectionID}
+	// DisableWorkflowWorker: this queue only ever serves DiscordDeliver — no
+	// workflow is ever dispatched to it, so there's nothing for a workflow
+	// poller to do here.
+	deliverWorker := worker.New(s.temporal, "deliver:discord:"+connectionID, worker.Options{DisableWorkflowWorker: true})
+	deliverWorker.RegisterActivityWithOptions(deliverActivity.Deliver, activity.RegisterOptions{Name: "DiscordDeliver"})
+	if err := deliverWorker.Start(); err != nil {
+		log.Printf("discord: failed to start embedded delivery worker: %v", err)
+		return
+	}
+	defer deliverWorker.Stop()
 
 	ticker := time.NewTicker(discordConnectionLeaseTTL / 3)
 	defer ticker.Stop()
@@ -74,7 +108,7 @@ func (s *server) runDiscordConnection(ctx context.Context, botToken, holderID st
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ok, err := s.acquireOrRenewConnectionLease(ctx, "discord", holderID, discordConnectionLeaseTTL)
+			ok, err := s.acquireOrRenewConnectionLease(ctx, "discord", connectionID, holderID, discordConnectionLeaseTTL)
 			if err != nil {
 				log.Printf("discord: lease renew error: %v", err)
 				continue
@@ -91,8 +125,12 @@ func (s *server) runDiscordConnection(ctx context.Context, botToken, holderID st
 // "Resolved: Ambient Message Buffer". Every real (non-bot) message gets
 // ingested into discord_ambient_messages unconditionally; only a message
 // that @mentions this bot or replies to one of this bot's own messages goes
-// on to actually submit a MessageEvent (a real turn).
-func (s *server) discordMessageCreate(session *discordgo.Session, m *discordgo.MessageCreate) {
+// on to actually submit a MessageEvent (a real turn). connectionID is this
+// specific bot's own resolved identity (startDiscordPlatform), closed over
+// per-bot rather than read from shared mutable state — multi-bot-ready
+// without any locking, since each bot's own goroutine/handler closure
+// carries its own value independently.
+func (s *server) discordMessageCreate(session *discordgo.Session, m *discordgo.MessageCreate, connectionID string) {
 	if m.Author == nil || m.Author.Bot {
 		return
 	}
@@ -123,6 +161,20 @@ func (s *server) discordMessageCreate(session *discordgo.Session, m *discordgo.M
 		return
 	}
 
+	// Acknowledge receipt immediately with a 👀 reaction on the triggering
+	// message — real turn processing (below) can take a while (a live model
+	// call, possibly tool use), and Discord gives no other built-in
+	// "received" signal the way Web's own UI can just show a spinner. Fired
+	// in its own goroutine, not awaited: this is a pure UX nicety, not
+	// something the actual message-processing path should ever wait on or
+	// fail because of. Best-effort — a failed reaction (rate limit, missing
+	// permission) just means no visual ack, never a dropped message.
+	go func() {
+		if err := session.MessageReactionAdd(m.ChannelID, m.ID, "👀"); err != nil {
+			log.Printf("discord: failed to add ack reaction: %v", err)
+		}
+	}()
+
 	// gateway.md's "Resolved: Multi-Session Channels" — root-collapse
 	// discriminator policy (see gateway/discord.md). A plain mention with no
 	// reply stays on the channel's main session; a reply walks to the reply
@@ -148,6 +200,7 @@ func (s *server) discordMessageCreate(session *discordgo.Session, m *discordgo.M
 		PlatformMessageID: m.ID,
 		Discriminator:     discriminator,
 		ParentSessionKey:  parentSessionKey,
+		ConnectionID:      connectionID,
 	}
 	if _, err := s.submitMessageEvent(ctx, event); err != nil {
 		log.Printf("discord: failed to submit message event: %v", err)
@@ -173,14 +226,12 @@ func discordMentionsUser(mentions []*discordgo.User, userID string) bool {
 // joining the channel) — the caller falls back to the main channel session
 // in that case, same as a plain mention with no reply.
 //
-// Note (not yet a real limitation, since Discord's own outbound Deliver
-// mechanism isn't built yet): for a reply-to-the-bot's-own-earlier-reply to
-// resolve correctly past this bot's own messages, the bot's own outbound
-// sends need to land in discord_ambient_messages too (with their own
+// Note: for a reply-to-the-bot's-own-earlier-reply to resolve correctly past
+// this bot's own messages, the bot's own outbound sends would need to land
+// in discord_ambient_messages too (with their own
 // reply_to_platform_message_id when the bot itself was replying to
-// something) — not needed for this pass since nothing sends outbound yet,
-// but a real requirement for whichever pass builds DeliverActivity for
-// Discord.
+// something) — DiscordDeliver (deliver_discord.go) does not do this yet;
+// still a real, open gap now that outbound delivery is actually built.
 func (s *server) resolveDiscordThreadRoot(ctx context.Context, channelID, startMessageID string) (string, error) {
 	current := startMessageID
 	for i := 0; i < discordReplyChainMaxDepth; i++ {

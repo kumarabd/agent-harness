@@ -1,0 +1,91 @@
+{{- if or .Values.agentBrain.enabled .Values.mcpHub.enabled -}}
+{{- if and .Values.agentBrain.enabled (not .Values.agentBrain.postgres.password) }}
+{{- fail "agentBrain.postgres.password is required when agentBrain.enabled=true." }}
+{{- end }}
+{{- if and .Values.mcpHub.enabled (not .Values.mcpHub.postgres.password) }}
+{{- fail "mcpHub.postgres.password is required when mcpHub.enabled=true." }}
+{{- end }}
+# Same shared-server-separate-database pattern as ../../infra/postgres's own
+# init-roles-hook.yaml, trimmed to the extra roles this chart needs —
+# agent-harness's own role/database comes for free from the Bitnami
+# postgresql subchart's auth.username/password/database (below), this Job
+# adds agent-brain's and mcp-hub's (docs/components/tool-registry.md,
+# "Resolved: Postgres Isolation" — mcphub role/database name matches
+# mcp-hub's own existing convention, not invented here).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "agent-harness.fullname" . }}-postgres-init-roles
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "postgres-init-roles") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init-roles
+          image: "{{ .Values.postgresql.image.registry }}/{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          env:
+            {{- if .Values.agentBrain.enabled }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .Release.Name }}-postgresql"
+                  key: postgres-password
+            - name: AGENTBRAIN_USER_PASSWORD
+              value: {{ .Values.agentBrain.postgres.password | quote }}
+            {{- end }}
+            {{- if .Values.mcpHub.enabled }}
+            {{- if not .Values.agentBrain.enabled }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .Release.Name }}-postgresql"
+                  key: postgres-password
+            {{- end }}
+            - name: MCPHUB_USER_PASSWORD
+              value: {{ .Values.mcpHub.postgres.password | quote }}
+            {{- end }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              HOST={{ .Release.Name }}-postgresql.{{ .Release.Namespace }}.svc.cluster.local
+
+              psql -h "$HOST" -U postgres -d postgres -v ON_ERROR_STOP=1 -f - <<SQL
+              {{- if .Values.agentBrain.enabled }}
+              DO \$\$
+              BEGIN
+                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'agentbrain') THEN
+                  EXECUTE 'CREATE ROLE agentbrain WITH LOGIN PASSWORD ''$(printf '%s' "$AGENTBRAIN_USER_PASSWORD" | sed "s/'/''/g")''';
+                END IF;
+              END
+              \$\$;
+              SELECT 'CREATE DATABASE agentbrain OWNER agentbrain'
+              WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'agentbrain') \gexec
+              \connect agentbrain
+              CREATE EXTENSION IF NOT EXISTS vector;
+              \connect postgres
+              {{- end }}
+              {{- if .Values.mcpHub.enabled }}
+              DO \$\$
+              BEGIN
+                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'mcphub') THEN
+                  EXECUTE 'CREATE ROLE mcphub WITH LOGIN PASSWORD ''$(printf '%s' "$MCPHUB_USER_PASSWORD" | sed "s/'/''/g")''';
+                END IF;
+              END
+              \$\$;
+              SELECT 'CREATE DATABASE mcphub OWNER mcphub'
+              WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mcphub') \gexec
+              \connect mcphub
+              CREATE EXTENSION IF NOT EXISTS vector;
+              {{- end }}
+              SQL
+{{- end }}

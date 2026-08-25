@@ -1,0 +1,72 @@
+{{- if .Values.agentWeb.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "web") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "web") | nindent 4 }}
+spec:
+  replicas: {{ .Values.agentWeb.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "web") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "web") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "agent-harness.fullname" . }}
+      # This is nginx + a static SPA — it never calls the Kubernetes API,
+      # same reasoning as every other container in this chart.
+      automountServiceAccountToken: false
+      containers:
+        - name: web
+          image: "{{ .Values.agentWeb.image.repository }}:{{ .Values.agentWeb.image.tag }}"
+          imagePullPolicy: {{ .Values.agentWeb.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # This tenant's own agent-brain — computed the same way
+            # tenant-worker-deployment.yaml's own AGENT_BRAIN_BASE_URL is
+            # (agent-brain subchart's nameOverride "memory" above), not a
+            # separate value to keep in sync.
+            - name: AGENT_BRAIN_API_URL
+              value: "http://{{ .Release.Name }}-memory-server:8080"
+            {{- if .Values.gateway.enabled }}
+            # This tenant's own Gateway (docs/components/gateway/web.md) —
+            # only set when actually deployed. agent-web's own nginx
+            # /gateway/ proxy location exists in the image either way; this
+            # just gives it something real to reach.
+            - name: GATEWAY_API_URL
+              value: "http://{{ include "agent-harness.componentFullname" (dict "context" . "component" "gateway") }}:{{ .Values.gateway.port }}"
+            {{- end }}
+            - name: NGINX_LISTEN_PORT
+              value: "8080"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.agentWeb.resources | nindent 12 }}
+      {{- with .Values.agentWeb.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agentWeb.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agentWeb.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

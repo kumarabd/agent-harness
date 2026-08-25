@@ -67,6 +67,14 @@ spec:
                 secretKeyRef:
                   name: "{{ .Release.Name }}-postgresql"
                   key: password
+          {{- if .Values.tenantVolume.enabled }}
+            # docs/components/user-input.md — PERMISSION_LIST reads this
+            # file path, not an env var's own content (see the volumeMount
+            # above for why). Fixed path, not a values.yaml knob — nothing
+            # tenant-specific about where on its own PV this lives.
+            - name: TOOL_PERMISSION_LIST_FILE
+              value: "/config/permission_list.json"
+          {{- end }}
           {{- if .Values.llm.enabled }}
             # Real ModelCall calls only (activities/activities/llm.py) —
             # turns with a _test_scripted_responses fixture never touch this.
@@ -214,11 +222,23 @@ spec:
           {{- if .Values.tenantVolume.enabled }}
           volumeMounts:
             # The session filesystem tree (docs/components/session-filesystem.md)
-            # lives under a subpath disjoint from Postgres's own subpath on the
-            # same tenant PV — this worker only ever sees its own slice.
+            # — Postgres no longer shares this PV at all (its own dedicated
+            # Bitnami-managed PVC, see values.yaml's postgresql.* comment).
             - name: tenant-data
               mountPath: /sessions
               subPath: {{ .Values.tenantVolume.sessionsSubPath }}
+            # docs/components/user-input.md's PERMISSION_LIST — a plain file
+            # on this same tenant PV under its own disjoint subPath, not a
+            # Helm value: edited directly at runtime (kubectl exec, or in
+            # principle the tenant's own shell_exec), read once at process
+            # startup, missing file == empty list. Deliberately not Helm-
+            # templated content the way most other config here is — there's
+            # nothing tenant-identity-shaped about a mutable policy list, and
+            # a Helm value would just be a second, driftable copy of
+            # whatever's actually on disk.
+            - name: tenant-data
+              mountPath: /config
+              subPath: {{ .Values.tenantVolume.configSubPath }}
           {{- end }}
           resources:
             {{- toYaml .Values.tenantWorker.resources | nindent 12 }}

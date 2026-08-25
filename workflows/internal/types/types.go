@@ -51,6 +51,16 @@ type TurnInput struct {
 	ParentID       string  `json:"parent_id"`
 	TurnSeq        *int    `json:"turn_seq,omitempty"`
 	InitialMessage Message `json:"initial_message"`
+	// ConnectionID — docs/components/gateway.md's "Resolved: Outbound Flow"
+	// (2026-08-25 correction). Set only for sessions on a connection-based
+	// platform (Discord today); empty for Web. Threaded straight through
+	// from CoordinatorInput (coordinator.go copies it into every TurnInput
+	// it builds) rather than looked up again here — the Gateway replica that
+	// received the triggering message already knows its own resolved
+	// connection_id (Discord: the bot's own user id via GET /users/@me), so
+	// there's nothing left to derive. Used at delivery time to compute the
+	// target task queue deterministically (deliver:{platform}:{connection_id}).
+	ConnectionID string `json:"connection_id,omitempty"`
 }
 
 // TurnResult is a Turn Workflow's return value. Deliberately holds no content

@@ -31,6 +31,14 @@ type CoordinatorInput struct {
 	// — the Gateway only sets it once, at true genesis — so seeding never
 	// re-fires on an ordinary restart.
 	ParentSessionKey string `json:"parent_session_key,omitempty"`
+	// ConnectionID — types.TurnInput's own doc comment has the full detail.
+	// Unlike ParentSessionKey, this is NOT gated to true genesis: the
+	// Gateway sets it on every SignalWithStart call, so it's re-supplied
+	// correctly both on a session's real first message and on an ordinary
+	// idle-timeout coordinator restart (Temporal only consumes these
+	// start-args on whichever call actually starts a fresh execution,
+	// whatever the reason).
+	ConnectionID string `json:"connection_id,omitempty"`
 }
 
 // CoordinatorWorkflow is the long-lived, nearly-stateless control-plane
@@ -151,6 +159,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			ParentID:       input.SessionKey,
 			TurnSeq:        &turnSeqCopy,
 			InitialMessage: payload.Message,
+			ConnectionID:   input.ConnectionID,
 		}
 		cwo := workflow.ChildWorkflowOptions{
 			WorkflowID:        newTurnID,
