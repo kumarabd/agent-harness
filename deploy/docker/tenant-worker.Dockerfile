@@ -4,7 +4,7 @@
 # Build context must be the REPO ROOT, not deploy/docker/:
 #   docker build -f deploy/docker/tenant-worker.Dockerfile -t gcr.io/kumarabd/agent-harness/tenant-worker:latest .
 
-FROM python:3.12-slim AS build
+FROM docker.io/library/python:3.12-slim AS build
 WORKDIR /src
 
 # Copy project metadata first so dependency install is cached independently
@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir --prefix=/install .
 
 COPY activities/activities ./activities
 
-FROM python:3.12-slim
+FROM docker.io/library/python:3.12-slim
 # Not distroless: this layer pip-installs a real dependency tree
 # (temporalio and its transitive deps), which is awkward to reproduce
 # correctly on a distroless base — python:3.12-slim is the pragmatic standard

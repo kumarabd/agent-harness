@@ -4,7 +4,7 @@
 # Build context must be the REPO ROOT, not deploy/docker/:
 #   docker build -f deploy/docker/gateway.Dockerfile -t gcr.io/kumarabd/agent-harness/gateway:latest .
 
-FROM golang:1.26-bookworm AS build
+FROM docker.io/library/golang:1.26-bookworm AS build
 WORKDIR /src
 
 # libopus-dev: docs/components/gateway/discord-voice.md's "Resolved: Audio
@@ -40,7 +40,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build -o /out/gateway ./cmd/gateway
 # zero, but debian-slim's `apt-get install` is what correctly resolves
 # libopus0's own transitive dependencies across architectures, which a
 # hand-copied .so from the build stage would risk getting subtly wrong.
-FROM debian:bookworm-slim
+FROM docker.io/library/debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libopus0 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

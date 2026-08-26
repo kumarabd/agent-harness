@@ -9,7 +9,7 @@
 # Build context must be the REPO ROOT, not deploy/docker/:
 #   docker build -f deploy/docker/vad-sidecar.Dockerfile -t gcr.io/kumarabd/agent-harness/vad-sidecar:latest .
 
-FROM python:3.12-slim AS build
+FROM docker.io/library/python:3.12-slim AS build
 WORKDIR /src
 
 COPY vad-sidecar/pyproject.toml ./
@@ -20,7 +20,7 @@ COPY vad-sidecar/vad_sidecar ./vad_sidecar
 # committed, not regenerated here — this Dockerfile has no protoc/
 # grpc_tools toolchain, and doesn't need one.
 
-FROM python:3.12-slim
+FROM docker.io/library/python:3.12-slim
 # Not distroless, same reasoning as tenant-worker.Dockerfile: a real
 # pip-installed dependency tree (onnxruntime, numpy), awkward to reproduce
 # on a distroless base.

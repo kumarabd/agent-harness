@@ -3,7 +3,7 @@
 # Build context must be the REPO ROOT, not deploy/docker/:
 #   docker build -f deploy/docker/loop-worker.Dockerfile -t gcr.io/kumarabd/agent-harness/loop-worker:latest .
 
-FROM golang:1.26-alpine AS build
+FROM docker.io/library/golang:1.26-alpine AS build
 WORKDIR /src
 
 # Copy module files first so `go mod download` is cached independently of
