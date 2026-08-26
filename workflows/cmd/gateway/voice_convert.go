@@ -41,14 +41,21 @@ func pcmToWAV(pcm []int16, sampleRate, channels int) []byte {
 
 // monoToStereoPCM upmixes mono 16-bit PCM to interleaved stereo by
 // duplicating each sample to both channels — replaces what used to be an
-// ffmpeg subprocess call. No longer needed as of 2026-08-25: verified
-// directly against the real kokoro-svc that requesting response_format=pcm
-// with sample_rate=voiceSampleRate returns raw PCM already at Discord's
-// exact rate (confirmed via duration math against a known sentence) — the
-// only real conversion work left is mono→stereo, which doesn't need a
-// resampler at all, just this duplication. deploy/docker/gateway.Dockerfile's
-// ffmpeg dependency was removed along with this function's old
-// implementation.
+// ffmpeg subprocess call.
+//
+// CORRECTION (2026-08-26): the 2026-08-25 comment that used to be here
+// claimed sample_rate=voiceSampleRate made this the only remaining
+// conversion step, verified via duration math. That verification was
+// wrong — re-tested live and confirmed kokoro-svc does NOT honor
+// sample_rate at all, called directly or through litellm's proxy (byte-
+// for-byte identical output regardless of the parameter, or its absence).
+// Real, deployed voice output was garbled — playing back at roughly double
+// speed, sounding like "fast noise" — because of exactly this: the actual
+// PCM is Kokoro's native 24kHz, but was being encoded as if it were 48kHz.
+// upsample2xPCM below now runs before this function; ffmpeg's removal
+// itself is still correct (this doesn't need a full resampler, just a
+// cheap 2x-specific one), but the "no conversion needed at all" framing
+// was not.
 func monoToStereoPCM(mono []int16) []int16 {
 	stereo := make([]int16, len(mono)*2)
 	for i, s := range mono {
@@ -56,6 +63,44 @@ func monoToStereoPCM(mono []int16) []int16 {
 		stereo[i*2+1] = s
 	}
 	return stereo
+}
+
+// kokoroSampleRate is kokoro-svc's real native output rate — confirmed
+// live (2026-08-26) via duration math against a known sentence (byte count
+// / 2 bytes-per-sample / 24000 matched a natural speaking pace; the same
+// math against 48000 implied roughly double-speed, matching the garbled
+// audio actually heard), consistent across both a direct call and one
+// routed through litellm. Not derived from any documented spec — Kokoro's
+// real behavior, verified against the real service, same discipline as
+// every other "verified, not assumed" finding in this codebase. Re-verify
+// if kokoro-svc's own image/model version ever changes.
+const kokoroSampleRate = 24000
+
+// upsample2xPCM doubles the sample rate via linear interpolation between
+// consecutive samples — kokoroSampleRate (24kHz) to voiceSampleRate (48kHz)
+// is exactly 2x, so a general-purpose resampler isn't needed, just this.
+// Must run before monoToStereoPCM above on every frame of synthesized
+// speech now that sample_rate is confirmed not to be honored server-side.
+//
+// Per-chunk, not a continuous stream: the last input sample in each call
+// has no "next" sample to interpolate toward (this function carries no
+// state across calls the way a real streaming resampler would), so it's
+// just repeated — a small, accepted seam at each 20ms frame boundary, not
+// worth the added statefulness to smooth out.
+func upsample2xPCM(mono []int16) []int16 {
+	if len(mono) == 0 {
+		return nil
+	}
+	out := make([]int16, len(mono)*2)
+	for i, s := range mono {
+		out[i*2] = s
+		if i+1 < len(mono) {
+			out[i*2+1] = int16((int32(s) + int32(mono[i+1])) / 2)
+		} else {
+			out[i*2+1] = s
+		}
+	}
+	return out
 }
 
 // pcmBytesToInt16 decodes a raw little-endian 16-bit PCM byte slice (as

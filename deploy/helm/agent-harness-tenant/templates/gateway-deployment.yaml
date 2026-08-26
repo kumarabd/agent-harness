@@ -87,6 +87,22 @@ spec:
                   name: {{ include "agent-harness.fullname" . }}-gateway-discord
                   key: DISCORD_BOT_TOKENS
             {{- end }}
+            # workflows/cmd/gateway/voice_stt_tts.go's SPEECH_API_KEY —
+            # values.yaml's gateway.speechAPIKey's own comment has the real
+            # 401 this fixes.
+            {{- if .Values.gateway.speechAPIKey }}
+            - name: SPEECH_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-harness.fullname" . }}-gateway-speech
+                  key: SPEECH_API_KEY
+            {{- end }}
+            # workflows/cmd/gateway/voice_stt_tts.go's TTS_VOICE — not a
+            # secret, values.yaml's own comment has the real 500 this fixes.
+            {{- if .Values.gateway.ttsVoice }}
+            - name: TTS_VOICE
+              value: {{ .Values.gateway.ttsVoice | quote }}
+            {{- end }}
             # docs/components/gateway/discord-voice.md's "Resolved: Silero
             # VAD" — localhost, not a Service DNS name: the sidecar below
             # is a second container in this SAME pod, sharing this

@@ -134,18 +134,24 @@ func transcribeAudio(ctx context.Context, wavBytes []byte) (string, error) {
 }
 
 // synthesizeSpeechPCM POSTs text to {SPEECH_BASE_URL}/audio/speech
-// requesting raw PCM at Discord's exact sample rate directly (48kHz, per
-// voiceSampleRate) — no container, and critically, no resampling needed on
-// our side, since the server does it. Returns the still-open response body
-// for the caller to read incrementally (deliver_voice.go Opus-encodes and
-// sends frame-by-frame as bytes arrive, rather than buffering the whole
-// response first) — the response is natively chunked (verified directly),
-// so this is a real pipelining win, not just an API nicety. The caller owns
-// closing the returned body.
+// requesting raw PCM. Still sends sample_rate=voiceSampleRate below, but it
+// is NOT honored (confirmed live 2026-08-26 — identical byte output with,
+// without, or through litellm's proxy vs. calling kokoro-svc directly) —
+// left in the request as a harmless forward-compat hint in case a future
+// kokoro-svc version starts respecting it, but nothing downstream may rely
+// on that: the real synthesized audio is always Kokoro's native 24kHz
+// (voice_convert.go's kokoroSampleRate), and deliver_voice.go upsamples it
+// to 48kHz itself before Opus encoding. Returns the still-open response
+// body for the caller to read incrementally (deliver_voice.go Opus-encodes
+// and sends frame-by-frame as bytes arrive, rather than buffering the
+// whole response first) — the response is natively chunked (verified
+// directly), so this is a real pipelining win, not just an API nicety. The
+// caller owns closing the returned body.
 //
 // Mono, not stereo — Kokoro (and TTS models generally) synthesize a single
 // voice; voice_convert.go's monoToStereoPCM does the (trivial, no longer
-// ffmpeg-dependent) upmix to Discord's required channel count.
+// ffmpeg-dependent) upmix to Discord's required channel count, after
+// upsample2xPCM handles the sample-rate correction above.
 func synthesizeSpeechPCM(ctx context.Context, text string) (io.ReadCloser, error) {
 	payload := map[string]any{
 		"model":           ttsModel,

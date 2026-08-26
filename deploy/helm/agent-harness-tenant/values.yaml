@@ -106,6 +106,32 @@ gateway:
     # bots:
     #   - botToken: ""
     bots: []
+  # -- Optional but required for any real voice call — workflows/cmd/
+  # gateway/voice_stt_tts.go's SPEECH_API_KEY, the litellm-service API key
+  # Gateway's own STT/TTS calls (transcribeAudio/synthesizeSpeechPCM)
+  # authenticate with. Real, live 401 confirmed (2026-08-26) before this
+  # value existed at all — nothing ever wired it, so every voice turn's
+  # delivery activity failed with "No api key passed in." Same real key as
+  # agentBrain.secret.litellmAPIKey / mcp-hub.embedding.apiKey (this
+  # tenant's one litellm-service instance, one key) — rendered into a
+  # Secret (templates/gateway-speech-secret.yaml), not a plain value, same
+  # treatment as gateway.discord.bots above. Do NOT commit a real value
+  # here; set it per tenant in deploy/helm/tenants/<tenant>.yaml.
+  speechAPIKey: ""
+  # -- Optional but required for any real voice call — workflows/cmd/
+  # gateway/voice_stt_tts.go's TTS_VOICE, a Kokoro voice name
+  # (voice_stt_tts.go's own comment: "deliberately has no default — Kokoro's
+  # own voice-name convention isn't obviously guessable"). Real, live 500
+  # confirmed (2026-08-26) once speechAPIKey (above) was fixed: litellm's
+  # /v1/audio/speech route requires `voice` as a mandatory parameter
+  # (`Router.aspeech() missing 1 required positional argument: 'voice'`),
+  # so an unset TTS_VOICE isn't a graceful "use the provider's default" —
+  # it's a hard failure on every single TTS call. "af_heart" verified for
+  # real against the live kokoro-svc (a real 200, real synthesized audio),
+  # and is also the default speaches' own /v1/realtime session reported —
+  # not just a guess, but still a real per-tenant preference, not
+  # hardcoded as this project's own default.
+  ttsVoice: ""
   # -- Optional — docs/components/gateway/discord-voice.md's "Resolved:
   # Silero VAD". Runs as a SECOND CONTAINER in this same pod, not a shared
   # cluster-wide service like whisper-svc/kokoro-svc: VAD is called

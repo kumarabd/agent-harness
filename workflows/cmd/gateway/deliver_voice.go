@@ -101,11 +101,16 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	defer a.bargeIn.endPlayback()
 	a.lifecycle.transitionTo(voiceLifecyclePlaying)
 
-	// One mono frame's worth of bytes at a time (voiceFrameSize samples *
-	// 2 bytes/sample) — read directly off the streaming response body, so
-	// encoding+sending starts as soon as the first frame's bytes have
-	// arrived, not once the whole response has downloaded.
-	frameBytes := make([]byte, voiceFrameSize*2)
+	// One mono frame's worth of bytes at Kokoro's REAL native rate
+	// (kokoroSampleRate, 24kHz — not voiceSampleRate/48kHz: sample_rate
+	// isn't honored server-side, confirmed live 2026-08-26, see
+	// voice_convert.go's monoToStereoPCM comment) — read directly off the
+	// streaming response body, so encoding+sending starts as soon as the
+	// first frame's bytes have arrived, not once the whole response has
+	// downloaded. Same 20ms cadence as Discord's own frame contract, just
+	// at half the sample count until upsample2xPCM below doubles it back.
+	const kokoroFrameSamples = voiceFrameSize * kokoroSampleRate / voiceSampleRate
+	frameBytes := make([]byte, kokoroFrameSamples*2)
 	for {
 		n, readErr := io.ReadFull(stream, frameBytes)
 		if n > 0 {
@@ -117,8 +122,9 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 				chunk = make([]byte, len(frameBytes))
 				copy(chunk, frameBytes[:n])
 			}
-			mono := pcmBytesToInt16(chunk)
-			stereo := monoToStereoPCM(mono)
+			mono24k := pcmBytesToInt16(chunk)
+			mono48k := upsample2xPCM(mono24k)
+			stereo := monoToStereoPCM(mono48k)
 			opusData, encErr := encodeVoiceFrame(enc, stereo)
 			if encErr != nil {
 				return encErr
