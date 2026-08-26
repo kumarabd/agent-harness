@@ -142,7 +142,7 @@ func (s *server) voiceJoin(ctx context.Context, dg *discordgo.Session, ic *disco
 		return "Already connected to a voice channel elsewhere (or another replica is handling it)."
 	}
 
-	vc, err := dg.ChannelVoiceJoin(ic.GuildID, channelID, false, true)
+	vc, err := dg.ChannelVoiceJoin(ctx, ic.GuildID, channelID, false, true)
 	if err != nil {
 		_ = s.releaseConnectionLease(ctx, "discord-voice", connectionID, holderID)
 		log.Printf("discord-voice: failed to join channel %s: %v", channelID, err)
@@ -188,7 +188,7 @@ func (s *server) voiceJoin(ctx context.Context, dg *discordgo.Session, ic *disco
 		if existing.deliverWkr != nil {
 			existing.deliverWkr.Stop()
 		}
-		_ = existing.vc.Disconnect()
+		_ = existing.vc.Disconnect(ctx)
 		// Release promptly rather than leaving it to the lease's own TTL —
 		// this replica genuinely no longer holds it, no reason to make
 		// another replica (or a later /join in this same guild) wait out
@@ -234,7 +234,7 @@ func (s *server) teardownVoiceConnection(ctx context.Context, voiceKey, reason s
 	if entry.deliverWkr != nil {
 		entry.deliverWkr.Stop()
 	}
-	_ = entry.vc.Disconnect()
+	_ = entry.vc.Disconnect(ctx)
 	_ = s.releaseConnectionLease(ctx, "discord-voice", entry.connectionID, entry.holderID)
 	log.Printf("discord-voice: connection %s torn down (%s)", entry.connectionID, reason)
 	return true

@@ -6,6 +6,7 @@ require (
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/uber-go/tally/v4 v4.1.17
 	go.temporal.io/api v1.63.4
@@ -19,12 +20,12 @@ require (
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/facebookgo/clock v0.0.0-20150410010913-600d898af40a // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/mock v1.6.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
@@ -54,3 +55,18 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// docs/components/gateway/discord-voice.md — the official bwmarrin/discordgo
+// (still at v0.29.0, no newer tagged release) doesn't implement Discord's
+// DAVE (E2EE) voice protocol, which Discord made mandatory for voice
+// connections in 2026-03 — every bot on the official library, including
+// this one, fails to join a voice channel with a real, confirmed
+// "close 4017: E2EE/DAVE protocol required" error (github.com/bwmarrin/
+// discordgo#1697, a large open community issue, no merged fix upstream).
+// This fork adds real DAVE support (pulls in cloudflare/circl for the
+// actual crypto), keeps the same module path so no import changes were
+// needed anywhere in this codebase, and is confirmed working by multiple
+// other users hitting the identical error. Revert this the moment
+// upstream merges DAVE support — this is a stopgap for an external
+// platform requirement, not a permanent fork of choice.
+replace github.com/bwmarrin/discordgo => github.com/yeongaori/discordgo-fork v0.0.0-20260627070107-c65bda26a53b
