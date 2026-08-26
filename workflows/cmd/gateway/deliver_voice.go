@@ -50,16 +50,32 @@ type voiceDeliverActivity struct {
 // one channel it can ever deliver to (vc itself), unlike DiscordDeliver's
 // single worker serving every channel a bot's text connection touches.
 func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error {
-	tag, err := a.pool.Exec(ctx,
-		"INSERT INTO delivered_responses (response_id) VALUES ($1) ON CONFLICT DO NOTHING",
-		turnID,
-	)
-	if err != nil {
+	// Real, live bug fixed 2026-08-26: this used to INSERT the idempotency
+	// row here, BEFORE any real work — so a genuine failure partway through
+	// (confirmed live: kokoro-svc OOM-killed mid-synthesis) still left the
+	// row committed, and Temporal's own automatic retry (attempt 2) saw
+	// "already delivered" and returned success in ~4ms without ever
+	// retrying the actual synthesis/delivery — the turn silently produced
+	// no audio at all. A read-only check here, with the real INSERT moved
+	// to every genuine-completion return point below, means a retry after
+	// a real failure correctly finds no row and redoes the real work,
+	// while a retry after real success (Temporal's own rare at-least-once
+	// double-dispatch case) still correctly finds the row and skips it.
+	var alreadyDelivered bool
+	if err := a.pool.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM delivered_responses WHERE response_id = $1)", turnID,
+	).Scan(&alreadyDelivered); err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return nil // already delivered
+	if alreadyDelivered {
+		return nil
 	}
+	markDelivered := func() error {
+		_, err := a.pool.Exec(ctx,
+			"INSERT INTO delivered_responses (response_id) VALUES ($1) ON CONFLICT DO NOTHING", turnID)
+		return err
+	}
+
 	// Every real exit path below (success, error, ctx cancel, barge-in) is
 	// meant to leave the connection back at "listening" — the resting
 	// state between turns — so this is the one place that needs to cover
@@ -67,7 +83,7 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	defer a.lifecycle.transitionTo(voiceLifecycleListening)
 
 	var content string
-	err = a.pool.QueryRow(ctx,
+	err := a.pool.QueryRow(ctx,
 		"SELECT content FROM messages WHERE parent_id = $1 AND role = 'assistant' ORDER BY seq DESC LIMIT 1",
 		turnID,
 	).Scan(&content)
@@ -77,8 +93,10 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	if content == "" {
 		// docs/future-work.md §4 — a real, separately-tracked gap (the
 		// model sometimes ends a turn with no real content). Nothing to
-		// synthesize; not this activity's job to paper over it.
-		return nil
+		// synthesize; not this activity's job to paper over it. Still a
+		// genuine resolution, not a failure — mark delivered so a rare
+		// duplicate dispatch doesn't re-run this check pointlessly.
+		return markDelivered()
 	}
 
 	a.lifecycle.transitionTo(voiceLifecycleSynthesizing)
@@ -146,7 +164,10 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 				_ = a.vc.Speaking(false)
 				a.lifecycle.transitionTo(voiceLifecycleInterrupted)
 				log.Printf("discord-voice: playback interrupted by barge-in for turn %s", turnID)
-				return nil
+				// A resolved outcome, not a failure — replaying from the
+				// start on a hypothetical retry would be wrong anyway (the
+				// user already heard part of it and moved on).
+				return markDelivered()
 			case a.vc.OpusSend <- opusData:
 			}
 		}
@@ -161,5 +182,5 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 		log.Printf("discord-voice: failed to clear speaking state: %v", err)
 	}
 	log.Printf("discord-voice: delivered turn %s via connection %s", turnID, a.connectionID)
-	return nil
+	return markDelivered()
 }

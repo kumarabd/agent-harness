@@ -33,24 +33,34 @@ type discordDeliverActivity struct {
 // this is ever called for — turn.go only dispatches this when
 // input.ParentType == "session").
 func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) error {
-	tag, err := a.pool.Exec(ctx,
-		"INSERT INTO delivered_responses (response_id) VALUES ($1) ON CONFLICT DO NOTHING",
-		turnID,
-	)
-	if err != nil {
+	// Real, live bug fixed 2026-08-26 (same pattern and same root cause as
+	// deliver_voice.go's Deliver): this used to INSERT the idempotency row
+	// here, BEFORE the real ChannelMessageSend — so a genuine failure
+	// partway through (a transient Discord API error, a dropped connection)
+	// still left the row committed, and Temporal's own automatic retry saw
+	// "already delivered" and returned success without ever resending. A
+	// read-only check here, with the real INSERT moved to every genuine-
+	// completion return point below, means a retry after a real failure
+	// correctly finds no row and resends, while a retry after real success
+	// still correctly finds the row and skips it.
+	var alreadyDelivered bool
+	if err := a.pool.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM delivered_responses WHERE response_id = $1)", turnID,
+	).Scan(&alreadyDelivered); err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		// Already delivered by an earlier attempt at this exact turn_id —
-		// same at-least-once-dispatch-to-effectively-once-visible-action
-		// reasoning activities-outbound-delivery.md's own idempotency
-		// section describes, just enforced here instead of a broker.
+	if alreadyDelivered {
 		return nil
+	}
+	markDelivered := func() error {
+		_, err := a.pool.Exec(ctx,
+			"INSERT INTO delivered_responses (response_id) VALUES ($1) ON CONFLICT DO NOTHING", turnID)
+		return err
 	}
 
 	var channelID, content string
 	var streamedMessageRef *string
-	err = a.pool.QueryRow(ctx, `
+	err := a.pool.QueryRow(ctx, `
 		SELECT s.channel_id, m.content, t.streamed_message_ref
 		FROM turns t
 		JOIN sessions s ON s.session_key = t.parent_id
@@ -74,20 +84,21 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 		// enough to keep the ledger consistent — sending a second, whole
 		// new message here would duplicate what the user already saw.
 		log.Printf("discord: turn %s already delivered via streaming (message %s), skipping re-send", turnID, *streamedMessageRef)
-		return nil
+		return markDelivered()
 	}
 	if content == "" {
 		// docs/future-work.md §4 — a real, separately-tracked gap (the model
 		// sometimes ends a turn with no real content). Nothing to send;
-		// not this activity's job to paper over it.
-		return nil
+		// not this activity's job to paper over it. Still a genuine
+		// resolution, not a failure — mark delivered.
+		return markDelivered()
 	}
 
 	if _, err := a.session.ChannelMessageSend(channelID, content); err != nil {
 		return err
 	}
 	log.Printf("discord: delivered turn %s to channel %s via connection %s", turnID, channelID, a.connectionID)
-	return nil
+	return markDelivered()
 }
 
 // DiscordDeliverChunk delivers one streamed sentence-chunk (docs/components/
@@ -97,9 +108,16 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 // (discord.go's runDiscordConnection), since it needs the same live
 // session.
 func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string, seq int) error {
+	// Real, live bug fixed 2026-08-26 (same pattern as Deliver above): this
+	// used to claim `sent = true` atomically in the same UPDATE that read
+	// the content, BEFORE the real ChannelMessageSend/Edit call — so a
+	// genuine failure partway through left the row already marked sent, and
+	// a retry would see sent=true and skip resending. Read-only SELECT here
+	// as the claim check; the real UPDATE moves to after the Discord API
+	// call actually succeeds.
 	var content string
 	err := a.pool.QueryRow(ctx,
-		"UPDATE turn_deliveries SET sent = true WHERE turn_id = $1 AND seq = $2 AND sent = false RETURNING content",
+		"SELECT content FROM turn_deliveries WHERE turn_id = $1 AND seq = $2 AND sent = false",
 		turnID, seq,
 	).Scan(&content)
 	if err != nil {
@@ -112,6 +130,11 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 			// migration comment).
 			return nil
 		}
+		return err
+	}
+	markSent := func() error {
+		_, err := a.pool.Exec(ctx,
+			"UPDATE turn_deliveries SET sent = true WHERE turn_id = $1 AND seq = $2", turnID, seq)
 		return err
 	}
 
@@ -138,12 +161,12 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 			return err
 		}
 		log.Printf("discord: turn %s streamed chunk %d created message %s", turnID, seq, msg.ID)
-		return nil
+		return markSent()
 	}
 
 	if _, err := a.session.ChannelMessageEdit(channelID, *streamedMessageRef, content); err != nil {
 		return err
 	}
 	log.Printf("discord: turn %s streamed chunk %d edited message %s", turnID, seq, *streamedMessageRef)
-	return nil
+	return markSent()
 }
