@@ -142,7 +142,13 @@ func (s *server) voiceJoin(ctx context.Context, dg *discordgo.Session, ic *disco
 		return "Already connected to a voice channel elsewhere (or another replica is handling it)."
 	}
 
-	vc, err := dg.ChannelVoiceJoin(ctx, ic.GuildID, channelID, false, true)
+	// mute=false, deaf=false — this bot's entire purpose is to receive and
+	// process incoming audio (VAD, STT); `deaf=true` tells Discord's own
+	// servers to withhold audio from this connection entirely at the
+	// protocol level, not just a client-side UI toggle. Confirmed live:
+	// this was the exact cause of the bot showing deafened in Discord and
+	// receiving no audio at all regardless of who was speaking.
+	vc, err := dg.ChannelVoiceJoin(ctx, ic.GuildID, channelID, false, false)
 	if err != nil {
 		_ = s.releaseConnectionLease(ctx, "discord-voice", connectionID, holderID)
 		log.Printf("discord-voice: failed to join channel %s: %v", channelID, err)
