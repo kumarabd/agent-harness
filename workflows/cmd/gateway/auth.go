@@ -87,6 +87,12 @@ func sessionKeyFor(platform, channelID, discriminator string) string {
 			panic("sessionKeyFor: malformed discriminator " + discriminator)
 		}
 		return "agent:main:discord:channel:" + channelID + ":thread:" + id
+	case "discord-voice":
+		// docs/components/gateway/discord-voice.md — no reply-threading
+		// concept for voice (Discriminator is always "channel:"+channelID,
+		// discord_voice.go never sets anything else), so this is the whole
+		// story: one session per joined voice channel, no thread variant.
+		return "agent:main:discord-voice:channel:" + channelID
 	default:
 		panic("sessionKeyFor: unsupported platform " + platform)
 	}

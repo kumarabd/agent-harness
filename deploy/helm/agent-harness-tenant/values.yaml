@@ -92,15 +92,55 @@ gateway:
     clerkJwksUrl: ""
     clerkIssuer: ""
   discord:
-    # -- Optional — docs/components/gateway/discord.md's "Resolved: Auth".
-    # Only starts the Discord goroutine (discord.go) if set; a tenant with no
-    # Discord bot configured leaves this empty and gets Web only. A real bot
-    # token, unlike web.clerkIssuer/web.clerkJwksUrl above — rendered into a
-    # Secret (templates/gateway-discord-secret.yaml), not a plain value. Do
-    # NOT commit a real value here; set it per tenant in
-    # deploy/helm/tenants/<tenant>.yaml instead, same discipline as
+    # -- Optional — docs/components/gateway/discord.md's "Resolved: Auth",
+    # docs/components/gateway/discord-voice.md's multi-bot resolution
+    # (2026-08-25). A LIST, not a single token: a tenant can run more than
+    # one Discord bot (gateway.md's composable connection_id), each an
+    # independent entry here. Empty list leaves this tenant on Web only.
+    # Each real token, unlike web.clerkIssuer/web.clerkJwksUrl above — all
+    # rendered together into one Secret (templates/gateway-discord-secret.yaml),
+    # not a plain value. Do NOT commit real values here; set them per tenant
+    # in deploy/helm/tenants/<tenant>.yaml instead, same discipline as
     # llm.openai.apiKey above.
-    botToken: ""
+    #
+    # bots:
+    #   - botToken: ""
+    bots: []
+  # -- Optional — docs/components/gateway/discord-voice.md's "Resolved:
+  # Silero VAD". Runs as a SECOND CONTAINER in this same pod, not a shared
+  # cluster-wide service like whisper-svc/kokoro-svc: VAD is called
+  # ~50x/sec per active speaker (every 20ms), a much higher frequency than
+  # those services' once-per-utterance pattern, so colocating (localhost,
+  # no cross-pod hop) is a deliberate exception to preferring shared
+  # services, justified by that calling frequency specifically. Disabled
+  # by default — voiceCaptureLoop falls back to energyVAD (no external
+  # dependency at all) when this is off; when it's on and the sidecar
+  # becomes unreachable at runtime, the design is fail-loud (tear down the
+  # connection, refuse new /join attempts), not a silent fallback back to
+  # energyVAD — see the doc for the reasoning.
+  vadSidecar:
+    enabled: false
+    image:
+      repository: "gcr.io/kumarabd/agent-harness/vad-sidecar"
+      tag: "latest"
+      pullPolicy: IfNotPresent
+    port: 8500
+    resources: {}
+  # -- Optional — docs/components/gateway/discord-voice.md's "Resolved:
+  # True bidirectional realtime STT". Unlike vadSidecar above, this is a
+  # SEPARATE, standalone cluster service (infra/model/whisperlive/), not a
+  # container in this pod — it's real GPU infra specific to this
+  # deployment's own cluster (nighthawk-pc), not something every tenant
+  # necessarily has, so it's an explicit opt-in via a URL rather than an
+  # assumed-present shared dependency the way litellm-service is. Disabled
+  # by default — voiceCaptureLoop falls back entirely to the batch
+  # transcribeAudio path (voice_stt_tts.go) when this is off.
+  realtimeStt:
+    enabled: false
+    # ws:// (or wss://), not http(s):// — this is a plain WebSocket
+    # protocol (verified directly against the real deployed service), not
+    # an HTTP API like whisper-svc/kokoro-svc.
+    url: "ws://whisperlive-svc.core.svc:9090"
   resources: {}
   nodeSelector: {}
   tolerations: []

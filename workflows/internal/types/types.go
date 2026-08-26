@@ -73,6 +73,17 @@ type TurnResult struct {
 	TurnID     string `json:"turn_id"`
 	StopReason string `json:"stop_reason"` // "no_tool_calls" | "max_iterations" | "max_retries" | "budget_exhausted"
 	Iterations int    `json:"iterations"`
+	// InterruptedDuringDelivery — docs/components/gateway/discord-voice.md's
+	// "Resolved: Overlapping Speech / Interrupts" gap, closed 2026-08-25: a
+	// signal arriving while this turn's connection-based delivery
+	// (DiscordDeliver/VoiceDeliver) was still in flight cancels that
+	// delivery rather than losing the signal. Since the turn's own
+	// ModelCall loop has already finished by the time delivery runs, there's
+	// no way to fold the new message back into THIS turn — instead it's
+	// handed back here, and coordinator.go treats it exactly like a
+	// freshly-arrived signal once this turn's future resolves, starting a
+	// new turn with it rather than discarding it.
+	InterruptedDuringDelivery *SignalPayload `json:"interrupted_during_delivery,omitempty"`
 }
 
 // SignalPayload is what SignalWithStart / a follow-up signal carries into the

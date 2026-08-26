@@ -68,24 +68,60 @@ spec:
             - name: CLERK_ISSUER
               value: {{ .Values.gateway.web.clerkIssuer | quote }}
             {{- end }}
-            # docs/components/gateway/discord.md, "Resolved: Auth" — a real
-            # bot token, unlike Clerk's issuer/JWKS above: leaks it and
-            # someone can impersonate this bot in every server it's in. A
+            # docs/components/gateway/discord.md, "Resolved: Auth" — real bot
+            # token(s), unlike Clerk's issuer/JWKS above: leaking one lets
+            # someone impersonate that bot in every server it's in. A
             # Secret, not a plain value (this project already made the
             # opposite mistake once with a Clerk secret key that turned out
             # not to need to be one — not repeating that misjudgment in the
             # other direction here). Optional — Discord is one of possibly
             # several platform kinds this tenant's Gateway runs; only starts
-            # the goroutine (discord.go) if this is actually set.
-            {{- if .Values.gateway.discord.botToken }}
-            - name: DISCORD_BOT_TOKEN
+            # any Discord goroutines (discord.go) if this list is non-empty.
+            # Comma-separated (main.go's discordBotTokens()) — a tenant can
+            # run more than one Discord bot, docs/components/gateway/
+            # discord-voice.md's multi-bot resolution.
+            {{- if .Values.gateway.discord.bots }}
+            - name: DISCORD_BOT_TOKENS
               valueFrom:
                 secretKeyRef:
                   name: {{ include "agent-harness.fullname" . }}-gateway-discord
-                  key: DISCORD_BOT_TOKEN
+                  key: DISCORD_BOT_TOKENS
+            {{- end }}
+            # docs/components/gateway/discord-voice.md's "Resolved: Silero
+            # VAD" — localhost, not a Service DNS name: the sidecar below
+            # is a second container in this SAME pod, sharing this
+            # container's network namespace. A plain gRPC dial target
+            # (host:port), not a URL — no scheme — despite the env var's
+            # name, carried over from an earlier HTTP prototype.
+            {{- if .Values.gateway.vadSidecar.enabled }}
+            - name: VAD_SIDECAR_URL
+              value: {{ printf "localhost:%d" (int .Values.gateway.vadSidecar.port) | quote }}
+            {{- end }}
+            # docs/components/gateway/discord-voice.md's "Resolved: True
+            # bidirectional realtime STT" — a real Service DNS name (not
+            # localhost), since WhisperLive is a standalone cluster
+            # service, not a container in this pod.
+            {{- if .Values.gateway.realtimeStt.enabled }}
+            - name: WHISPERLIVE_URL
+              value: {{ .Values.gateway.realtimeStt.url | quote }}
             {{- end }}
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
+        {{- if .Values.gateway.vadSidecar.enabled }}
+        - name: vad-sidecar
+          image: "{{ .Values.gateway.vadSidecar.image.repository }}:{{ .Values.gateway.vadSidecar.image.tag }}"
+          imagePullPolicy: {{ .Values.gateway.vadSidecar.image.pullPolicy }}
+          ports:
+            - name: vad
+              containerPort: {{ .Values.gateway.vadSidecar.port }}
+          env:
+            - name: VAD_SIDECAR_BIND
+              value: "127.0.0.1"
+            - name: VAD_SIDECAR_PORT
+              value: {{ .Values.gateway.vadSidecar.port | quote }}
+          resources:
+            {{- toYaml .Values.gateway.vadSidecar.resources | nindent 12 }}
+        {{- end }}
       {{- with .Values.gateway.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

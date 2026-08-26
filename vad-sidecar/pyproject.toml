@@ -1,0 +1,32 @@
+[project]
+name = "vad-sidecar"
+version = "0.1.0"
+description = "Silero VAD classification sidecar for the Go Gateway — docs/components/gateway/discord-voice.md's 'Resolved: Silero VAD'. Stateless-over-the-wire: the caller (Gateway) holds per-speaker model state and passes it with every request; this process holds no per-connection state at all."
+requires-python = ">=3.10"
+dependencies = [
+    # Bundles a real Silero VAD ONNX export + a thin loader — no manual
+    # model-weight fetching, no vendored ONNX Runtime shared library (the
+    # cgo/Go route's actual blocker, docs/components/gateway/discord-voice.md).
+    "silero-vad>=5.1,<6",
+    "onnxruntime>=1.19,<2",
+    "numpy>=1.26,<3",
+    # gRPC server + the standard grpc.health.v1 health-check protocol
+    # (vad_sidecar/server.py) — the wire protocol between this sidecar and
+    # its Go client (workflows/cmd/gateway/voice_vad_silero.go), per
+    # proto/vad_sidecar.proto. grpcio-tools (codegen) is a dev-time-only
+    # dependency, not listed here — vad_sidecar/pb/'s generated stubs are
+    # committed, not regenerated at install/run time.
+    "grpcio>=1.60,<2",
+    "grpcio-health-checking>=1.60,<2",
+    # Lower bound matches what the committed vad_sidecar/pb/ stubs were
+    # generated against (protoc 36.0 / protobuf gencode 7.35.1) — protobuf's
+    # own compatibility guarantee is runtime >= gencode, not the reverse.
+    "protobuf>=5.26,<8",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["vad_sidecar*"]

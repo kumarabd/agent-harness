@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: vad-sidecar
+Version: 0.1.0
+Summary: Silero VAD classification sidecar for the Go Gateway — docs/components/gateway/discord-voice.md's 'Resolved: Silero VAD'. Stateless-over-the-wire: the caller (Gateway) holds per-speaker model state and passes it with every request; this process holds no per-connection state at all.
+Requires-Python: >=3.10
+Requires-Dist: silero-vad<6,>=5.1
+Requires-Dist: onnxruntime<2,>=1.19
+Requires-Dist: numpy<3,>=1.26
+Requires-Dist: grpcio<2,>=1.60
+Requires-Dist: grpcio-health-checking<2,>=1.60
+Requires-Dist: protobuf<8,>=5.26

@@ -131,7 +131,7 @@ async def main() -> None:
         client,
         task_queue=task_queue,
         activities=[
-            ModelCallActivity(pool, openai_client).__call__,
+            ModelCallActivity(pool, openai_client, client).__call__,
             ToolCallActivity(pool).__call__,
             InsertMessageActivity(pool).__call__,
             GetMaxTurnSeqActivity(pool).__call__,

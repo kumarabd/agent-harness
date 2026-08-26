@@ -42,7 +42,12 @@ func (s *server) startDiscordPlatform(ctx context.Context, botToken, holderID st
 		log.Printf("discord: failed to create session: %v", err)
 		return
 	}
-	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent | discordgo.IntentsDirectMessages
+	// IntentsGuildVoiceStates: required for discordgo's own state tracker to
+	// know which voice channel a user is currently in (dg.State.VoiceState,
+	// discord_voice.go's voiceJoin) — without it, /join can never resolve
+	// who to follow into a channel.
+	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent |
+		discordgo.IntentsDirectMessages | discordgo.IntentsGuildVoiceStates
 
 	botUser, err := dg.User("@me")
 	if err != nil {
@@ -53,6 +58,21 @@ func (s *server) startDiscordPlatform(ctx context.Context, botToken, holderID st
 	dg.AddHandler(func(session *discordgo.Session, m *discordgo.MessageCreate) {
 		s.discordMessageCreate(session, m, connectionID)
 	})
+	dg.AddHandler(func(session *discordgo.Session, ic *discordgo.InteractionCreate) {
+		// ctx (this function's own parameter, closed over here) is the
+		// process's real shutdown-tied context — voiceJoin derives its
+		// long-running goroutines' lifetime from it, not from
+		// context.Background(), so a voice connection actually gets torn
+		// down on SIGTERM instead of being orphaned.
+		s.discordVoiceInteractionCreate(ctx, session, ic, connectionID)
+	})
+	// connectionID (botUser.ID, resolved above via REST) doubles as the
+	// application id here — true for a standard single-application bot
+	// token, and avoids depending on dg.State.User being populated, which
+	// only happens after dg.Open() (called later, inside
+	// runDiscordConnection) — registerVoiceCommands needs to run before
+	// that dependency would even be satisfiable if it read state instead.
+	s.registerVoiceCommands(dg, connectionID)
 
 	for {
 		ok, err := s.acquireOrRenewConnectionLease(ctx, "discord", connectionID, holderID, discordConnectionLeaseTTL)
@@ -95,6 +115,10 @@ func (s *server) runDiscordConnection(ctx context.Context, dg *discordgo.Session
 	// poller to do here.
 	deliverWorker := worker.New(s.temporal, "deliver:discord:"+connectionID, worker.Options{DisableWorkflowWorker: true})
 	deliverWorker.RegisterActivityWithOptions(deliverActivity.Deliver, activity.RegisterOptions{Name: "DiscordDeliver"})
+	// docs/components/gateway.md's "Resolved: ModelCall Streaming" —
+	// same worker/connection, same live session, registered alongside
+	// DiscordDeliver rather than a separate embedded worker.
+	deliverWorker.RegisterActivityWithOptions(deliverActivity.DeliverChunk, activity.RegisterOptions{Name: "DiscordDeliverChunk"})
 	if err := deliverWorker.Start(); err != nil {
 		log.Printf("discord: failed to start embedded delivery worker: %v", err)
 		return

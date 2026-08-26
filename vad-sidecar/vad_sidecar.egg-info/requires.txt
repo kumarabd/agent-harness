@@ -1,0 +1,6 @@
+silero-vad<6,>=5.1
+onnxruntime<2,>=1.19
+numpy<3,>=1.26
+grpcio<2,>=1.60
+grpcio-health-checking<2,>=1.60
+protobuf<8,>=5.26

@@ -109,6 +109,19 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 				}
 				turnActive = false
 				currentTurnID = ""
+				// docs/components/gateway/discord-voice.md's "Resolved:
+				// Overlapping Speech / Interrupts" gap, closed 2026-08-25:
+				// a signal that arrived while this turn's connection-based
+				// delivery was still in flight got cancelled and handed
+				// back here (TurnWorkflow's own signal-drain queue is
+				// gone along with that execution) rather than lost.
+				// Treated exactly like a freshly-arrived signal — the very
+				// next loop iteration starts a brand-new turn with it, the
+				// same path an ordinary NewMessage signal already takes.
+				if result.InterruptedDuringDelivery != nil {
+					pendingSignal = result.InterruptedDuringDelivery
+					haveSignal = true
+				}
 			})
 		} else {
 			sel.AddFuture(idleTimer, func(f workflow.Future) {

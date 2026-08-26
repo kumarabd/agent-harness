@@ -17,10 +17,12 @@
 //	POST /respond  — verify Clerk JWT, answer a pending user_input_requests
 //	                 row via SignalWorkflow against its own workflow_id
 //	                 (docs/components/user-input.md).
-//	Discord goroutine (discord.go) — only starts if DISCORD_BOT_TOKEN is
-//	set; connects only while holding this platform's connection lease
-//	(gateway_connection_leases, leases.go), per gateway.md's "Resolved:
-//	Connection Leasing".
+//	Discord goroutine(s) (discord.go) — one per token in DISCORD_BOT_TOKENS
+//	(comma-separated — a tenant can run more than one Discord bot,
+//	gateway.md's composable connection_id); DISCORD_BOT_TOKEN (singular) is
+//	still read as a one-bot fallback. Each connects only while holding that
+//	bot's own connection lease (gateway_connection_leases, leases.go), per
+//	gateway.md's "Resolved: Connection Leasing".
 package main
 
 import (
@@ -29,6 +31,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -44,10 +47,43 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
+// discordBotTokens returns the configured Discord bot tokens for this
+// tenant — DISCORD_BOT_TOKENS (comma-separated, deploy/helm/agent-harness-tenant's
+// gateway.discord.bots list), same convention loop-worker's own
+// TEMPORAL_NAMESPACES already uses, with DISCORD_BOT_TOKEN (singular) kept
+// as a fallback for the pre-multi-bot single-value shape. Returns an empty
+// slice (not an error) when neither is set — Discord is one of possibly
+// several platform kinds this tenant's Gateway runs; having none configured
+// is a valid, common state (main.go's own loop over this is a no-op then).
+func discordBotTokens() []string {
+	if raw := os.Getenv("DISCORD_BOT_TOKENS"); raw != "" {
+		var out []string
+		for _, tok := range strings.Split(raw, ",") {
+			tok = strings.TrimSpace(tok)
+			if tok != "" {
+				out = append(out, tok)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if tok := os.Getenv("DISCORD_BOT_TOKEN"); tok != "" {
+		return []string{tok}
+	}
+	return nil
+}
+
 type server struct {
 	pool      *pgxpool.Pool
 	temporal  client.Client
 	taskQueue string
+	// voice — docs/components/gateway/discord-voice.md's per-guild live
+	// voice connection registry. In-memory only, same reasoning as
+	// discord.go's own dg session: gateway_connection_leases is the durable
+	// record of who holds each connection, this is just this replica's own
+	// bookkeeping of which ones it's currently serving.
+	voice *voiceState
 }
 
 func main() {
@@ -90,6 +126,7 @@ func main() {
 		pool:      pool,
 		temporal:  temporalClient,
 		taskQueue: envOrDefault("TEMPORAL_TASK_QUEUE", "agent-loop"),
+		voice:     newVoiceState(),
 	}
 
 	mux := http.NewServeMux()
@@ -100,12 +137,16 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	// discord.go — only this tenant's configured platform kinds run, per
-	// gateway.md's per-tenant, one-goroutine-per-platform model. holderID
-	// identifies this specific process to gateway_connection_leases; a fresh
-	// one each process start is fine — the lease is about which process
-	// currently holds the live connection, not about recognizing a process
-	// across restarts.
-	if botToken := os.Getenv("DISCORD_BOT_TOKEN"); botToken != "" {
+	// gateway.md's per-tenant, one-goroutine-per-platform model. One
+	// startDiscordPlatform goroutine per configured bot token (gateway.md's
+	// composable connection_id — a tenant can run more than one Discord
+	// bot), same comma-separated-list convention loop-worker's own
+	// TEMPORAL_NAMESPACES already uses. holderID identifies this specific
+	// process to gateway_connection_leases; a fresh one per bot per process
+	// start is fine — the lease is about which process currently holds a
+	// given live connection, not about recognizing a process across
+	// restarts.
+	for _, botToken := range discordBotTokens() {
 		go s.startDiscordPlatform(ctx, botToken, uuid.NewString())
 	}
 

@@ -18,6 +18,19 @@ import (
 // (02-architecture-temporal-execution.md §3).
 const NewMessageSignalName = "NewMessage"
 
+// modelCallChunkSignalName — docs/components/gateway.md's "Resolved:
+// ModelCall Streaming". Signaled directly by the ModelCall ACTIVITY
+// (Python, model_call.py), not forwarded by the Coordinator like
+// NewMessage above — the one place this codebase has an activity signal
+// its own parent workflow rather than just returning a result. Payload is
+// a bare int (the new chunk's seq) — turn_id is already this workflow's
+// own ID, and content never crosses this signal at all, matching the
+// reference-passing contract this whole file's doc comment describes: this
+// workflow learns "chunk N is ready" and nothing else, then reads the
+// actual text from turn_deliveries by ID, same as it already does for
+// every other piece of content.
+const modelCallChunkSignalName = "ModelCallChunk"
+
 // WriteMemoryWorkflow is a thin wrapper whose only job is to await the
 // WriteMemory activity itself. It exists because a bare
 // workflow.ExecuteActivity(...) without Get() is NOT genuinely fire-and-forget
@@ -128,7 +141,7 @@ func compressionState(contextTokens, contextWindow int) string {
 // synthetic error message insert fails its FK against turns(turn_id) and the
 // Persist/Deliver calls become harmless no-ops — there's nothing more
 // meaningful to do when the turn never existed in the first place.
-func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, parentType string, cause error) (types.TurnResult, error) {
+func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, parentType string, cause error, interrupts *deliveryInterruptSource) (types.TurnResult, error) {
 	logger := workflow.GetLogger(ctx)
 	logger.Error("turn failed", "turn_id", turnID, "error", cause)
 
@@ -143,9 +156,32 @@ func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, par
 	_ = workflow.ExecuteActivity(actx, "Persist", turnID, "failed").Get(actx, nil)
 	if parentType == "session" {
 		_ = workflow.ExecuteActivity(actx, "Deliver", turnID).Get(actx, nil)
-		deliverToConnectionBasedPlatform(ctx, sessionKey, connectionID, turnID)
+		if payload := deliverConnectionBased(ctx, interrupts, sessionKey, connectionID, turnID); payload != nil {
+			// nil error, not cause: Temporal discards a child workflow's
+			// return VALUE when it also returns a non-nil error (recorded
+			// as a failed execution instead) — returning cause here would
+			// silently drop InterruptedDuringDelivery before
+			// coordinator.go ever saw it. cause is already logged above;
+			// from the Coordinator's perspective this turn concluded
+			// (with an error handled internally) and handed off a new
+			// message, not a Temporal-level failure worth flagging red.
+			return types.TurnResult{TurnID: turnID, InterruptedDuringDelivery: payload}, nil
+		}
 	}
 	return types.TurnResult{}, cause
+}
+
+// deliveryInterruptSource lets deliverConnectionBased race a connection-based
+// delivery activity against a new signal arriving mid-flight, without giving
+// it direct access to TurnWorkflow's own local pendingMessages/signalChan —
+// nil is a valid, meaningful value (docs/components/gateway/discord-voice.md's
+// "Resolved: Overlapping Speech / Interrupts"): the very first failTurn call
+// site (before this infrastructure is even set up, mid-InsertMessage-failure)
+// has nothing to race against, and deliverConnectionBased degrades to a
+// plain uninterruptible await in that case, same as before this existed.
+type deliveryInterruptSource struct {
+	notify   workflow.Channel       // buffered, non-blocking-sent — see TurnWorkflow's own signal-draining goroutine
+	messages *[]types.SignalPayload // TurnWorkflow's own pendingMessages, read (not drained) once interrupted
 }
 
 // deliverToConnectionBasedPlatform — gateway.md's "Resolved: Outbound Flow"
@@ -158,20 +194,59 @@ func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, par
 // (never platform alone — a tenant can run more than one connection of the
 // same platform kind, e.g. two Discord bots, so platform alone would be
 // ambiguous about which live socket to send over).
-func deliverToConnectionBasedPlatform(ctx workflow.Context, sessionKey, connectionID, turnID string) {
+//
+// Races the delivery activity against interrupts.notify (docs/components/
+// gateway/discord-voice.md's "Resolved: Overlapping Speech / Interrupts" gap,
+// closed 2026-08-25): a signal arriving while delivery is still in flight
+// cancels it rather than being silently discarded once this call returns.
+// Returns the interrupting payload (non-nil) if that happened — the caller
+// is responsible for handing it back to the Coordinator via TurnResult,
+// since only the caller has a real return path there.
+func deliverConnectionBased(ctx workflow.Context, interrupts *deliveryInterruptSource, sessionKey, connectionID, turnID string) *types.SignalPayload {
 	if connectionID == "" {
-		return
+		return nil
 	}
 	platform := platformFromSessionKey(sessionKey)
-	if !isConnectionBasedPlatform(platform) {
-		return
+	activityName, timeout, ok := connectionDeliveryActivity(platform)
+	if !ok {
+		return nil
 	}
+
+	deliverCtx, deliverCancel := workflow.WithCancel(ctx)
+	defer deliverCancel()
 	ao := workflow.ActivityOptions{
-		StartToCloseTimeout: activityTimeoutTierA,
+		StartToCloseTimeout: timeout,
 		TaskQueue:           "deliver:" + platform + ":" + connectionID,
 	}
-	actx := workflow.WithActivityOptions(ctx, ao)
-	_ = workflow.ExecuteActivity(actx, "DiscordDeliver", turnID).Get(actx, nil)
+	actx := workflow.WithActivityOptions(deliverCtx, ao)
+	future := workflow.ExecuteActivity(actx, activityName, turnID)
+
+	if interrupts == nil || interrupts.notify == nil {
+		_ = future.Get(actx, nil)
+		return nil
+	}
+
+	interrupted := false
+	sel := workflow.NewSelector(ctx)
+	sel.AddFuture(future, func(f workflow.Future) {
+		_ = f.Get(actx, nil)
+	})
+	sel.AddReceive(interrupts.notify, func(c workflow.ReceiveChannel, more bool) {
+		c.Receive(ctx, nil)
+		interrupted = true
+		deliverCancel()
+	})
+	sel.Select(ctx)
+	if !interrupted {
+		return nil
+	}
+	_ = future.Get(actx, nil) // wait for the now-cancelling activity to actually finish
+	msgs := *interrupts.messages
+	if len(msgs) == 0 {
+		return nil
+	}
+	payload := msgs[len(msgs)-1]
+	return &payload
 }
 
 // platformFromSessionKey extracts the platform segment from a session_key of
@@ -185,13 +260,25 @@ func platformFromSessionKey(sessionKey string) string {
 	return parts[2]
 }
 
-// isConnectionBasedPlatform — gateway.md's "Resolved: Outbound Flow": only a
-// connection-based platform needs the embedded-worker delivery path at all.
-// A literal check, not a registry — Discord is the only one that exists
-// today, and adding a second is a one-line change when it happens, not a
-// reason to build an abstraction for a case that doesn't exist yet.
-func isConnectionBasedPlatform(platform string) bool {
-	return platform == "discord"
+// connectionDeliveryActivity — gateway.md's "Resolved: Outbound Flow": only a
+// connection-based platform needs the embedded-worker delivery path at all,
+// and which activity to dispatch (and how long to allow it) is genuinely
+// per-platform, not a single shared constant — DiscordDeliver
+// (deliver_discord.go) is a near-instant text send, activityTimeoutTierA is
+// plenty; VoiceDeliver (deliver_voice.go) synthesizes and streams real
+// audio, which can run well past 30s for a multi-sentence response, so it
+// gets its own, longer budget. A literal lookup, not a registry — two
+// platforms exist today, and adding a third is a one-line change, not a
+// reason to build an abstraction for cases that don't exist yet.
+func connectionDeliveryActivity(platform string) (activityName string, timeout time.Duration, ok bool) {
+	switch platform {
+	case "discord":
+		return "DiscordDeliver", activityTimeoutTierA, true
+	case "discord-voice":
+		return "VoiceDeliver", 5 * time.Minute, true
+	default:
+		return "", 0, false
+	}
 }
 
 // TurnWorkflow implements the reason-act-observe loop. One workflow *type* for
@@ -242,7 +329,11 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 			TurnSeq:     input.TurnSeq,
 		}
 		if err := workflow.ExecuteActivity(actx, "InsertMessage", insertInput).Get(actx, nil); err != nil {
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err)
+			// No signal infrastructure exists yet at this point (set up
+			// below) — nothing to race a delivery against even if this
+			// path ever reached one (it doesn't: parentType=="session"
+			// delivery only fires after Persist, further down failTurn).
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, nil)
 		}
 	}
 
@@ -252,13 +343,70 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	// never batched.
 	var pendingMessages []types.SignalPayload
 	signalChan := workflow.GetSignalChannel(ctx, NewMessageSignalName)
+	// deliveryInterruptNotify — docs/components/gateway/discord-voice.md's
+	// "Resolved: Overlapping Speech / Interrupts" gap, closed 2026-08-25.
+	// Buffered (size 1) and always sent non-blocking (Selector + AddDefault):
+	// this must never block the signal-draining goroutine below, which has
+	// to keep appending to pendingMessages regardless of whether anything is
+	// currently racing against this channel (deliverConnectionBased only
+	// listens on it during the narrow window it's actually awaiting a
+	// connection-based delivery — most of a turn's lifetime, nothing is).
+	deliveryInterruptNotify := workflow.NewBufferedChannel(ctx, 1)
+	interrupts := &deliveryInterruptSource{notify: deliveryInterruptNotify, messages: &pendingMessages}
 	workflow.Go(ctx, func(gctx workflow.Context) {
 		for {
 			var payload types.SignalPayload
 			signalChan.Receive(gctx, &payload)
 			pendingMessages = append(pendingMessages, payload)
+			notifySel := workflow.NewSelector(gctx)
+			notifySel.AddSend(deliveryInterruptNotify, struct{}{}, func() {})
+			notifySel.AddDefault(func() {})
+			notifySel.Select(gctx)
 		}
 	})
+
+	// docs/components/gateway.md's "Resolved: ModelCall Streaming" —
+	// text-only in this pass (only "discord" gets a DiscordDeliverChunk
+	// activity; "discord-voice" and every other platform never receive
+	// this signal at all, since model_call.py's own gate only fires it for
+	// context_seq == 0, unconditionally, regardless of platform — the
+	// no-op guard here is what actually confines the effect to Discord
+	// text). Runs for the whole turn's lifetime, not windowed to iteration
+	// 1 specifically: Python only ever signals during that window in the
+	// first place (it never streams for context_seq > 0), so there's
+	// nothing to receive outside it — no separate lifecycle to manage on
+	// this side.
+	//
+	// Dispatches strictly sequentially — awaiting each chunk's delivery
+	// before receiving the next signal — so Discord message edits apply in
+	// the same order the sentences were generated. A burst of signals
+	// arriving faster than delivery keeps up simply queues in the signal
+	// channel (Temporal's own buffering), never dropped or reordered.
+	if platformFromSessionKey(input.SessionKey) == "discord" && input.ConnectionID != "" {
+		chunkSignalChan := workflow.GetSignalChannel(ctx, modelCallChunkSignalName)
+		workflow.Go(ctx, func(gctx workflow.Context) {
+			for {
+				var seq int
+				chunkSignalChan.Receive(gctx, &seq)
+				cao := workflow.ActivityOptions{
+					StartToCloseTimeout: activityTimeoutTierA,
+					TaskQueue:           "deliver:discord:" + input.ConnectionID,
+				}
+				cactx := workflow.WithActivityOptions(gctx, cao)
+				if err := workflow.ExecuteActivity(cactx, "DiscordDeliverChunk", input.TurnID, seq).Get(cactx, nil); err != nil {
+					// Best-effort, same tolerance as the end-of-turn Deliver
+					// call below — a dropped streamed preview chunk isn't
+					// fatal to the turn; the final Deliver/DiscordDeliver
+					// call is still the authoritative, correct-content
+					// delivery either way (or, if this turn was fully
+					// streamed, discordDeliverActivity.Deliver's own
+					// streamed_message_ref check treats streaming as having
+					// already delivered it).
+					workflow.GetLogger(gctx).Warn("discord chunk delivery failed", "turn_id", input.TurnID, "seq", seq, "error", err)
+				}
+			}
+		})
+	}
 
 	var stopReason string
 
@@ -302,7 +450,7 @@ loop:
 		}
 		if err := workflow.ExecuteActivity(mctx, "ModelCall", modelInput).Get(mctx, &mcOut); err != nil {
 			cancel()
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err)
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
 		}
 		contextSeq++
 		hintModality, hintTier = mcOut.NextHintModality, mcOut.NextHintTier
@@ -473,7 +621,7 @@ loop:
 			iactx := workflow.WithActivityOptions(ctx, iao)
 			insertInput := types.InsertMessageInput{TurnID: input.TurnID, Message: next.Message}
 			if err := workflow.ExecuteActivity(iactx, "InsertMessage", insertInput).Get(iactx, nil); err != nil {
-				return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err)
+				return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
 			}
 			continue loop
 		}
@@ -526,15 +674,16 @@ loop:
 		childFuture := workflow.ExecuteChildWorkflow(cctx, WriteMemoryWorkflow, input.TurnID)
 		_ = childFuture.GetChildWorkflowExecution().Get(cctx, nil)
 	}
+	var interruptedPayload *types.SignalPayload
 	if input.ParentType == "session" {
 		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 		actx := workflow.WithActivityOptions(ctx, ao)
 		_ = workflow.ExecuteActivity(actx, "Deliver", input.TurnID).Get(actx, nil)
-		deliverToConnectionBasedPlatform(ctx, input.SessionKey, input.ConnectionID, input.TurnID)
+		interruptedPayload = deliverConnectionBased(ctx, interrupts, input.SessionKey, input.ConnectionID, input.TurnID)
 	}
 
-	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations)
-	return types.TurnResult{TurnID: input.TurnID, StopReason: stopReason, Iterations: iterations}, nil
+	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "interrupted_during_delivery", interruptedPayload != nil)
+	return types.TurnResult{TurnID: input.TurnID, StopReason: stopReason, Iterations: iterations, InterruptedDuringDelivery: interruptedPayload}, nil
 }
 
 // drainResult calls Get on an already-ready (or now-cancelled) future purely

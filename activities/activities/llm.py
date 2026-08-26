@@ -64,7 +64,7 @@ from dataclasses import dataclass, field
 
 from openai import AsyncOpenAI
 
-from . import agent_brain, ids, lcm, model_registry
+from . import agent_brain, ids, lcm, model_registry, sentence_segmenter
 from .types import Usage
 
 logger = logging.getLogger(__name__)
@@ -381,6 +381,118 @@ async def call_model(client: AsyncOpenAI, conversation: list[dict], model: str) 
     # response is tool-calls-only.
     return RealModelResult(
         content=message.content or "",
+        raw_tool_calls=raw_tool_calls,
+        usage=usage,
+        next_hint_modality=next_hint_modality,
+        next_hint_tier=next_hint_tier,
+    )
+
+
+async def call_model_streaming(client: AsyncOpenAI, conversation: list[dict], model: str, on_chunk) -> RealModelResult:
+    """Streaming counterpart to call_model — docs/components/gateway.md's
+    "Resolved: ModelCall Streaming — Shared Infra, Text-First Rollout".
+    Used only for a turn's first ModelCall call (model_call.py gates this
+    on context_seq == 0, the "single-shot turns only" scope decided
+    directly): whether a turn turns out to need tool calls is only known
+    once this finishes, but chunks have to be delivered live, during the
+    call, for streaming to have any latency benefit at all — the rare case
+    where a turn streams content and then calls a tool anyway is accepted
+    as a known, bounded edge case (two messages instead of one), not
+    something this function tries to detect or prevent.
+
+    Returns the exact same RealModelResult shape as call_model, so every
+    caller past this function (model_call.py's own downstream processing)
+    is unaffected by which path produced it.
+
+    on_chunk is an async callable, invoked once per completed sentence
+    boundary (sentence_segmenter.find_boundary) with the CUMULATIVE content
+    delivered so far, not just the new increment — Discord's edit API
+    replaces a message's whole content, so the delivery side needs the
+    running total, not a diff. Called once more at the very end with
+    whatever trailing text never hit a sentence boundary (e.g. a response
+    that doesn't end in .!?), so the final delivered text always exactly
+    matches the complete response, never cut short by segmentation.
+    """
+    if not model:
+        raise RuntimeError(
+            "No model resolved for this step - model_registry.py's LANGUAGE_<TIER>_MODEL/"
+            "PIONEER_MODEL are both unset. Set at least PIONEER_MODEL."
+        )
+    max_tokens = int(os.environ.get("PIONEER_MAX_TOKENS", "4096"))
+
+    stream = await client.chat.completions.create(
+        model=model,
+        messages=conversation,
+        tools=TOOLS_SCHEMA,
+        max_tokens=max_tokens,
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+
+    content_buffer = ""
+    unflushed = ""
+    # Tool calls accumulate by index — OpenAI's streaming shape sends each
+    # tool call's name/arguments as fragments across multiple chunks,
+    # matched by the delta's own index, never assumed to arrive whole.
+    tool_call_frags: dict[int, dict] = {}
+    usage = Usage()
+
+    async for chunk in stream:
+        if chunk.usage is not None:
+            usage = Usage(
+                input_tokens=chunk.usage.prompt_tokens or 0,
+                output_tokens=chunk.usage.completion_tokens or 0,
+            )
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta.content:
+            content_buffer += delta.content
+            unflushed += delta.content
+            while True:
+                boundary = sentence_segmenter.find_boundary(unflushed)
+                if boundary is None:
+                    break
+                unflushed = unflushed[boundary:]
+                await on_chunk(content_buffer[: len(content_buffer) - len(unflushed)])
+        for tc in delta.tool_calls or []:
+            frag = tool_call_frags.setdefault(tc.index, {"name": "", "arguments": ""})
+            if tc.function and tc.function.name:
+                frag["name"] += tc.function.name
+            if tc.function and tc.function.arguments:
+                frag["arguments"] += tc.function.arguments
+
+    if unflushed:
+        # Final forced flush — see docstring: the last delivered chunk must
+        # always equal the complete response, regardless of whether it
+        # ends on a real sentence boundary.
+        await on_chunk(content_buffer)
+
+    raw_tool_calls = []
+    next_hint_modality, next_hint_tier = model_registry.default_hint()
+    for idx in sorted(tool_call_frags):
+        frag = tool_call_frags[idx]
+        if frag["name"] == _NEXT_STEP_HINT_TOOL_NAME:
+            try:
+                hint_args = json.loads(frag["arguments"])
+                next_hint_modality = hint_args.get("modality", next_hint_modality)
+                next_hint_tier = hint_args.get("tier", next_hint_tier)
+            except (json.JSONDecodeError, AttributeError):
+                logger.warning(
+                    "call_model_streaming: malformed %s arguments, using default hint", _NEXT_STEP_HINT_TOOL_NAME
+                )
+            continue
+        try:
+            arguments = json.loads(frag["arguments"]) if frag["arguments"] else {}
+        except json.JSONDecodeError:
+            logger.warning(
+                "call_model_streaming: malformed tool call arguments for %s, treating as empty", frag["name"]
+            )
+            arguments = {}
+        raw_tool_calls.append({"name": frag["name"], "arguments": arguments, "is_subagent": False})
+
+    return RealModelResult(
+        content=content_buffer,
         raw_tool_calls=raw_tool_calls,
         usage=usage,
         next_hint_modality=next_hint_modality,

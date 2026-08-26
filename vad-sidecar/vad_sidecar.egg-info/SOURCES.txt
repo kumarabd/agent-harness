@@ -1,0 +1,13 @@
+pyproject.toml
+vad_sidecar/__init__.py
+vad_sidecar/__main__.py
+vad_sidecar/model.py
+vad_sidecar/server.py
+vad_sidecar.egg-info/PKG-INFO
+vad_sidecar.egg-info/SOURCES.txt
+vad_sidecar.egg-info/dependency_links.txt
+vad_sidecar.egg-info/requires.txt
+vad_sidecar.egg-info/top_level.txt
+vad_sidecar/pb/__init__.py
+vad_sidecar/pb/vad_sidecar_pb2.py
+vad_sidecar/pb/vad_sidecar_pb2_grpc.py

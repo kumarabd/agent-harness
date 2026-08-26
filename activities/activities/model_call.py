@@ -25,22 +25,40 @@ import logging
 import time
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from . import ids, llm, model_registry, permissions
 from .types import ModelCallInput, ModelCallOutput, ToolCallRef, Usage
 
 logger = logging.getLogger(__name__)
 
+# docs/components/gateway.md's "Resolved: ModelCall Streaming" — the signal
+# TurnWorkflow (turn.go) listens on for chunk-ready notifications. Payload
+# is a bare int (the new chunk's seq) — turn_id is already the signaled
+# workflow's own ID, no need to repeat it; content never crosses this
+# signal at all, matching the reference-passing contract (turn.go holds no
+# message content) — the workflow only ever learns "a chunk is ready",
+# then reads its actual text from turn_deliveries by ID, same as every
+# other activity here.
+MODEL_CALL_CHUNK_SIGNAL = "ModelCallChunk"
+
 
 class ModelCallActivity:
-    """Bound-method activity so the Postgres pool and OpenAI client (both
-    created once in worker.py) are injected per-process rather than held as
-    module-global state — the idiomatic way to give a Temporal Python
-    activity shared resources without globals."""
+    """Bound-method activity so the Postgres pool, OpenAI client, and
+    Temporal client (all created once in tenant_worker.py) are injected per-
+    process rather than held as module-global state — the idiomatic way to
+    give a Temporal Python activity shared resources without globals.
 
-    def __init__(self, pool, openai_client):
+    temporal_client is used only for the streaming path below (signaling
+    the parent TurnWorkflow as chunks become ready) — an activity has no
+    other supported way to push data to its own workflow mid-flight; this
+    is the documented pattern (an activity using its own client, distinct
+    from the worker's own gRPC connection to the server for task polling)."""
+
+    def __init__(self, pool, openai_client, temporal_client):
         self._pool = pool
         self._openai_client = openai_client
+        self._temporal_client = temporal_client
 
     @activity.defn(name="ModelCall")
     async def __call__(self, input: ModelCallInput) -> ModelCallOutput:
@@ -68,10 +86,11 @@ class ModelCallActivity:
                 next_hint_modality, next_hint_tier = model_registry.default_hint()
             else:
                 session_row = await conn.fetchrow(
-                    "SELECT system_prompt FROM sessions WHERE session_key = $1",
+                    "SELECT system_prompt, platform FROM sessions WHERE session_key = $1",
                     ids.session_key_of(input.turn_id),
                 )
                 system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
+                platform = session_row["platform"] if session_row else None
                 conversation, context_tokens = await llm.build_conversation(conn, input.turn_id, system_prompt)
 
                 # docs/components/model-registry.md, "Resolved: Selection
@@ -97,7 +116,21 @@ class ModelCallActivity:
                     "model_call_latency_seconds", unit="s"
                 )
                 started = time.monotonic()
-                real = await llm.call_model(self._openai_client, conversation, model_config.model)
+                # docs/components/gateway.md's "Resolved: ModelCall Streaming"
+                # — scoped to "single-shot turns only": context_seq == 0 is
+                # this turn's first (and, for the common case, only)
+                # ModelCall call. Every later iteration (context_seq > 0,
+                # meaning an earlier call already had tool calls) uses the
+                # exact same unchanged non-streaming path as before this
+                # feature existed. Also gated on platform == "discord" —
+                # turn.go's own chunk-relay coroutine only exists for
+                # Discord text, so streaming for any other platform would
+                # just be wasted turn_deliveries writes and a signal nobody
+                # ever receives.
+                if input.context_seq == 0 and platform == "discord":
+                    real = await self._call_model_streaming_with_delivery(input.turn_id, conversation, model_config.model)
+                else:
+                    real = await llm.call_model(self._openai_client, conversation, model_config.model)
                 histogram.record(time.monotonic() - started)
                 content, raw_tool_calls, usage = real.content, real.raw_tool_calls, real.usage
                 next_hint_modality, next_hint_tier = real.next_hint_modality, real.next_hint_tier
@@ -199,6 +232,55 @@ class ModelCallActivity:
                 next_hint_tier=next_hint_tier,
             )
 
+    async def _call_model_streaming_with_delivery(self, turn_id: str, conversation: list[dict], model: str):
+        """Wraps llm.call_model_streaming with this feature's two other real
+        pieces (docs/components/gateway.md's "Resolved: ModelCall
+        Streaming"): writing each chunk to turn_deliveries and signaling
+        TurnWorkflow, and the retry-safety check.
+
+        Retry safety: activity.heartbeat() is called only AFTER a chunk has
+        already been written and signaled — i.e. only after it's already
+        visible to a user. A retry of this exact activity task (worker
+        crash, timeout) checks activity.info().heartbeat_details first: if
+        non-empty, an earlier attempt already streamed real output, and the
+        underlying LLM call isn't resumable or guaranteed to reproduce the
+        same content — silently calling it again risks a *different*
+        response overwriting what someone already saw. Fails loudly
+        (non-retryable) instead of attempting that: TurnWorkflow treats
+        this the same as any other unrecoverable ModelCall failure, not a
+        special silently-papered-over case.
+        """
+        if len(activity.info().heartbeat_details) > 0:
+            raise ApplicationError(
+                f"ModelCall streaming for turn {turn_id} already emitted visible output in a "
+                "prior attempt (heartbeat_details present) — the underlying LLM call can't "
+                "resume from that point and isn't guaranteed to reproduce the same content, "
+                "so this attempt fails loudly rather than silently regenerating and "
+                "re-streaming over what a user may have already seen. See "
+                "docs/components/gateway.md's 'Resolved: ModelCall Streaming'.",
+                non_retryable=True,
+            )
+
+        seq_holder = [0]
+
+        async def on_chunk(cumulative_text: str) -> None:
+            seq_holder[0] += 1
+            seq = seq_holder[0]
+            async with self._pool.acquire() as chunk_conn:
+                await chunk_conn.execute(
+                    "INSERT INTO turn_deliveries (turn_id, seq, content) VALUES ($1, $2, $3)",
+                    turn_id,
+                    seq,
+                    cumulative_text,
+                )
+            handle = self._temporal_client.get_workflow_handle(turn_id)
+            await handle.signal(MODEL_CALL_CHUNK_SIGNAL, seq)
+            # Only after the chunk is durably written AND signaled — see
+            # this method's own docstring on why heartbeat ordering here is
+            # exactly what makes the retry-safety check above correct.
+            activity.heartbeat(seq)
+
+        return await llm.call_model_streaming(self._openai_client, conversation, model, on_chunk)
 
 def _resolve_gating(tool_name: str, arguments: dict) -> tuple[bool, str, str]:
     """docs/components/user-input.md — the {server, tool} identity being

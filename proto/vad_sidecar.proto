@@ -1,0 +1,37 @@
+// docs/components/gateway/discord-voice.md's "Resolved: Silero VAD" — the
+// contract between Gateway (Go, workflows/cmd/gateway) and the VAD sidecar
+// (Python, vad-sidecar/). Stateless-over-the-wire by design: Silero's real
+// ONNX export takes state as an explicit input/output, so the caller
+// (Gateway) owns per-speaker state and passes it with every call — this
+// service holds no per-connection or per-speaker state at all.
+syntax = "proto3";
+
+package vadsidecar;
+
+option go_package = "agent-harness/workflows/internal/vadpb";
+
+service VAD {
+  // Classify scores one 512-sample window at 16kHz (32ms) — Silero's
+  // fixed window size, not negotiable.
+  rpc Classify(ClassifyRequest) returns (ClassifyResponse);
+}
+
+message ClassifyRequest {
+  // Raw float32, little-endian, exactly 512 samples (Silero's fixed
+  // window size at 16kHz) — packed as bytes, not `repeated float`, to
+  // avoid per-element protobuf varint/tag overhead on a hot path called
+  // ~50x/sec per active speaker.
+  bytes frame = 1;
+  // Raw float32, little-endian, exactly 256 values (Silero's [2,1,128]
+  // recurrent state tensor, flattened).
+  bytes state = 2;
+  // Raw float32, little-endian, exactly 64 values (Silero's rolling
+  // audio context, prepended to each new frame).
+  bytes context = 3;
+}
+
+message ClassifyResponse {
+  float probability = 1;
+  bytes state = 2;   // updated state — feed into the next Classify call
+  bytes context = 3; // updated context — feed into the next Classify call
+}
