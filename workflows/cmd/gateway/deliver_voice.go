@@ -5,9 +5,11 @@ import (
 	"errors"
 	"io"
 	"log"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/sdk/activity"
 	"layeh.com/gopus"
 )
 
@@ -32,6 +34,10 @@ type voiceDeliverActivity struct {
 	// construct-once-in-voiceJoin, shared-with-voiceCaptureLoop treatment
 	// as bargeIn above.
 	lifecycle *voiceLifecycle
+	// latency — docs/components/gateway/discord-voice.md's Notes Log, real
+	// voice-latency metrics. Same one-instance-per-connection,
+	// shared-with-voiceCaptureLoop treatment as bargeIn/lifecycle above.
+	latency *voiceLatencyTracker
 }
 
 // Deliver reads the turn's final assistant message, checks-then-inserts
@@ -115,11 +121,18 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	}
 
 	a.lifecycle.transitionTo(voiceLifecycleSynthesizing)
+	ttsStart := time.Now()
 	stream, err := synthesizeSpeechPCM(ctx, content)
 	if err != nil {
 		return err
 	}
 	defer stream.Close()
+	// voice_tts_ttfb_seconds — time to Kokoro's response headers, i.e.
+	// before any of its body has necessarily been read yet: isolates TTS
+	// service latency specifically, separate from voice_first_audio_latency_seconds
+	// below (which also includes this activity's own DB reads and the
+	// Opus-encode of the first frame).
+	activity.GetMetricsHandler(ctx).Timer("voice_tts_ttfb_seconds").Record(time.Since(ttsStart))
 
 	enc, err := newVoiceOpusEncoder()
 	if err != nil {
@@ -134,7 +147,18 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	defer a.bargeIn.endPlayback()
 	a.lifecycle.transitionTo(voiceLifecyclePlaying)
 
-	interrupted, err := streamPCMToOpus(ctx, stream, a.vc, enc, stopChan)
+	onFirstFrame := func() {
+		// docs/components/gateway/discord-voice.md's Notes Log — the
+		// headline "how long did they wait before hearing anything" number.
+		// One-shot via voiceLatencyTracker: only fires for whichever call
+		// (this whole-turn Deliver, or one of DeliverChunk's chunks)
+		// genuinely produces the turn's first audio.
+		if gap, ok := a.latency.takeSinceTurnStart(); ok {
+			activity.GetMetricsHandler(ctx).Timer("voice_first_audio_latency_seconds").Record(gap)
+		}
+	}
+	interrupted, err := streamPCMToOpus(ctx, stream, a.vc, enc, stopChan, onFirstFrame)
+	a.latency.markChunkEnded()
 	if err != nil {
 		return err
 	}
@@ -177,7 +201,17 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 // reports what happened). A non-nil error means a genuine read, encode, or
 // send failure — retryable by the caller's own idempotency contract, unlike
 // the interrupted case.
-func streamPCMToOpus(ctx context.Context, stream io.Reader, vc *discordgo.VoiceConnection, enc *gopus.Encoder, stopChan <-chan struct{}) (interrupted bool, err error) {
+// onFirstFrame, if non-nil, is called exactly once, immediately before the
+// first frame is actually handed to vc.OpusSend — docs/components/gateway/
+// discord-voice.md's Notes Log real-latency-metrics work: this is the one
+// place in the whole pipeline that genuinely knows "audio just started
+// playing," which both Deliver and DeliverChunk need for their own
+// first-audio-latency measurement (a callback rather than doing it here
+// directly, since this function has no idea whether it's serving a whole
+// turn or one chunk, or whether this particular call is even the actual
+// first one for the turn — that's the caller's own voiceLatencyTracker
+// bookkeeping to do).
+func streamPCMToOpus(ctx context.Context, stream io.Reader, vc *discordgo.VoiceConnection, enc *gopus.Encoder, stopChan <-chan struct{}, onFirstFrame func()) (interrupted bool, err error) {
 	// One mono frame's worth of bytes at Kokoro's REAL native rate
 	// (kokoroSampleRate, 24kHz — not voiceSampleRate/48kHz: sample_rate
 	// isn't honored server-side, confirmed live 2026-08-26, see
@@ -188,6 +222,7 @@ func streamPCMToOpus(ctx context.Context, stream io.Reader, vc *discordgo.VoiceC
 	// at half the sample count until upsample2xPCM below doubles it back.
 	const kokoroFrameSamples = voiceFrameSize * kokoroSampleRate / voiceSampleRate
 	frameBytes := make([]byte, kokoroFrameSamples*2)
+	first := true
 	for {
 		n, readErr := io.ReadFull(stream, frameBytes)
 		if n > 0 {
@@ -206,6 +241,10 @@ func streamPCMToOpus(ctx context.Context, stream io.Reader, vc *discordgo.VoiceC
 			if encErr != nil {
 				return false, encErr
 			}
+			if first && onFirstFrame != nil {
+				onFirstFrame()
+			}
+			first = false
 			select {
 			case <-ctx.Done():
 				_ = vc.Speaking(false)

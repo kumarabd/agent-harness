@@ -23,6 +23,15 @@
 //	still read as a one-bot fallback. Each connects only while holding that
 //	bot's own connection lease (gateway_connection_leases, leases.go), per
 //	gateway.md's "Resolved: Connection Leasing".
+//
+//	METRICS_BIND_ADDRESS Host:port the Prometheus exposition endpoint listens
+//	                    on. Default: 0.0.0.0:9090. Same mechanism as
+//	                    loop-worker/tenant-worker (docs/components/
+//	                    budget-guardrails.md's "Resolved: Metrics Export"),
+//	                    added here 2026-08-26 specifically for real voice-
+//	                    latency numbers (discord-voice.md's Notes Log) —
+//	                    this process had no metrics exposition at all before
+//	                    that.
 package main
 
 import (
@@ -37,7 +46,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/uber-go/tally/v4"
+	tallyprom "github.com/uber-go/tally/v4/prometheus"
 	"go.temporal.io/sdk/client"
+	contribtally "go.temporal.io/sdk/contrib/tally"
 )
 
 func envOrDefault(key, fallback string) string {
@@ -45,6 +57,41 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// newMetricsHandler builds a Prometheus-backed client.MetricsHandler and
+// starts the HTTP listener serving /metrics — an exact copy of loop-worker's
+// own function (cmd/loop-worker/main.go), duplicated rather than shared
+// since the two are independent binaries with no existing common package for
+// this (docs/components/budget-guardrails.md's "Resolved: Metrics Export"
+// scoped this to loop-worker/tenant-worker only; the Gateway had none at
+// all until this — real voice-latency metrics below needed somewhere to
+// report to). Every activity registered on this process's embedded
+// per-connection workers (deliver_voice.go, deliver_voice_chunk.go,
+// deliver_discord.go) gets this handler automatically via
+// activity.GetMetricsHandler(ctx), the same way tenant-worker's Python
+// activities already get theirs via activity.metric_meter() — no per-struct
+// plumbing needed for the metrics that are emitted from inside a real
+// activity execution.
+func newMetricsHandler(bindAddress string) client.MetricsHandler {
+	reporter := tallyprom.NewReporter(tallyprom.Options{})
+	scope, _ := tally.NewRootScope(tally.ScopeOptions{
+		CachedReporter:  reporter,
+		SanitizeOptions: &contribtally.PrometheusSanitizeOptions,
+		Separator:       "_",
+	}, time.Second)
+	scope = contribtally.NewPrometheusNamingScope(scope)
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", reporter.HTTPHandler())
+	go func() {
+		if err := http.ListenAndServe(bindAddress, mux); err != nil { //nolint:gosec // internal-only exposition endpoint
+			log.Printf("metrics HTTP server stopped: %v", err)
+		}
+	}()
+	log.Printf("metrics exposition listening on %q", bindAddress)
+
+	return contribtally.NewMetricsHandler(scope)
 }
 
 // discordBotTokens returns the configured Discord bot tokens for this
@@ -102,9 +149,11 @@ func main() {
 	}
 	defer pool.Close()
 
+	metricsHandler := newMetricsHandler(envOrDefault("METRICS_BIND_ADDRESS", "0.0.0.0:9090"))
 	temporalClient, err := client.Dial(client.Options{
-		HostPort:  envOrDefault("TEMPORAL_ADDRESS", client.DefaultHostPort),
-		Namespace: envOrDefault("TEMPORAL_NAMESPACE", client.DefaultNamespace),
+		HostPort:       envOrDefault("TEMPORAL_ADDRESS", client.DefaultHostPort),
+		Namespace:      envOrDefault("TEMPORAL_NAMESPACE", client.DefaultNamespace),
+		MetricsHandler: metricsHandler,
 	})
 	if err != nil {
 		log.Fatalf("unable to create Temporal client: %v", err)

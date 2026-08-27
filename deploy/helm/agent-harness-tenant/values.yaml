@@ -71,6 +71,20 @@ gateway:
     pullPolicy: IfNotPresent
   replicaCount: 1
   port: 8090
+  # -- docs/components/budget-guardrails.md's "Resolved: Metrics Export"
+  # mechanism (Temporal SDK metrics handler -> Prometheus scrape), added to
+  # this chart 2026-08-26 specifically so voice-latency metrics
+  # (voice_first_audio_latency_seconds, voice_chunk_gap_seconds,
+  # voice_tts_ttfb_seconds — docs/components/gateway/discord-voice.md's Notes
+  # Log) have somewhere to report to; this process had no metrics exposition
+  # at all before that. Same shape as tenantWorker.metrics below — port 9090
+  # matches main.go's own METRICS_BIND_ADDRESS default, no explicit env var
+  # override needed for the common case, same convention loop-worker/
+  # tenant-worker already use.
+  metrics:
+    enabled: true
+    port: 9090
+    path: "/metrics"
   # -- Per-platform config, one block per Gateway platform kind
   # (docs/components/gateway.md's "Resolved: Multi-Session Channels" —
   # Platform is "web"/"discord"/... on MessageEvent). Every block below is

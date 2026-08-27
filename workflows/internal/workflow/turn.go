@@ -359,11 +359,31 @@ func awaitModelCallWithStreaming(ctx workflow.Context, mcFuture workflow.Future,
 	// dispatched.
 	bargedIn := false
 
+	// lastSignalAt/chunkMetrics — docs/components/gateway/discord-voice.md's
+	// Notes Log real-latency-metrics work: voice_chunk_signal_gap_seconds
+	// measures the gap between consecutive sentence chunks actually being
+	// GENERATED (this signal firing), as distinct from the Gateway's own
+	// voice_chunk_gap_seconds (the gap between consecutive chunks' audio
+	// being PLAYED) — comparing the two is what tells apart "the LLM is
+	// slow to generate the next sentence" from "delivery/TTS is slow to
+	// catch up with a model that's already keeping pace". workflow.Now, not
+	// time.Now — this is workflow code, replayed deterministically.
+	var lastSignalAt time.Time
+	chunkMetrics := workflow.GetMetricsHandler(ctx).WithTags(map[string]string{
+		"namespace": workflow.GetInfo(ctx).Namespace,
+		"platform":  platform,
+	})
+
 	// deliverChunk dispatches and fully awaits one chunk's delivery —
 	// factored out so both the Selector callback below AND the post-loop
 	// drain (its own comment has why that second call site is required)
 	// share exactly the same dispatch logic.
 	deliverChunk := func(seq int) {
+		now := workflow.Now(ctx)
+		if !lastSignalAt.IsZero() {
+			chunkMetrics.Timer("voice_chunk_signal_gap_seconds").Record(now.Sub(lastSignalAt))
+		}
+		lastSignalAt = now
 		if bargedIn {
 			return
 		}

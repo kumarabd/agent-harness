@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"log"
+	"time"
+
+	"go.temporal.io/sdk/activity"
 )
 
 // DeliverChunk synthesizes and plays one streamed sentence-chunk (docs/
@@ -80,11 +83,16 @@ func (a *voiceDeliverActivity) DeliverChunk(ctx context.Context, turnID string, 
 	}
 
 	a.lifecycle.transitionTo(voiceLifecycleSynthesizing)
+	ttsStart := time.Now()
 	stream, err := synthesizeSpeechPCM(ctx, delta)
 	if err != nil {
 		return false, err
 	}
 	defer stream.Close()
+	// voice_tts_ttfb_seconds — same metric Deliver records, shared across
+	// both delivery paths so a Grafana panel doesn't need to know which one
+	// handled a given turn.
+	activity.GetMetricsHandler(ctx).Timer("voice_tts_ttfb_seconds").Record(time.Since(ttsStart))
 
 	enc, err := newVoiceOpusEncoder()
 	if err != nil {
@@ -100,7 +108,23 @@ func (a *voiceDeliverActivity) DeliverChunk(ctx context.Context, turnID string, 
 	defer a.bargeIn.endPlayback()
 	a.lifecycle.transitionTo(voiceLifecyclePlaying)
 
-	interrupted, err := streamPCMToOpus(ctx, stream, a.vc, enc, stopChan)
+	onFirstFrame := func() {
+		metrics := activity.GetMetricsHandler(ctx)
+		// Mutually exclusive in practice, not both-or-neither: seq 1 always
+		// finds turnStart pending (chunkEnd was just zeroed by the same
+		// markTurnStart call) and reports first-audio-latency; every later
+		// chunk finds turnStart already consumed and reports the gap since
+		// the previous chunk instead — docs/components/gateway/
+		// discord-voice.md's Notes Log, the dead-air/stutter detector.
+		if gap, ok := a.latency.takeSinceTurnStart(); ok {
+			metrics.Timer("voice_first_audio_latency_seconds").Record(gap)
+		}
+		if gap, ok := a.latency.takeSinceLastChunkEnd(); ok {
+			metrics.Timer("voice_chunk_gap_seconds").Record(gap)
+		}
+	}
+	interrupted, err := streamPCMToOpus(ctx, stream, a.vc, enc, stopChan, onFirstFrame)
+	a.latency.markChunkEnded()
 	if err != nil {
 		return false, err
 	}

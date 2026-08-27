@@ -17,6 +17,12 @@ spec:
     metadata:
       labels:
         {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "gateway") | nindent 8 }}
+      annotations:
+        {{- if .Values.gateway.metrics.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.gateway.metrics.port | quote }}
+        prometheus.io/path: {{ .Values.gateway.metrics.path | quote }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "agent-harness.fullname" . }}
       # Same reasoning as tenant-worker: this process never calls the
@@ -29,6 +35,10 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.gateway.port }}
+            {{- if .Values.gateway.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.gateway.metrics.port }}
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "agent-harness.fullname" . }}-config

@@ -171,7 +171,12 @@ func (s *server) voiceJoin(ctx context.Context, dg *discordgo.Session, ic *disco
 	// Stays Gateway-Local" — same sharing pattern as bargeIn above: one
 	// instance per connection, passed directly to both sides that need it.
 	lifecycle := newVoiceLifecycle(connectionID)
-	deliverActivity := &voiceDeliverActivity{vc: vc, pool: s.pool, connectionID: connectionID, bargeIn: bargeIn, lifecycle: lifecycle}
+	// latency — docs/components/gateway/discord-voice.md's Notes Log, "get a
+	// real TTFB number so we're not guessing". Same one-instance-per-
+	// connection, shared-between-capture-and-delivery treatment as bargeIn/
+	// lifecycle above.
+	latency := newVoiceLatencyTracker()
+	deliverActivity := &voiceDeliverActivity{vc: vc, pool: s.pool, connectionID: connectionID, bargeIn: bargeIn, lifecycle: lifecycle, latency: latency}
 	deliverWkr := worker.New(s.temporal, "deliver:discord-voice:"+connectionID, worker.Options{DisableWorkflowWorker: true})
 	deliverWkr.RegisterActivityWithOptions(deliverActivity.Deliver, activity.RegisterOptions{Name: "VoiceDeliver"})
 	deliverWkr.RegisterActivityWithOptions(deliverActivity.DeliverChunk, activity.RegisterOptions{Name: "VoiceDeliverChunk"})
@@ -204,7 +209,7 @@ func (s *server) voiceJoin(ctx context.Context, dg *discordgo.Session, ic *disco
 	}
 
 	go s.voiceLeaseRenewalLoop(connCtx, connectionID, holderID)
-	go s.voiceCaptureLoop(connCtx, vc, channelID, connectionID, voiceKey, bargeIn, lifecycle)
+	go s.voiceCaptureLoop(connCtx, vc, channelID, connectionID, voiceKey, bargeIn, lifecycle, latency)
 
 	return "Joined."
 }
@@ -300,7 +305,7 @@ type speakerBuffer struct {
 // transcribes and submits it as a MessageEvent — with no trigger gate at
 // all ("Resolved: Trigger Detection — No Gate, Deferred Pending Real Usage"):
 // every utterance becomes a real turn.
-func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnection, channelID, connectionID, voiceKey string, bargeIn *voiceBargeIn, lifecycle *voiceLifecycle) {
+func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnection, channelID, connectionID, voiceKey string, bargeIn *voiceBargeIn, lifecycle *voiceLifecycle, latency *voiceLatencyTracker) {
 	dec, err := newVoiceOpusDecoder()
 	if err != nil {
 		log.Printf("discord-voice: failed to create opus decoder: %v", err)
@@ -387,6 +392,13 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 				return
 			}
 			lifecycle.transitionTo(voiceLifecycleGenerating)
+			// docs/components/gateway/discord-voice.md's Notes Log — the
+			// real "STT-completion to first-audio-frame" latency starts
+			// exactly here: transcription just finished, a real turn is
+			// about to be submitted. voiceDeliverActivity (same process,
+			// same connection) reads this back at the first audio frame it
+			// actually sends.
+			latency.markTurnStart()
 			event := MessageEvent{
 				Platform:          "discord-voice",
 				ChannelID:         channelID,
