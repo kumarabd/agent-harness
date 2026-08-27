@@ -412,6 +412,15 @@ async def call_model_streaming(client: AsyncOpenAI, conversation: list[dict], mo
     whatever trailing text never hit a sentence boundary (e.g. a response
     that doesn't end in .!?), so the final delivered text always exactly
     matches the complete response, never cut short by segmentation.
+
+    2026-08-26: also used for Discord voice (model_call.py's own platform
+    gate), which needs each chunk's own NEW sentence(s) for TTS, not the
+    running total — deliberately left as this function's caller's problem
+    (turn_deliveries.content stays cumulative for every platform, and
+    deliver_voice_chunk.go computes the delta itself from consecutive rows)
+    rather than changing this function's contract, since Discord text is
+    still the only real consumer of the cumulative shape and there's no
+    reason to make it aware voice exists at all.
     """
     if not model:
         raise RuntimeError(

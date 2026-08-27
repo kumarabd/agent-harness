@@ -122,12 +122,17 @@ class ModelCallActivity:
                 # ModelCall call. Every later iteration (context_seq > 0,
                 # meaning an earlier call already had tool calls) uses the
                 # exact same unchanged non-streaming path as before this
-                # feature existed. Also gated on platform == "discord" —
-                # turn.go's own chunk-relay coroutine only exists for
-                # Discord text, so streaming for any other platform would
+                # feature existed. Also gated on platform being one
+                # turn.go's own streaming-aware path actually handles
+                # (2026-08-26: widened from "discord" alone to include
+                # "discord-voice" — TurnWorkflow now dispatches
+                # VoiceDeliverChunk per chunk the same way it dispatches
+                # DiscordDeliverChunk, synthesizing and playing each
+                # sentence as it's generated instead of waiting for the
+                # whole response) — streaming for any other platform would
                 # just be wasted turn_deliveries writes and a signal nobody
                 # ever receives.
-                if input.context_seq == 0 and platform == "discord":
+                if input.context_seq == 0 and platform in ("discord", "discord-voice"):
                     real = await self._call_model_streaming_with_delivery(input.turn_id, conversation, model_config.model)
                 else:
                     real = await llm.call_model(self._openai_client, conversation, model_config.model)

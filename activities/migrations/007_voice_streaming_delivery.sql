@@ -1,0 +1,17 @@
+-- ModelCall streaming, extended to Discord voice (docs/components/
+-- gateway/discord-voice.md's "Resolved: STT/TTS are batch" pipelining
+-- follow-up) — 006_streaming_delivery.sql's turn_deliveries/ModelCallChunk
+-- machinery is reused as-is (model_call.py/llm.py needed no schema change,
+-- just a widened platform gate); this migration only adds voice's own
+-- equivalent of that migration's `streamed_message_ref`.
+--
+-- voice_streamed is a plain boolean, not a text ref like
+-- streamed_message_ref: Discord text streaming needs to remember WHICH
+-- message to keep editing, but voice has no analogous object — every
+-- streamed chunk is just synthesized audio sent over the same open
+-- connection, nothing to address by ID. Set true by VoiceDeliverChunk the
+-- moment any chunk of this turn has actually played; read by VoiceDeliver's
+-- own end-of-turn call, the same way DiscordDeliver reads
+-- streamed_message_ref, to skip re-synthesizing and replaying the whole
+-- response a second time when it was already delivered progressively.
+ALTER TABLE turns ADD COLUMN voice_streamed boolean NOT NULL DEFAULT false;

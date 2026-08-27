@@ -100,6 +100,15 @@ const (
 	// components/activities-outbound-delivery.md. Real Tier B/C tuning is
 	// deliberately deferred (components/temporal-workflow.md).
 	activityTimeoutTierA = 30 * time.Second
+
+	// voiceChunkDeliveryTimeout — connectionDeliveryChunkActivity's budget
+	// for VoiceDeliverChunk: one sentence's worth of TTS synthesis plus
+	// real-time playback of it, not activityTimeoutTierA's near-instant
+	// text-edit assumption. Generous relative to how long one sentence
+	// actually takes to speak, well under VoiceDeliver's own whole-turn
+	// 5-minute budget (turn.go's connectionDeliveryActivity) since this is
+	// deliberately a much smaller unit of work.
+	voiceChunkDeliveryTimeout = 90 * time.Second
 )
 
 // compressionState mirrors lcm.compression_state's classification
@@ -281,6 +290,153 @@ func connectionDeliveryActivity(platform string) (activityName string, timeout t
 	}
 }
 
+// connectionDeliveryChunkActivity mirrors connectionDeliveryActivity above,
+// for the per-chunk streaming path (awaitModelCallWithStreaming below) —
+// deliberately not unified into one lookup shared with it: VoiceDeliverChunk
+// returns (interrupted bool, error) so the caller can stop delivering
+// further chunks once the human has barged in mid-playback, while
+// DiscordDeliverChunk returns a plain error (no barge-in concept for text) —
+// a genuinely different result shape, not just a different name/timeout, so
+// the caller still needs a platform branch regardless. This only avoids
+// hardcoding the activity name/timeout pair twice.
+func connectionDeliveryChunkActivity(platform string) (activityName string, timeout time.Duration, ok bool) {
+	switch platform {
+	case "discord":
+		return "DiscordDeliverChunk", activityTimeoutTierA, true
+	case "discord-voice":
+		return "VoiceDeliverChunk", voiceChunkDeliveryTimeout, true
+	default:
+		return "", 0, false
+	}
+}
+
+// awaitModelCallWithStreaming replaces a plain mcFuture.Get(mctx, mcOut) for
+// the one iteration that can ever stream (context_seq == 0, i.e. this
+// turn's first ModelCall call — model_call.py's own gate). docs/components/
+// gateway.md's "Resolved: ModelCall Streaming", extended 2026-08-26 to
+// Discord voice and, in the same pass, to close a real race the original
+// Discord-text-only version had: model_call.py's on_chunk awaits each
+// chunk's signal RPC before returning, so every chunk (including the
+// forced final flush) is durably recorded in this workflow's history no
+// later than ModelCall's own completion event — but a signal being
+// *recorded* only means it's waiting in the channel, not that some
+// separately-scheduled consumer has actually finished dispatching and
+// awaiting the corresponding delivery activity for it. The original design
+// ran that consumer as a detached workflow.Go goroutine with nothing
+// forcing the caller to wait for it — the turn's own end-of-turn
+// Deliver/VoiceDeliver call could race ahead of (and, for voice, silently
+// never play) the last one or two streamed chunks. Merging ModelCall's own
+// completion and each chunk signal into one Selector loop closes this: the
+// loop cannot exit until modelCallDone fires, and every chunk signal
+// recorded before that event is guaranteed (by the ordering argument above)
+// to already be sitting in chunkSignalChan, so it will have been received
+// and its delivery activity started — and, since each case body fully
+// awaits its own delivery before the loop can select again, completed —
+// before this function returns control to TurnWorkflow's main loop.
+//
+// Only ever reached for "discord"/"discord-voice" with a non-empty
+// ConnectionID (the caller's own gate) — connectionDeliveryChunkActivity
+// returning ok==false here would mean that gate and this switch have
+// drifted out of sync; falls back to a plain await rather than blocking
+// forever on a channel nothing will ever populate.
+func awaitModelCallWithStreaming(ctx workflow.Context, mcFuture workflow.Future, mctx workflow.Context, mcOut *types.ModelCallOutput, turnID, connectionID, platform string) error {
+	activityName, timeout, ok := connectionDeliveryChunkActivity(platform)
+	if !ok {
+		return mcFuture.Get(mctx, mcOut)
+	}
+	chunkSignalChan := workflow.GetSignalChannel(ctx, modelCallChunkSignalName)
+
+	var mcErr error
+	modelCallDone := false
+	// bargedIn — voice-only (DiscordDeliverChunk's branch below never sets
+	// it): true once one chunk's playback has been stopped by the fast-path
+	// barge-in (voice_bargein.go, via VoiceDeliverChunk's own return value).
+	// docs/components/gateway/discord-voice.md's "Resolved: Overlapping
+	// Speech / Interrupts" — once the human has started talking over this
+	// turn's audio, synthesizing and playing its later sentences would talk
+	// over them a second time; every chunk signal received after this
+	// point is drained (received, so the channel doesn't back up) but never
+	// dispatched.
+	bargedIn := false
+
+	// deliverChunk dispatches and fully awaits one chunk's delivery —
+	// factored out so both the Selector callback below AND the post-loop
+	// drain (its own comment has why that second call site is required)
+	// share exactly the same dispatch logic.
+	deliverChunk := func(seq int) {
+		if bargedIn {
+			return
+		}
+		cao := workflow.ActivityOptions{
+			StartToCloseTimeout: timeout,
+			TaskQueue:           "deliver:" + platform + ":" + connectionID,
+		}
+		cactx := workflow.WithActivityOptions(ctx, cao)
+		if platform == "discord-voice" {
+			var interrupted bool
+			if err := workflow.ExecuteActivity(cactx, activityName, turnID, seq).Get(cactx, &interrupted); err != nil {
+				// Best-effort, same tolerance as the DiscordDeliverChunk
+				// branch below — a dropped streamed chunk isn't fatal to the
+				// turn; VoiceDeliver's own end-of-turn call is the
+				// authoritative fallback for a turn that was never streamed
+				// at all, though a chunk dropped mid-stream here is
+				// genuinely lost audio, not just a superseded preview the
+				// way a dropped Discord text edit is (turns.voice_streamed
+				// already being true by then skips VoiceDeliver's replay,
+				// same as streamed_message_ref does for text) — an accepted,
+				// bounded gap, not one this codebase has built recovery for
+				// on the text side either.
+				workflow.GetLogger(ctx).Warn("voice chunk delivery failed", "turn_id", turnID, "seq", seq, "error", err)
+			} else if interrupted {
+				bargedIn = true
+			}
+		} else {
+			if err := workflow.ExecuteActivity(cactx, activityName, turnID, seq).Get(cactx, nil); err != nil {
+				// docstring above: a dropped streamed preview chunk isn't
+				// fatal — the final Deliver/DiscordDeliver call is either
+				// the authoritative delivery (never streamed) or a correct
+				// no-op (streamed_message_ref already set).
+				workflow.GetLogger(ctx).Warn("discord chunk delivery failed", "turn_id", turnID, "seq", seq, "error", err)
+			}
+		}
+	}
+
+	sel := workflow.NewSelector(ctx)
+	sel.AddFuture(mcFuture, func(f workflow.Future) {
+		mcErr = f.Get(mctx, mcOut)
+		modelCallDone = true
+	})
+	sel.AddReceive(chunkSignalChan, func(c workflow.ReceiveChannel, more bool) {
+		var seq int
+		c.Receive(ctx, &seq)
+		deliverChunk(seq)
+	})
+	for !modelCallDone {
+		sel.Select(ctx)
+	}
+	// Selector.Select fires exactly one ready case per call — if the
+	// mcFuture case and a chunk-signal case both became ready in the same
+	// history batch (entirely possible: model_call.py's on_chunk awaits
+	// every signal, including the final forced-flush one, before the
+	// ModelCall activity itself returns, so both events can legitimately
+	// land together), Select could have fired the mcFuture case FIRST,
+	// exiting the loop above with a chunk signal still sitting unreceived
+	// in chunkSignalChan — exactly the drop this function exists to
+	// prevent. A final non-blocking drain here, using the same deliverChunk
+	// logic, catches anything left over: ReceiveAsync never blocks, so this
+	// terminates as soon as the channel is actually empty, and per the
+	// ordering argument in this function's own doc comment, nothing more
+	// will ever arrive on it for this turn after modelCallDone is true.
+	for {
+		var seq int
+		if !chunkSignalChan.ReceiveAsync(&seq) {
+			break
+		}
+		deliverChunk(seq)
+	}
+	return mcErr
+}
+
 // TurnWorkflow implements the reason-act-observe loop. One workflow *type* for
 // every level of the tree — a top-level turn and a subagent are both this same
 // function, distinguished only by TurnInput.ParentType and by who started them
@@ -365,49 +521,6 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 		}
 	})
 
-	// docs/components/gateway.md's "Resolved: ModelCall Streaming" —
-	// text-only in this pass (only "discord" gets a DiscordDeliverChunk
-	// activity; "discord-voice" and every other platform never receive
-	// this signal at all, since model_call.py's own gate only fires it for
-	// context_seq == 0, unconditionally, regardless of platform — the
-	// no-op guard here is what actually confines the effect to Discord
-	// text). Runs for the whole turn's lifetime, not windowed to iteration
-	// 1 specifically: Python only ever signals during that window in the
-	// first place (it never streams for context_seq > 0), so there's
-	// nothing to receive outside it — no separate lifecycle to manage on
-	// this side.
-	//
-	// Dispatches strictly sequentially — awaiting each chunk's delivery
-	// before receiving the next signal — so Discord message edits apply in
-	// the same order the sentences were generated. A burst of signals
-	// arriving faster than delivery keeps up simply queues in the signal
-	// channel (Temporal's own buffering), never dropped or reordered.
-	if platformFromSessionKey(input.SessionKey) == "discord" && input.ConnectionID != "" {
-		chunkSignalChan := workflow.GetSignalChannel(ctx, modelCallChunkSignalName)
-		workflow.Go(ctx, func(gctx workflow.Context) {
-			for {
-				var seq int
-				chunkSignalChan.Receive(gctx, &seq)
-				cao := workflow.ActivityOptions{
-					StartToCloseTimeout: activityTimeoutTierA,
-					TaskQueue:           "deliver:discord:" + input.ConnectionID,
-				}
-				cactx := workflow.WithActivityOptions(gctx, cao)
-				if err := workflow.ExecuteActivity(cactx, "DiscordDeliverChunk", input.TurnID, seq).Get(cactx, nil); err != nil {
-					// Best-effort, same tolerance as the end-of-turn Deliver
-					// call below — a dropped streamed preview chunk isn't
-					// fatal to the turn; the final Deliver/DiscordDeliver
-					// call is still the authoritative, correct-content
-					// delivery either way (or, if this turn was fully
-					// streamed, discordDeliverActivity.Deliver's own
-					// streamed_message_ref check treats streaming as having
-					// already delivered it).
-					workflow.GetLogger(gctx).Warn("discord chunk delivery failed", "turn_id", input.TurnID, "seq", seq, "error", err)
-				}
-			}
-		})
-	}
-
 	var stopReason string
 
 loop:
@@ -448,9 +561,28 @@ loop:
 			HintModality: hintModality,
 			HintTier:     hintTier,
 		}
-		if err := workflow.ExecuteActivity(mctx, "ModelCall", modelInput).Get(mctx, &mcOut); err != nil {
+		mcFuture := workflow.ExecuteActivity(mctx, "ModelCall", modelInput)
+
+		// docs/components/gateway.md's "Resolved: ModelCall Streaming" —
+		// only this turn's first call can ever stream (model_call.py's own
+		// context_seq == 0 gate; iterations == 1 here is the Go-side
+		// equivalent, checked before contextSeq's post-call increment
+		// below). awaitModelCallWithStreaming's own doc comment has the
+		// full reasoning for why this needs a merged Selector loop rather
+		// than a plain Get() plus a detached consumer goroutine.
+		streamPlatform := platformFromSessionKey(input.SessionKey)
+		streamingEligible := iterations == 1 && input.ConnectionID != "" &&
+			(streamPlatform == "discord" || streamPlatform == "discord-voice")
+
+		var mcErr error
+		if streamingEligible {
+			mcErr = awaitModelCallWithStreaming(ctx, mcFuture, mctx, &mcOut, input.TurnID, input.ConnectionID, streamPlatform)
+		} else {
+			mcErr = mcFuture.Get(mctx, &mcOut)
+		}
+		if mcErr != nil {
 			cancel()
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, mcErr, interrupts)
 		}
 		contextSeq++
 		hintModality, hintTier = mcOut.NextHintModality, mcOut.NextHintTier

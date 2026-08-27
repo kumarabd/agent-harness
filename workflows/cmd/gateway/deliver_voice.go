@@ -8,6 +8,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"layeh.com/gopus"
 )
 
 // voiceDeliverActivity is docs/components/gateway/discord-voice.md's
@@ -82,6 +83,20 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	// all of them, rather than repeating a transitionTo at each return.
 	defer a.lifecycle.transitionTo(voiceLifecycleListening)
 
+	// 007_voice_streaming_delivery.sql's own comment: mirrors DiscordDeliver's
+	// streamed_message_ref check — if this turn's response was already
+	// played progressively via DeliverChunk, re-synthesizing and replaying
+	// the whole thing here would talk over what the user already heard.
+	var voiceStreamed bool
+	if err := a.pool.QueryRow(ctx,
+		"SELECT voice_streamed FROM turns WHERE turn_id = $1", turnID,
+	).Scan(&voiceStreamed); err != nil {
+		return err
+	}
+	if voiceStreamed {
+		return markDelivered()
+	}
+
 	var content string
 	err := a.pool.QueryRow(ctx,
 		"SELECT content FROM messages WHERE parent_id = $1 AND role = 'assistant' ORDER BY seq DESC LIMIT 1",
@@ -119,6 +134,50 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	defer a.bargeIn.endPlayback()
 	a.lifecycle.transitionTo(voiceLifecyclePlaying)
 
+	interrupted, err := streamPCMToOpus(ctx, stream, a.vc, enc, stopChan)
+	if err != nil {
+		return err
+	}
+	if interrupted {
+		// docs/components/gateway.md's "Resolved: Voice Platforms —
+		// Cascaded Architecture" fast-path barge-in: VAD detected speech
+		// while this connection was actively playing. Deliberately treated
+		// as a resolved outcome, not a failure — stopping mid-playback
+		// because a human started talking is correct here. The slow path
+		// (turn.go's interrupt-race) separately decides what to do with
+		// whatever the human actually said, once it's transcribed — this
+		// only ever stops local audio output.
+		a.lifecycle.transitionTo(voiceLifecycleInterrupted)
+		log.Printf("discord-voice: playback interrupted by barge-in for turn %s", turnID)
+		// A resolved outcome, not a failure — replaying from the start on a
+		// hypothetical retry would be wrong anyway (the user already heard
+		// part of it and moved on).
+		return markDelivered()
+	}
+	if err := a.vc.Speaking(false); err != nil {
+		log.Printf("discord-voice: failed to clear speaking state: %v", err)
+	}
+	log.Printf("discord-voice: delivered turn %s via connection %s", turnID, a.connectionID)
+	return markDelivered()
+}
+
+// streamPCMToOpus reads Kokoro's raw 24kHz mono PCM off stream one Discord
+// frame at a time, converts (upsample 2x, mono->stereo), Opus-encodes, and
+// sends each frame to vc.OpusSend — racing every send against ctx.Done()
+// and stopChan (voice_bargein.go's fast-path barge-in). Shared by Deliver
+// above (a whole turn's response) and DeliverChunk (deliver_voice_chunk.go,
+// one streamed sentence) — 2026-08-26, extracted when chunk-level voice
+// streaming was added: the two differ only in how much text was handed to
+// synthesizeSpeechPCM before this is called, never in how the resulting
+// audio gets converted or sent.
+//
+// interrupted=true means stopChan fired before the stream was fully
+// drained — a deliberate stop, not a failure (the caller is responsible for
+// its own barge-in bookkeeping and idempotency-marking; this function only
+// reports what happened). A non-nil error means a genuine read, encode, or
+// send failure — retryable by the caller's own idempotency contract, unlike
+// the interrupted case.
+func streamPCMToOpus(ctx context.Context, stream io.Reader, vc *discordgo.VoiceConnection, enc *gopus.Encoder, stopChan <-chan struct{}) (interrupted bool, err error) {
 	// One mono frame's worth of bytes at Kokoro's REAL native rate
 	// (kokoroSampleRate, 24kHz — not voiceSampleRate/48kHz: sample_rate
 	// isn't honored server-side, confirmed live 2026-08-26, see
@@ -145,42 +204,23 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 			stereo := monoToStereoPCM(mono48k)
 			opusData, encErr := encodeVoiceFrame(enc, stereo)
 			if encErr != nil {
-				return encErr
+				return false, encErr
 			}
 			select {
 			case <-ctx.Done():
-				_ = a.vc.Speaking(false)
-				return ctx.Err()
+				_ = vc.Speaking(false)
+				return false, ctx.Err()
 			case <-stopChan:
-				// docs/components/gateway.md's "Resolved: Voice Platforms —
-				// Cascaded Architecture" fast-path barge-in: VAD detected
-				// speech while this connection was actively playing.
-				// Deliberately returns nil, not an error — stopping mid-
-				// playback because a human started talking is the correct,
-				// expected outcome here, not a failure. The slow path
-				// (turn.go's interrupt-race) separately decides what to do
-				// with whatever the human actually said, once it's
-				// transcribed — this only ever stops local audio output.
-				_ = a.vc.Speaking(false)
-				a.lifecycle.transitionTo(voiceLifecycleInterrupted)
-				log.Printf("discord-voice: playback interrupted by barge-in for turn %s", turnID)
-				// A resolved outcome, not a failure — replaying from the
-				// start on a hypothetical retry would be wrong anyway (the
-				// user already heard part of it and moved on).
-				return markDelivered()
-			case a.vc.OpusSend <- opusData:
+				_ = vc.Speaking(false)
+				return true, nil
+			case vc.OpusSend <- opusData:
 			}
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
-				break
+				return false, nil
 			}
-			return readErr
+			return false, readErr
 		}
 	}
-	if err := a.vc.Speaking(false); err != nil {
-		log.Printf("discord-voice: failed to clear speaking state: %v", err)
-	}
-	log.Printf("discord-voice: delivered turn %s via connection %s", turnID, a.connectionID)
-	return markDelivered()
 }

@@ -174,6 +174,7 @@ func (s *server) voiceJoin(ctx context.Context, dg *discordgo.Session, ic *disco
 	deliverActivity := &voiceDeliverActivity{vc: vc, pool: s.pool, connectionID: connectionID, bargeIn: bargeIn, lifecycle: lifecycle}
 	deliverWkr := worker.New(s.temporal, "deliver:discord-voice:"+connectionID, worker.Options{DisableWorkflowWorker: true})
 	deliverWkr.RegisterActivityWithOptions(deliverActivity.Deliver, activity.RegisterOptions{Name: "VoiceDeliver"})
+	deliverWkr.RegisterActivityWithOptions(deliverActivity.DeliverChunk, activity.RegisterOptions{Name: "VoiceDeliverChunk"})
 	if err := deliverWkr.Start(); err != nil {
 		log.Printf("discord-voice: failed to start embedded delivery worker: %v", err)
 	}
