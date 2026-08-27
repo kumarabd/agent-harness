@@ -7,19 +7,26 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
 
 // docs/components/gateway/discord-voice.md's Notes Log — "filler injection"
 // (a.k.a. acknowledgment phrases), the ChatGPT-voice-mode-style pattern
-// discussed directly: play a short, PRE-synthesized phrase the instant an
-// utterance is confirmed real, to mask voice_first_audio_latency_seconds'
-// own dead air rather than reduce it — an explicit perceived-latency/UX
-// technique, not a real optimization. Deliberately sequenced after the
-// debounce fix and filler-transcript filtering (same discussion, same
-// session) — building this on top of a VAD that still false-triggers on
-// noise would just give a filler phrase that also gets falsely interrupted.
+// discussed directly: play a short, PRE-synthesized phrase to mask
+// voice_first_audio_latency_seconds' own dead air rather than reduce it —
+// an explicit perceived-latency/UX technique, not a real optimization.
+// Deliberately sequenced after the debounce fix and filler-transcript
+// filtering (same discussion, same session) — building this on top of a
+// VAD that still false-triggers on noise would just give a filler phrase
+// that also gets falsely interrupted.
+//
+// Reactive, not immediate, since 2026-08-27 (fillerTriggerDelay's own
+// comment has the full story) — the original "the instant an utterance is
+// confirmed real" design caused the filler to collide with and get cut off
+// by the real response once streaming made the common case fast enough for
+// the two to race.
 //
 // voiceFillerPhraseText — pre-synthesized ONCE at gateway startup
 // (synthesizeVoiceFillerCache, called from main.go), never per-turn: fresh
@@ -114,22 +121,69 @@ func newVoiceFillerPlayer(cache *voiceFillerCache) *voiceFillerPlayer {
 	return &voiceFillerPlayer{cache: cache}
 }
 
-// start plays one random cached filler phrase — called from
-// voiceCaptureLoop's flush closure, in its own goroutine (fire-and-forget:
-// the caller has real turn-dispatch work of its own to get on with, not
-// waiting on a filler phrase to finish speaking). A no-op if filler
-// injection isn't enabled for this deployment (cache has nothing to play).
+// fillerTriggerDelay — real, live behavior fixed 2026-08-27: the original
+// design started the filler immediately, unconditionally, the instant an
+// utterance was confirmed. That made sense when a real response typically
+// took 5-7s (the pre-streaming baseline) but became actively counter-
+// productive once streaming brought the common case down to ~1.4s — the
+// filler phrase's own ~1-1.5s speaking time collided with the real
+// response arriving, getting cut off mid-word (a real "felt slower, not
+// faster" user report, confirmed mechanistically once streamPCMToOpus's own
+// interrupted return value started being logged).
+//
+// The fix, reasoned from how this actually works in a real human
+// conversation: nobody says "um" before answering an easy question
+// instantly — a filled pause is a REACTIVE signal that thinking is already
+// taking a moment, not a planned icebreaker said in advance. This project
+// has no way to predict a given turn's real latency ahead of time (whether
+// it needs tool calls, a slower model tier, or context compression is only
+// known once ModelCall is already running) — but it can react: wait, and
+// only speak up if the wait is already running long. 1 second — a real
+// starting value, not tuned against real usage yet, same category as
+// voiceUtteranceSilenceFrames/voiceUtteranceMinSpeechFrames — sits below
+// this project's own streamed p95 (~2.35s) and well below the non-streamed/
+// tool-calling fallback's typical latency (~7s+), so a genuinely fast
+// answer gets no filler at all (correct — that's not a case a human would
+// fill either), while a genuinely slow one still gets one, with more of its
+// own remaining wait left for the filler to finish naturally.
+// A var, not a const, solely so a test can override it to something short
+// rather than actually waiting out a full second per test case.
+var fillerTriggerDelay = 1 * time.Second
+
+// start waits fillerTriggerDelay, then — only if the real response hasn't
+// already claimed playback during that wait (bargeIn.isPlaying(), its own
+// comment has the one real edge case) — plays one random cached filler
+// phrase. Called from voiceCaptureLoop's flush closure, in its own
+// goroutine (fire-and-forget: the caller has real turn-dispatch work of its
+// own to get on with, not waiting on this). A no-op if filler injection
+// isn't enabled for this deployment (cache has nothing to play).
 //
 // Uses voiceBargeIn exactly like Deliver/DeliverChunk do — same
-// startPlayback/endPlayback pairing, same streamPCMToOpus call. Stops for
-// either reason a real delivery would: a genuine user barge-in
-// (signalSpeech), or being preempted by the real response's own
-// startPlayback call once it's ready to play — voiceBargeIn's own
-// preemption logic handles that automatically; this function doesn't know
-// or care which one happened, same as Deliver/DeliverChunk never have.
+// startPlayback/endPlayback pairing, same streamPCMToOpus call. Once
+// actually playing, stops for either reason a real delivery would: a
+// genuine user barge-in (signalSpeech), or being preempted by the real
+// response's own startPlayback call once it's ready to play — voiceBargeIn's
+// own preemption logic handles that automatically; this function doesn't
+// know or care which one happened, same as Deliver/DeliverChunk never have.
 func (f *voiceFillerPlayer) start(ctx context.Context, vc *discordgo.VoiceConnection, bargeIn *voiceBargeIn) {
 	phrase := f.cache.randomPhrase()
 	if phrase == nil {
+		return
+	}
+
+	select {
+	case <-time.After(fillerTriggerDelay):
+	case <-ctx.Done():
+		return
+	}
+	if bargeIn.isPlaying() {
+		// The real response (or, rarely, a prior turn's still-finishing
+		// audio — bargeIn.isPlaying's own comment) already claimed playback
+		// during the wait. The wait wasn't actually long this time; saying
+		// something now would either overlap or immediately get cut off.
+		// No log line for the common case (would fire on every fast turn
+		// once this feature is enabled) — only genuinely-played or
+		// genuinely-failed attempts are worth a line.
 		return
 	}
 
@@ -141,7 +195,23 @@ func (f *voiceFillerPlayer) start(ctx context.Context, vc *discordgo.VoiceConnec
 
 	stopChan := bargeIn.startPlayback()
 	defer bargeIn.endPlayback(stopChan)
-	if _, err := streamPCMToOpus(ctx, bytes.NewReader(phrase), vc, enc, stopChan, nil); err != nil {
+	log.Printf("discord-voice: filler playback starting")
+	// docs/components/gateway/discord-voice.md's Notes Log — added after a
+	// real "felt slower, not faster" report with the raw latency numbers
+	// showing no regression: the suspected cause was never observable
+	// before this, since streamPCMToOpus's own interrupted return value was
+	// previously discarded here. Logged explicitly now so a filler cut off
+	// by the real response catching up to it (a likely self-inflicted,
+	// audible stutter — the real response preempting mid-phrase, not a
+	// genuine user barge-in) is visible in the logs rather than
+	// indistinguishable from one that played out naturally.
+	start := time.Now()
+	interrupted, err := streamPCMToOpus(ctx, bytes.NewReader(phrase), vc, enc, stopChan, nil)
+	if err != nil {
 		log.Printf("discord-voice: filler playback failed: %v", err)
+	} else if interrupted {
+		log.Printf("discord-voice: filler playback cut off after %v (real response ready, or a genuine barge-in)", time.Since(start))
+	} else {
+		log.Printf("discord-voice: filler playback finished naturally after %v", time.Since(start))
 	}
 }

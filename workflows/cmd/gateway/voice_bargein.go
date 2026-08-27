@@ -103,3 +103,21 @@ func (b *voiceBargeIn) signalSpeech() {
 	default:
 	}
 }
+
+// isPlaying reports whether some player currently holds playback on this
+// connection — added 2026-08-27 for filler injection's reactive-delay
+// trigger (voice_filler_player.go): the filler waits a real grace period
+// before ever starting, checking this to see whether the real response
+// already claimed playback during that wait, in which case the filler is
+// skipped entirely rather than starting only to be immediately preempted.
+// A real, if rare, imprecision: if a PRIOR turn's audio is still playing
+// when a brand new utterance starts (the user talked over an ongoing
+// response), this reports true even though it isn't THIS turn's real
+// response — the filler is skipped in that case too, which costs nothing
+// worse than a filler that would have been useful; never a wrong or
+// confusing outcome, just an occasionally-conservative one.
+func (b *voiceBargeIn) isPlaying() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stopChan != nil
+}
