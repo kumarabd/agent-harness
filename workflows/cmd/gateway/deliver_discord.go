@@ -74,24 +74,51 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 	if err != nil {
 		return err
 	}
-	if streamedMessageRef != nil {
-		// docs/components/gateway.md's "Resolved: ModelCall Streaming" —
-		// this turn's response was already progressively delivered via
-		// DiscordDeliverChunk's edit-in-place, and the last chunk's forced
-		// final flush (llm.call_model_streaming's own docstring) already
-		// left that message's content exactly matching the complete
-		// response. Recording delivered_responses above (already done) is
-		// enough to keep the ledger consistent — sending a second, whole
-		// new message here would duplicate what the user already saw.
-		log.Printf("discord: turn %s already delivered via streaming (message %s), skipping re-send", turnID, *streamedMessageRef)
-		return markDelivered()
-	}
 	if content == "" {
 		// docs/future-work.md §4 — a real, separately-tracked gap (the model
 		// sometimes ends a turn with no real content). Nothing to send;
 		// not this activity's job to paper over it. Still a genuine
 		// resolution, not a failure — mark delivered.
 		return markDelivered()
+	}
+	if streamedMessageRef != nil {
+		// docs/components/gateway.md's "Resolved: ModelCall Streaming" —
+		// Real, live bug fixed 2026-08-27: streamedMessageRef only ever
+		// means "this turn's first iteration was streamed" (turn.go's
+		// streamingEligible gate is iterations==1, gated purely on
+		// iteration count, not on whether the turn stopped there). This
+		// used to skip unconditionally on the assumption that streaming a
+		// turn's first content always means the whole eventual response
+		// got streamed — true only when that first iteration made no tool
+		// call. When it did, the turn kept going, and the real final
+		// answer (a LATER, never-streamed `messages` row — confirmed live:
+		// two real tool calls, a correct final answer sitting in Postgres,
+		// and this activity still reporting success having sent nothing
+		// else) was silently dropped forever, leaving the user staring at
+		// the streamed "let me check..." remark with no follow-up.
+		//
+		// Comparing `content` (the turn's real latest assistant message)
+		// against turn_deliveries' own last cumulative row (what the
+		// streamed message actually shows right now) tells the two cases
+		// apart: equal means iteration 1 WAS the whole turn and
+		// DiscordDeliverChunk's last chunk already left the message
+		// showing exactly this — nothing to add. Different means real,
+		// later content exists that was never delivered — send it as a
+		// follow-up message (not an edit: it's genuinely a separate
+		// thought from a later iteration, not a growing revision of the
+		// same one, matching how a human would post "checking... [pause]
+		// here's what I found" as two messages, not one edited in place).
+		var streamedContent string
+		if err := a.pool.QueryRow(ctx,
+			"SELECT COALESCE((SELECT content FROM turn_deliveries WHERE turn_id = $1 ORDER BY seq DESC LIMIT 1), '')",
+			turnID,
+		).Scan(&streamedContent); err != nil {
+			return err
+		}
+		if streamedContent == content {
+			log.Printf("discord: turn %s already delivered via streaming (message %s), skipping re-send", turnID, *streamedMessageRef)
+			return markDelivered()
+		}
 	}
 
 	if _, err := a.session.ChannelMessageSend(channelID, content); err != nil {

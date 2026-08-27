@@ -89,20 +89,6 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	// all of them, rather than repeating a transitionTo at each return.
 	defer a.lifecycle.transitionTo(voiceLifecycleListening)
 
-	// 007_voice_streaming_delivery.sql's own comment: mirrors DiscordDeliver's
-	// streamed_message_ref check — if this turn's response was already
-	// played progressively via DeliverChunk, re-synthesizing and replaying
-	// the whole thing here would talk over what the user already heard.
-	var voiceStreamed bool
-	if err := a.pool.QueryRow(ctx,
-		"SELECT voice_streamed FROM turns WHERE turn_id = $1", turnID,
-	).Scan(&voiceStreamed); err != nil {
-		return err
-	}
-	if voiceStreamed {
-		return markDelivered()
-	}
-
 	var content string
 	err := a.pool.QueryRow(ctx,
 		"SELECT content FROM messages WHERE parent_id = $1 AND role = 'assistant' ORDER BY seq DESC LIMIT 1",
@@ -110,6 +96,44 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	).Scan(&content)
 	if err != nil {
 		return err
+	}
+
+	// 007_voice_streaming_delivery.sql's own comment: mirrors DiscordDeliver's
+	// streamed_message_ref check. Real, live bug fixed 2026-08-27 (same root
+	// cause and same fix shape as DiscordDeliver's own): voice_streamed only
+	// ever means "this turn's first iteration was streamed" (turn.go's
+	// streamingEligible gate is iterations==1, gated purely on iteration
+	// count, not on whether the turn stopped there) — true regardless of
+	// whether that first iteration made a tool call and the turn went on to
+	// produce a LATER, never-streamed final answer from a later iteration.
+	// The old code treated voiceStreamed as "the whole turn was already
+	// spoken" and skipped unconditionally — confirmed live: a real turn
+	// that called a tool completed with the correct final answer sitting in
+	// `messages`, and this activity kept reporting success having spoken
+	// nothing but the streamed "let me check" remark, forever. Comparing
+	// against turn_deliveries' own last cumulative row (what was actually
+	// spoken) tells the two cases apart: equal means iteration 1 WAS the
+	// whole turn and DeliverChunk's last chunk already spoke this exact
+	// content — skip, don't repeat it. Different means this is a genuinely
+	// later, unspoken message — fall through below and actually speak it,
+	// same as a turn that was never streamed at all.
+	var voiceStreamed bool
+	if err := a.pool.QueryRow(ctx,
+		"SELECT voice_streamed FROM turns WHERE turn_id = $1", turnID,
+	).Scan(&voiceStreamed); err != nil {
+		return err
+	}
+	if voiceStreamed {
+		var streamedContent string
+		if err := a.pool.QueryRow(ctx,
+			"SELECT COALESCE((SELECT content FROM turn_deliveries WHERE turn_id = $1 ORDER BY seq DESC LIMIT 1), '')",
+			turnID,
+		).Scan(&streamedContent); err != nil {
+			return err
+		}
+		if streamedContent == content {
+			return markDelivered()
+		}
 	}
 	// voice_text_sanitize.go's own comment — a deterministic backstop for
 	// emoji/markdown that platform_prompts.go's system prompt instruction
