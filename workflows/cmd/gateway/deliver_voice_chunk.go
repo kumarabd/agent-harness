@@ -66,6 +66,11 @@ func (a *voiceDeliverActivity) DeliverChunk(ctx context.Context, turnID string, 
 	if len(cumulative) > len(previous) {
 		delta = cumulative[len(previous):]
 	}
+	// voice_text_sanitize.go's own comment — same deterministic emoji/
+	// markdown backstop as Deliver's own, applied here per-chunk so a
+	// sentence that's entirely (or partly) emoji is caught before the
+	// delta == "" check below, not after.
+	delta = sanitizeForSpeech(delta)
 	markSent := func() error {
 		if _, err := a.pool.Exec(ctx,
 			"UPDATE turn_deliveries SET sent = true WHERE turn_id = $1 AND seq = $2", turnID, seq,

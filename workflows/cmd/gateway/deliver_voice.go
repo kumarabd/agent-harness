@@ -111,6 +111,13 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	if err != nil {
 		return err
 	}
+	// voice_text_sanitize.go's own comment — a deterministic backstop for
+	// emoji/markdown that platform_prompts.go's system prompt instruction
+	// doesn't reliably prevent on its own. Applied before the empty check
+	// below so a message that was ENTIRELY emoji (content != "" but
+	// sanitizes to "") correctly takes the same "nothing to synthesize"
+	// path, not an empty-string TTS call.
+	content = sanitizeForSpeech(content)
 	if content == "" {
 		// docs/future-work.md §4 — a real, separately-tracked gap (the
 		// model sometimes ends a turn with no real content). Nothing to
