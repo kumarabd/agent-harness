@@ -662,7 +662,14 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 				if !ended && eot != nil &&
 					buf.silenceFrames >= voiceUtteranceEOTGraceFrames &&
 					(buf.silenceFrames-voiceUtteranceEOTGraceFrames)%voiceUtteranceEOTCheckIntervalFrames == 0 {
-					mono16k := downmixResample16kMonoInt16(buf.pcm)
+					// eotTrailingRawSamples' own comment has the real bug
+					// this closes — resample only the trailing window the
+					// model actually needs, not the whole utterance so far.
+					window := buf.pcm
+					if len(window) > eotTrailingRawSamples {
+						window = window[len(window)-eotTrailingRawSamples:]
+					}
+					mono16k := downmixResample16kMonoInt16(window)
 					probability, eotErr := eot.predict(context.Background(), mono16k)
 					if eotErr != nil {
 						if !buf.eotFailureLogged {

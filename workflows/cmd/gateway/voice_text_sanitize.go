@@ -77,6 +77,13 @@ func isEmojiRune(r rune) bool {
 		return true
 	case r >= 0x2B00 && r <= 0x2BFF: // misc symbols and arrows (e.g. the star, U+2B50)
 		return true
+	case r >= 0x2190 && r <= 0x21FF: // arrows block — real report fixed 2026-08-27:
+		// "→" (U+2192) itself lives here, read aloud as "right arrow" by
+		// Kokoro's own text normalization, the same failure mode as the
+		// emoji/markdown symbols this function already strips, just a
+		// different Unicode block this range-based filter hadn't covered
+		// yet.
+		return true
 	case r >= 0x2300 && r <= 0x23FF: // misc technical (e.g. watch/alarm-clock glyphs commonly used as emoji)
 		return true
 	case r >= 0x1F1E6 && r <= 0x1F1FF: // regional indicators (flag pairs)

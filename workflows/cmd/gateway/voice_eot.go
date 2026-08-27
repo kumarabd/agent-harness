@@ -40,6 +40,24 @@ const eotThreshold = 0.36
 // not something that varies per call.
 const eotMaxSamples = 19200
 
+// eotTrailingRawSamples is how much of a speaker's raw 48kHz-stereo buffer
+// (speakerBuffer.pcm) actually needs to be resampled before a predict()
+// call — eotMaxSamples of 16kHz mono audio, converted back through
+// downmixResample's own ratio (sileroResampleRatio, voice_vad_silero.go)
+// and channel count. Real bug fixed 2026-08-27: the capture loop's own EOT
+// check was resampling the ENTIRE accumulated utterance on every poll, not
+// just the trailing window the model actually looks at — cost that grows
+// without bound the longer a speaker keeps talking, run while holding the
+// one mutex that gates every speaker's frame processing on the connection.
+// A long utterance made every later EOT poll progressively more expensive,
+// live evidence being a 30-second-long `processing` lifecycle hold that
+// reset to `listening` with no transcript at all — consistent with audio
+// getting delayed badly enough during that stretch that WhisperLive/batch
+// STT had nothing usable left to transcribe. predict() itself already
+// zero-pads the front when handed fewer samples than eotMaxSamples, so
+// slicing here changes nothing about correctness, only cost.
+const eotTrailingRawSamples = eotMaxSamples * sileroResampleRatio * voiceChannels
+
 // eotClient wraps the gRPC connection to the sidecar's EOT service. Holds
 // no per-speaker state at all — unlike sileroVADClient's own per-call
 // state/context threading, every Predict call here is a fresh, independent
