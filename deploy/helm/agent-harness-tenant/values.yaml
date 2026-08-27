@@ -146,6 +146,14 @@ gateway:
   # not just a guess, but still a real per-tenant preference, not
   # hardcoded as this project's own default.
   ttsVoice: ""
+  # -- Optional, opt-in — docs/components/gateway/discord-voice.md's Notes
+  # Log, "filler injection" (ChatGPT-voice-mode-style acknowledgment
+  # phrases, e.g. "Let me check that.", played instantly on utterance-end
+  # to mask response latency rather than reduce it). false by default, same
+  # convention as vadSidecar/realtimeStt below — a tenant that hasn't opted
+  # in takes on no new startup dependency on kokoro-svc for pre-synthesizing
+  # the filler phrase cache at all.
+  voiceFillerEnabled: false
   # -- Optional — docs/components/gateway/discord-voice.md's "Resolved:
   # Silero VAD". Runs as a SECOND CONTAINER in this same pod, not a shared
   # cluster-wide service like whisper-svc/kokoro-svc: VAD is called

@@ -29,6 +29,36 @@ const voiceConnectionLeaseTTL = 30 * time.Second
 // resolved, not this number.
 const voiceUtteranceSilenceFrames = 35
 
+// voiceUtteranceMinSpeechFrames — real, live bug fixed 2026-08-27: barge-in
+// and utterance accumulation used to fire on the very FIRST VAD-classified-
+// speech frame, unconditionally, with no debounce at all. Even Silero
+// (already enabled for this tenant, a real neural VAD, not just an energy
+// threshold) can briefly misclassify a click, cough, or background noise
+// burst as speech for a frame or two — with no minimum-sustained-speech
+// requirement, that alone was enough to interrupt playback and start
+// accumulating a would-be utterance. Requires speech to actually persist
+// before treating it as real, matching the attack-time hysteresis real VAD
+// systems commonly use. Deliberately much shorter than
+// voiceUtteranceSilenceFrames: confirming speech STARTED should be fast, only
+// deciding it ENDED needs the long tail to tolerate a natural mid-sentence
+// pause.
+//
+// 13 frames (260ms), not the original 120ms guess — revised 2026-08-27 to
+// match Silero VAD's own reference implementation (the same upstream
+// project our sidecar's model is from): its `VADIterator`/
+// `get_speech_timestamps` utilities default `min_speech_duration_ms` to
+// ~250ms, the exact same debounce concept applied here. Not the same thing
+// as that reference's own `min_silence_duration_ms` (~100ms) — that one
+// governs merging adjacent speech blips within general-purpose
+// segmentation, a different question than "the human is done talking, it's
+// the bot's turn" — voiceUtteranceSilenceFrames' own 700ms is deliberately
+// unrelated to it and stays as-is. Not wired to the reference
+// implementation's code directly (a stateful Python iterator, awkward for
+// this sidecar's deliberately stateless per-call gRPC design — see
+// vad_sidecar/model.py's own reason for bypassing silero_vad's OnnxWrapper
+// the same way), just its published tuning value.
+const voiceUtteranceMinSpeechFrames = 13
+
 // voiceState tracks this Gateway replica's own live voice connections —
 // in-memory only, not Postgres: gateway_connection_leases is the durable
 // record of who currently holds each connection (docs/components/gateway.md's
@@ -176,6 +206,14 @@ func (s *server) voiceJoin(ctx context.Context, dg *discordgo.Session, ic *disco
 	// connection, shared-between-capture-and-delivery treatment as bargeIn/
 	// lifecycle above.
 	latency := newVoiceLatencyTracker()
+	// filler — docs/components/gateway/discord-voice.md's Notes Log, filler
+	// injection. Per-connection like bargeIn/lifecycle/latency above, but
+	// only ever used from voiceCaptureLoop's own flush (the trigger side) —
+	// deliverActivity never needs a reference to it at all, since
+	// voiceBargeIn's own preemption is what stops a still-playing filler
+	// once Deliver/DeliverChunk's already-existing startPlayback call
+	// happens, not anything this struct coordinates itself.
+	filler := newVoiceFillerPlayer(s.voiceFillerCache)
 	deliverActivity := &voiceDeliverActivity{vc: vc, pool: s.pool, connectionID: connectionID, bargeIn: bargeIn, lifecycle: lifecycle, latency: latency}
 	deliverWkr := worker.New(s.temporal, "deliver:discord-voice:"+connectionID, worker.Options{DisableWorkflowWorker: true})
 	deliverWkr.RegisterActivityWithOptions(deliverActivity.Deliver, activity.RegisterOptions{Name: "VoiceDeliver"})
@@ -209,7 +247,7 @@ func (s *server) voiceJoin(ctx context.Context, dg *discordgo.Session, ic *disco
 	}
 
 	go s.voiceLeaseRenewalLoop(connCtx, connectionID, holderID)
-	go s.voiceCaptureLoop(connCtx, vc, channelID, connectionID, voiceKey, bargeIn, lifecycle, latency)
+	go s.voiceCaptureLoop(connCtx, vc, channelID, connectionID, voiceKey, bargeIn, lifecycle, latency, filler)
 
 	return "Joined."
 }
@@ -280,6 +318,21 @@ func (s *server) voiceLeaseRenewalLoop(ctx context.Context, connectionID, holder
 type speakerBuffer struct {
 	pcm           []int16
 	silenceFrames int
+	// speechFrames/pendingSpeechPCM — debounce state for a not-yet-confirmed
+	// speech onset (voiceUtteranceMinSpeechFrames' own comment has the real
+	// bug this closes: a single VAD-classified-speech frame, even from a
+	// real neural VAD, used to fire barge-in and start an utterance
+	// immediately — a click, a cough, a stray noise burst was enough).
+	// pendingSpeechPCM holds frames provisionally while speechFrames is
+	// still below threshold, so a genuine utterance's actual onset isn't
+	// clipped once it IS confirmed — see the capture loop's own comment for
+	// the promote-on-confirm mechanics. Both reset to zero/nil the instant
+	// a silent frame arrives before confirmation (that run wasn't real
+	// speech); neither is touched once len(pcm) > 0 (a confirmed utterance
+	// already in progress uses the same unchanged pcm/silenceFrames path as
+	// before this existed).
+	speechFrames     int
+	pendingSpeechPCM []int16
 	// vad is one instance per speaker, not shared across the connection —
 	// required for Silero (voice_vad_silero.go), whose ONNX model carries
 	// real per-stream RNN state that must not mix between independent
@@ -305,7 +358,7 @@ type speakerBuffer struct {
 // transcribes and submits it as a MessageEvent — with no trigger gate at
 // all ("Resolved: Trigger Detection — No Gate, Deferred Pending Real Usage"):
 // every utterance becomes a real turn.
-func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnection, channelID, connectionID, voiceKey string, bargeIn *voiceBargeIn, lifecycle *voiceLifecycle, latency *voiceLatencyTracker) {
+func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnection, channelID, connectionID, voiceKey string, bargeIn *voiceBargeIn, lifecycle *voiceLifecycle, latency *voiceLatencyTracker, filler *voiceFillerPlayer) {
 	dec, err := newVoiceOpusDecoder()
 	if err != nil {
 		log.Printf("discord-voice: failed to create opus decoder: %v", err)
@@ -391,6 +444,17 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 				lifecycle.transitionTo(voiceLifecycleListening)
 				return
 			}
+			if isFillerOnly(text) {
+				// voice_filler.go's own comment has the full reasoning —
+				// the downstream half of the debounce fix: a genuinely,
+				// clearly vocalized "um" can still get transcribed
+				// correctly even though it carries no real content. Logged
+				// (not silent) so real usage can inform whether
+				// voiceFillerWords' set needs extending later.
+				log.Printf("discord-voice: filtered filler-only transcript %q, no turn started", text)
+				lifecycle.transitionTo(voiceLifecycleListening)
+				return
+			}
 			lifecycle.transitionTo(voiceLifecycleGenerating)
 			// docs/components/gateway/discord-voice.md's Notes Log — the
 			// real "STT-completion to first-audio-frame" latency starts
@@ -399,6 +463,16 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 			// same connection) reads this back at the first audio frame it
 			// actually sends.
 			latency.markTurnStart()
+			// docs/components/gateway/discord-voice.md's Notes Log, filler
+			// injection — fired here, not after submitMessageEvent below:
+			// the whole point is starting before the real turn even exists
+			// yet, masking exactly the dead air voice_first_audio_latency_seconds
+			// measures. Its own goroutine (fire-and-forget, same as flush's
+			// enclosing one) — this closure has real turn-dispatch work of
+			// its own to get on with, not waiting on a filler phrase to
+			// finish speaking. A no-op if FILLER_ENABLED isn't set for this
+			// deployment (voiceFillerPlayer.start's own cache check).
+			go filler.start(ctx, vc, bargeIn)
 			event := MessageEvent{
 				Platform:          "discord-voice",
 				ChannelID:         channelID,
@@ -464,23 +538,54 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 				s.teardownVoiceConnection(context.Background(), voiceKey, "VAD sidecar failure")
 				return
 			}
-			if speech {
-				// Fast-path barge-in (docs/components/gateway.md's "Resolved:
-				// Voice Platforms — Cascaded Architecture") — fired on every
-				// speech frame, not gated on utterance-buffer state: the
-				// point is reacting to the very first sign of speech, not
-				// waiting for enough of it to accumulate into a real
-				// utterance. A no-op unless this connection is currently
-				// playing audio (checked inside signalSpeech itself).
+			switch {
+			case speech && len(buf.pcm) > 0:
+				// Already a confirmed, in-progress utterance — unchanged
+				// from before the debounce fix: every speech frame keeps
+				// resetting the end-of-utterance silence timer, and barge-in
+				// fires on every frame (a no-op unless this connection is
+				// currently playing, checked inside signalSpeech itself).
 				bargeIn.signalSpeech()
 				lifecycle.transitionTo(voiceLifecycleSpeaking)
 				buf.pcm = append(buf.pcm, pcm...)
 				buf.silenceFrames = 0
-			} else if len(buf.pcm) > 0 {
+
+			case speech:
+				// Not yet confirmed as real speech — accumulate
+				// provisionally (voiceUtteranceMinSpeechFrames' own comment
+				// has the full reasoning) without acting on it yet: no
+				// barge-in, no lifecycle transition, nothing dispatched.
+				buf.pendingSpeechPCM = append(buf.pendingSpeechPCM, pcm...)
+				buf.speechFrames++
+				if buf.speechFrames >= voiceUtteranceMinSpeechFrames {
+					// Confirmed. Promote the provisional lead-in into the
+					// real buffer so the utterance's actual onset isn't
+					// clipped by the frames spent confirming it, then start
+					// acting on it exactly like the already-confirmed case
+					// above would.
+					bargeIn.signalSpeech()
+					lifecycle.transitionTo(voiceLifecycleSpeaking)
+					buf.pcm = append(buf.pcm, buf.pendingSpeechPCM...)
+					buf.pendingSpeechPCM = nil
+					buf.speechFrames = 0
+					buf.silenceFrames = 0
+				}
+
+			case len(buf.pcm) > 0:
+				// Confirmed utterance, now silent — unchanged end-of-
+				// utterance timeout.
 				buf.silenceFrames++
 				if buf.silenceFrames >= voiceUtteranceSilenceFrames {
 					flush(pkt.SSRC, buf)
 				}
+
+			default:
+				// Silent, and never confirmed — that speech-classified run,
+				// if there was one, wasn't sustained enough to be real.
+				// Discard it rather than let it linger and get spliced onto
+				// a later, unrelated speech burst.
+				buf.speechFrames = 0
+				buf.pendingSpeechPCM = nil
 			}
 			mu.Unlock()
 		}

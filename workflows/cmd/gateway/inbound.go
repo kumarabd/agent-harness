@@ -90,6 +90,14 @@ func (s *server) submitMessageEvent(ctx context.Context, event MessageEvent) (st
 	if event.ParentSessionKey != "" {
 		parentSessionKey = &event.ParentSessionKey
 	}
+	// platform_prompts.go's own comment has the full reasoning — a platform
+	// absent from that map (everything except discord-voice today) leaves
+	// this nil, same as before this existed: NULL in the column, ModelCall's
+	// own DEFAULT_SYSTEM_PROMPT fallback unaffected.
+	var systemPrompt *string
+	if p := platformSystemPrompts[event.Platform]; p != "" {
+		systemPrompt = &p
+	}
 	// gateway.md's "Resolved: Multi-Session Channels" — genesis detection is
 	// free from state already being written: RowsAffected() > 0 means this
 	// is genuinely the first message this session_key has ever seen. This
@@ -98,11 +106,13 @@ func (s *server) submitMessageEvent(ctx context.Context, event MessageEvent) (st
 	// below is set ONLY on this exact condition, never on a later message
 	// for an already-existing session, regardless of what event.ParentSessionKey
 	// itself carries (harmless if the caller sends it on every message for
-	// a branch — this check is what actually gates the effect).
+	// a branch — this check is what actually gates the effect). system_prompt
+	// is set the same ON CONFLICT DO NOTHING way — a platform's prompt is
+	// decided once, at genesis, never revised for an existing session.
 	sessionsTag, err := s.pool.Exec(ctx,
-		"INSERT INTO sessions (session_key, platform, channel_id, parent_session_key) VALUES ($1, $2, $3, $4) "+
+		"INSERT INTO sessions (session_key, platform, channel_id, parent_session_key, system_prompt) VALUES ($1, $2, $3, $4, $5) "+
 			"ON CONFLICT (session_key) DO NOTHING",
-		sessionKey, event.Platform, event.ChannelID, parentSessionKey,
+		sessionKey, event.Platform, event.ChannelID, parentSessionKey, systemPrompt,
 	)
 	if err != nil {
 		return "", err

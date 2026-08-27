@@ -144,7 +144,7 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	// playing yet during synthesis, so there's nothing for a barge-in
 	// signal to usefully stop before this point.
 	stopChan := a.bargeIn.startPlayback()
-	defer a.bargeIn.endPlayback()
+	defer a.bargeIn.endPlayback(stopChan)
 	a.lifecycle.transitionTo(voiceLifecyclePlaying)
 
 	onFirstFrame := func() {

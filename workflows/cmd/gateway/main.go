@@ -131,6 +131,13 @@ type server struct {
 	// record of who holds each connection, this is just this replica's own
 	// bookkeeping of which ones it's currently serving.
 	voice *voiceState
+	// voiceFillerCache — docs/components/gateway/discord-voice.md's Notes
+	// Log, filler injection. Built once at startup (synthesizeVoiceFillerCache),
+	// shared read-only across every connection this replica serves — never
+	// nil (an empty cache when FILLER_ENABLED isn't set, or pre-synthesis
+	// failed), so callers never need a separate nil check beyond what
+	// voiceFillerCache.randomPhrase already does internally.
+	voiceFillerCache *voiceFillerCache
 }
 
 func main() {
@@ -176,6 +183,11 @@ func main() {
 		temporal:  temporalClient,
 		taskQueue: envOrDefault("TEMPORAL_TASK_QUEUE", "agent-loop"),
 		voice:     newVoiceState(),
+		// Best-effort, not fail-loud — see synthesizeVoiceFillerCache's own
+		// comment. Deliberately after the Postgres/Temporal dial calls
+		// above (which DO fail loud), since this one degrading silently on
+		// a real failure is the correct behavior, not an oversight.
+		voiceFillerCache: synthesizeVoiceFillerCache(ctx),
 	}
 
 	mux := http.NewServeMux()

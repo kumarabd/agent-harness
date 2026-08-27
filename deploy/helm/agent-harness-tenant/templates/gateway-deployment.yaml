@@ -113,6 +113,15 @@ spec:
             - name: TTS_VOICE
               value: {{ .Values.gateway.ttsVoice | quote }}
             {{- end }}
+            # workflows/cmd/gateway/voice_filler_player.go's FILLER_ENABLED —
+            # opt-in filler injection, values.yaml's own comment has the
+            # full reasoning. Only ever set to "true" when explicitly
+            # enabled — omitted entirely otherwise, matching main.go's own
+            # fillerEnabled() reading a plain unset env var as false.
+            {{- if .Values.gateway.voiceFillerEnabled }}
+            - name: FILLER_ENABLED
+              value: "true"
+            {{- end }}
             # docs/components/gateway/discord-voice.md's "Resolved: Silero
             # VAD" — localhost, not a Service DNS name: the sidecar below
             # is a second container in this SAME pod, sharing this

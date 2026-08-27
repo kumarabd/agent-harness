@@ -105,7 +105,7 @@ func (a *voiceDeliverActivity) DeliverChunk(ctx context.Context, turnID string, 
 	// chunks strictly sequentially and the end-of-turn Deliver call only
 	// starts after the whole reasoning loop (and thus every chunk) is done.
 	stopChan := a.bargeIn.startPlayback()
-	defer a.bargeIn.endPlayback()
+	defer a.bargeIn.endPlayback(stopChan)
 	a.lifecycle.transitionTo(voiceLifecyclePlaying)
 
 	onFirstFrame := func() {
