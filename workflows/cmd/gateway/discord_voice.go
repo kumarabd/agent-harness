@@ -59,6 +59,26 @@ const voiceUtteranceSilenceFrames = 35
 // the same way), just its published tuning value.
 const voiceUtteranceMinSpeechFrames = 13
 
+// voiceUtteranceEOTGraceFrames — docs/components/gateway/discord-voice.md's
+// "In Progress: Turn-Taking Model": the shortest silence worth even asking
+// the EOT sidecar about. 10 frames (200ms), matching LiveKit's own real
+// `MIN_SILENCE_DURATION_MS` reference constant (base.py) — "the minimum VAD
+// silence the audio EOT detector needs before it sends an inference
+// request" for the exact same reason here: a natural mid-sentence breath is
+// itself well under this, so asking any sooner would mostly just be asking
+// the model to classify silence it hasn't actually decided is a pause yet.
+const voiceUtteranceEOTGraceFrames = 10
+
+// voiceUtteranceEOTCheckIntervalFrames throttles how often predict() is
+// actually called once past the grace period — every silent frame would be
+// a real gRPC call every 20ms for up to (voiceUtteranceSilenceFrames -
+// voiceUtteranceEOTGraceFrames) frames per utterance tail; every 5th frame
+// (100ms) cuts that ~5x while staying well under what a human would
+// perceive as added delay. A real, reasoned throttle, not a tuned value —
+// same "real starting point, not tuned" category as every other numeric
+// constant in this file.
+const voiceUtteranceEOTCheckIntervalFrames = 5
+
 // voiceState tracks this Gateway replica's own live voice connections —
 // in-memory only, not Postgres: gateway_connection_leases is the durable
 // record of who currently holds each connection (docs/components/gateway.md's
@@ -333,6 +353,21 @@ type speakerBuffer struct {
 	// before this existed).
 	speechFrames     int
 	pendingSpeechPCM []int16
+	// startedDuringPlayback is captured once, at the exact moment this
+	// utterance is confirmed (the same promotion point that sets speech
+	// frames/pcm above), not re-checked at flush time — bargeIn.isPlaying()
+	// answers "is something playing right now," and by flush time playback
+	// has usually already been preempted by this very utterance's own
+	// signalSpeech() call, so checking then would almost always read false
+	// regardless of what was actually true when the user started talking.
+	// voice_backchannel.go's own comment has the real bug this closes.
+	startedDuringPlayback bool
+	// eotFailureLogged suppresses repeat log lines for one utterance's
+	// silence tail — the EOT sidecar's own predict() is polled a handful of
+	// times per utterance (see voiceUtteranceEOTCheckIntervalFrames), and an
+	// unreachable sidecar would otherwise log identically on every one of
+	// them. Reset to false on flush, next to the other per-utterance fields.
+	eotFailureLogged bool
 	// vad is one instance per speaker, not shared across the connection —
 	// required for Silero (voice_vad_silero.go), whose ONNX model carries
 	// real per-stream RNN state that must not mix between independent
@@ -385,6 +420,22 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 		sttFactory = func() *whisperLiveSession { return newWhisperLiveSession(url) }
 	}
 
+	// eot — one shared client for the whole connection, not one per speaker:
+	// voice_eot.go's own comment has the reasoning (every call is a fresh,
+	// independent classification, no per-speaker state to protect, unlike
+	// vadFactory above). Reuses vadSidecarURL() directly rather than a
+	// separate env var/Helm value — the EOT service is colocated on the same
+	// sidecar process/port as Silero VAD (server.py's own doc comment), so
+	// there's only one real target to configure. nil (not a client that
+	// always errors) when unconfigured, checked directly below the same way
+	// sttFactory is — the fixed voiceUtteranceSilenceFrames timeout is
+	// exactly what already runs when this is nil, so "unconfigured" needs no
+	// separate code path of its own.
+	var eot *eotClient
+	if url := vadSidecarURL(); url != "" {
+		eot = newEOTClient(url)
+	}
+
 	var mu sync.Mutex
 	ssrcToUser := make(map[uint32]string)
 	buffers := make(map[uint32]*speakerBuffer)
@@ -406,8 +457,11 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 		userID := ssrcToUser[ssrc]
 		pcm := buf.pcm
 		stt := buf.stt
+		startedDuringPlayback := buf.startedDuringPlayback
 		buf.pcm = nil
 		buf.silenceFrames = 0
+		buf.startedDuringPlayback = false
+		buf.eotFailureLogged = false
 		lifecycle.transitionTo(voiceLifecycleProcessing)
 
 		go func() {
@@ -452,6 +506,21 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 				// (not silent) so real usage can inform whether
 				// voiceFillerWords' set needs extending later.
 				log.Printf("discord-voice: filtered filler-only transcript %q, no turn started", text)
+				lifecycle.transitionTo(voiceLifecycleListening)
+				return
+			}
+			if startedDuringPlayback && isBackchannelOnly(text) {
+				// voice_backchannel.go's own comment has the full reasoning
+				// — this is the real bug a live test run surfaced: the user
+				// said "Yeah." while the bot was still talking, it wasn't
+				// treated as a backchannel, and the dispatched turn came
+				// back completely empty. Unlike isFillerOnly above, this
+				// check is context-gated: the exact same transcript ("yeah")
+				// said when the bot was NOT playing is a real one-word
+				// answer, not a backchannel, and must reach submitMessageEvent
+				// like any other utterance — startedDuringPlayback is what
+				// tells the two cases apart.
+				log.Printf("discord-voice: filtered backchannel-during-playback transcript %q, no turn started", text)
 				lifecycle.transitionTo(voiceLifecycleListening)
 				return
 			}
@@ -563,6 +632,12 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 					// clipped by the frames spent confirming it, then start
 					// acting on it exactly like the already-confirmed case
 					// above would.
+					//
+					// startedDuringPlayback is captured here, at confirmation
+					// time — voice_backchannel.go's own comment on
+					// speakerBuffer has the reasoning for why here and not at
+					// flush time.
+					buf.startedDuringPlayback = bargeIn.isPlaying()
 					bargeIn.signalSpeech()
 					lifecycle.transitionTo(voiceLifecycleSpeaking)
 					buf.pcm = append(buf.pcm, buf.pendingSpeechPCM...)
@@ -572,10 +647,33 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 				}
 
 			case len(buf.pcm) > 0:
-				// Confirmed utterance, now silent — unchanged end-of-
-				// utterance timeout.
+				// Confirmed utterance, now silent.
+				// voiceUtteranceSilenceFrames stays as a hard, fail-OPEN
+				// ceiling: reached either when eot isn't configured for this
+				// deployment at all, or when the model never confidently
+				// signals "done" before the ceiling — an unreachable EOT
+				// sidecar degrades this specific decision back to exactly
+				// the fixed timer it used to always be, not a torn-down
+				// connection (contrast the VAD sidecar's own fail-loud
+				// teardown above: misclassifying real speech as silence is a
+				// much costlier mistake than getting FLUSH TIMING wrong).
 				buf.silenceFrames++
-				if buf.silenceFrames >= voiceUtteranceSilenceFrames {
+				ended := buf.silenceFrames >= voiceUtteranceSilenceFrames
+				if !ended && eot != nil &&
+					buf.silenceFrames >= voiceUtteranceEOTGraceFrames &&
+					(buf.silenceFrames-voiceUtteranceEOTGraceFrames)%voiceUtteranceEOTCheckIntervalFrames == 0 {
+					mono16k := downmixResample16kMonoInt16(buf.pcm)
+					probability, eotErr := eot.predict(context.Background(), mono16k)
+					if eotErr != nil {
+						if !buf.eotFailureLogged {
+							log.Printf("discord-voice: EOT sidecar call failed, falling back to fixed timeout: %v", eotErr)
+							buf.eotFailureLogged = true
+						}
+					} else if probability >= eotThreshold {
+						ended = true
+					}
+				}
+				if ended {
 					flush(pkt.SSRC, buf)
 				}
 

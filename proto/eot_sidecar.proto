@@ -1,0 +1,46 @@
+// docs/components/gateway/discord-voice.md's "In Progress: Turn-Taking
+// Model" — the contract between Gateway (Go, workflows/cmd/gateway) and the
+// same vad-sidecar process that already serves Silero VAD (vad-sidecar/),
+// extended to also serve LiveKit's turn-detector v1-mini (an audio-native
+// end-of-turn model, self-hosted, CPU-only ONNX). Colocated as a SECOND
+// gRPC service on the existing sidecar rather than a new container/pod —
+// same "one same-pod process, no new resource footprint" reasoning that
+// already justified colocating Silero there.
+//
+// Stateless-over-the-wire, unlike VAD: the model's own rolling window is
+// fixed-size (EOT_MAX_SAMPLES, 19200 samples = 1.2s @ 16kHz) and the caller
+// already owns the accumulated utterance buffer (speakerBuffer.pcm) — there
+// is no per-speaker recurrent state to carry between calls the way Silero's
+// RNN state is. Each call is a fresh, independent classification of
+// whatever trailing window of audio the caller sends.
+syntax = "proto3";
+
+package eotsidecar;
+
+option go_package = "agent-harness/workflows/internal/eotpb";
+
+service EOT {
+  // Predict scores one utterance-so-far window and returns the model's
+  // probability that the speaker has finished their turn.
+  rpc Predict(PredictRequest) returns (PredictResponse);
+}
+
+message PredictRequest {
+  // Raw int16 PCM, little-endian, mono, 16kHz — packed as bytes (not
+  // `repeated int32`) for the same per-element-overhead reason
+  // vad_sidecar.proto's own ClassifyRequest packs its float32 fields.
+  // Exactly EOT_MAX_SAMPLES (19200) samples — a caller with less than a
+  // full window's worth of real audio zero-pads at the FRONT (oldest end),
+  // matching the model's own rolling-buffer semantics (most recent audio
+  // last) — verified against real audio this way, see the doc's own Notes
+  // Log for the exact real-sample results this produced.
+  bytes pcm = 1;
+}
+
+message PredictResponse {
+  // The model's raw end-of-turn probability — thresholding (a real,
+  // per-language calibrated default, not invented here — see
+  // voice_eot.go's own comment) is the Go client's job, not this
+  // service's; this stays a pure, uninterpreted score.
+  float probability = 1;
+}

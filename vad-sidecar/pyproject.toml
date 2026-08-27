@@ -1,7 +1,7 @@
 [project]
 name = "vad-sidecar"
 version = "0.1.0"
-description = "Silero VAD classification sidecar for the Go Gateway — docs/components/gateway/discord-voice.md's 'Resolved: Silero VAD'. Stateless-over-the-wire: the caller (Gateway) holds per-speaker model state and passes it with every request; this process holds no per-connection state at all."
+description = "Silero VAD + LiveKit turn-detector v1-mini sidecar for the Go Gateway — docs/components/gateway/discord-voice.md's 'Resolved: Silero VAD' and 'In Progress: Turn-Taking Model'. Stateless-over-the-wire for both: the caller (Gateway) holds any per-speaker state and passes what it needs with every request; this process holds no per-connection state at all."
 requires-python = ">=3.10"
 dependencies = [
     # Bundles a real Silero VAD ONNX export + a thin loader — no manual
@@ -10,6 +10,14 @@ dependencies = [
     "silero-vad>=5.1,<6",
     "onnxruntime>=1.19,<2",
     "numpy>=1.26,<3",
+    # LiveKit's own real, self-hosted local-inference package — the same
+    # native ONNX runtime LiveKit Agents itself uses for its "v1-mini"
+    # local-fallback path, not a reimplementation. CPU-only, no LiveKit
+    # account/API key/network call required (verified directly, see
+    # vad_sidecar/eot_model.py's own comment). Platform wheels published for
+    # cp310-cp314 on macOS/Linux/Windows — covers this Dockerfile's
+    # python:3.12-slim base with no source build.
+    "livekit-local-inference>=0.2.5,<1",
     # gRPC server + the standard grpc.health.v1 health-check protocol
     # (vad_sidecar/server.py) — the wire protocol between this sidecar and
     # its Go client (workflows/cmd/gateway/voice_vad_silero.go), per
