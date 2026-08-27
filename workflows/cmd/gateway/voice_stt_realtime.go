@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -67,12 +68,32 @@ type wlServerMessage struct {
 type whisperLiveSession struct {
 	url string
 
-	mu            sync.Mutex
-	conn          *websocket.Conn
-	ready         bool
-	segments      []wlSegment
-	consumedCount int // how many of segments[] a prior utterance already claimed
-	err           error
+	mu       sync.Mutex
+	conn     *websocket.Conn
+	ready    bool
+	segments []wlSegment
+	// lastConsumedEnd — real, live bug fixed 2026-08-27: this used to be a
+	// plain index (consumedCount) into segments[], which only stays valid
+	// if segments[] only ever grows. It doesn't: the handshake's own
+	// send_last_n_segments (10) makes the server send a SLIDING WINDOW of
+	// the last 10 segments, and readLoop's own `s.segments = msg.Segments`
+	// is a full replace, not an append — once a session produces more than
+	// 10 real segments, len(segments) plateaus at 10 forever, and an index
+	// already sitting at 10 from a prior call permanently satisfies
+	// `consumedCount >= len(segments)` from then on. consumeNewText()
+	// silently returned "" for the rest of that session's lifetime — no
+	// error anywhere, just every later utterance quietly falling back to
+	// batch STT, forever, confirmed live: gateway logs during a real
+	// "goes dumb after about a minute" report showed zero WhisperLive
+	// reconnects and zero errors of any kind, exactly what this bug
+	// predicts (nothing ever resets consumedCount within one long-lived
+	// session). Tracking progress by a segment's own End timestamp instead
+	// survives the sliding window intact — a segment's End doesn't move
+	// once the server has emitted it, regardless of where it sits in
+	// whatever window gets echoed back. -1 means nothing consumed yet
+	// (0.0 is a real, valid End for a genuine first segment).
+	lastConsumedEnd float64
+	err             error
 }
 
 func newWhisperLiveSession(url string) *whisperLiveSession {
@@ -133,7 +154,7 @@ func (s *whisperLiveSession) connect() {
 	// consumeNewText() call and a same-instant disconnect, not anything
 	// meaningful in normal operation.
 	s.segments = nil
-	s.consumedCount = 0
+	s.lastConsumedEnd = -1
 	s.err = nil
 	s.ready = false
 	s.mu.Unlock()
@@ -211,23 +232,44 @@ func (s *whisperLiveSession) sendAudio(mono16k []float32) {
 // a fresh batch transcription request. Completed and still-in-progress
 // segments are joined the same way — by the time the silence timeout
 // fires, the trailing in-progress segment is normally already stable.
-// Real, un-tuned risk: send_last_n_segments (10, the handshake above)
-// bounds how much history the server retains — if consumeNewText is ever
-// called this far behind, older segments could already be gone. Not
-// expected in practice (the caller consumes right as each utterance ends).
+//
+// Walks the CURRENT sliding window by each segment's own End timestamp,
+// not by a remembered array index — lastConsumedEnd's own comment has the
+// real bug this replaces. A segment whose End fails to parse is skipped
+// entirely (not emitted, doesn't advance lastConsumedEnd) rather than
+// emitted unconditionally — WhisperLive's own real, verified wire shape
+// always sends a numeric End, so this is only a hypothetical guard, but
+// emitting an unparseable segment on every single call for as long as it
+// sits in the window (nothing would ever mark it "seen") would trade one
+// permanent-silence bug for a permanent-duplicate one.
+//
+// Real, un-tuned risk unchanged from before this fix: send_last_n_segments
+// (10, the handshake above) bounds how much history the server retains —
+// if consumeNewText is ever called this far behind a genuinely fast
+// stream of segments, the oldest unconsumed ones could already have aged
+// out of the window before being read at all. Not expected in practice
+// (the caller consumes right as each utterance ends), and a real
+// improvement over the old bug either way: aging out is a rare, bounded
+// loss of stale text, not a permanent full stop for the rest of the
+// session.
 func (s *whisperLiveSession) consumeNewText() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.consumedCount >= len(s.segments) {
-		return ""
-	}
-	parts := make([]string, 0, len(s.segments)-s.consumedCount)
-	for _, seg := range s.segments[s.consumedCount:] {
+	var parts []string
+	newLastEnd := s.lastConsumedEnd
+	for _, seg := range s.segments {
+		end, err := strconv.ParseFloat(seg.End, 64)
+		if err != nil || end <= s.lastConsumedEnd {
+			continue
+		}
 		if t := strings.TrimSpace(seg.Text); t != "" {
 			parts = append(parts, t)
 		}
+		if end > newLastEnd {
+			newLastEnd = end
+		}
 	}
-	s.consumedCount = len(s.segments)
+	s.lastConsumedEnd = newLastEnd
 	return strings.TrimSpace(strings.Join(parts, " "))
 }
 
