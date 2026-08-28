@@ -64,7 +64,21 @@ func (s *server) startDiscordPlatform(ctx context.Context, botToken, holderID st
 		// long-running goroutines' lifetime from it, not from
 		// context.Background(), so a voice connection actually gets torn
 		// down on SIGTERM instead of being orphaned.
-		s.discordVoiceInteractionCreate(ctx, session, ic, connectionID)
+		//
+		// Two interaction categories today, dispatched by type: slash
+		// commands (/join, /leave — voice) and message components (buttons
+		// on a mid-turn user-input prompt — docs/components/user-input.md,
+		// "Resolved: Response-Routing for Discord Text"). A future third
+		// category adds a new dispatch case here, not a second AddHandler
+		// call — discordgo delivers every interaction to every registered
+		// handler, so multiple handlers would each need their own type
+		// filter.
+		switch ic.Type {
+		case discordgo.InteractionApplicationCommand:
+			s.discordVoiceInteractionCreate(ctx, session, ic, connectionID)
+		case discordgo.InteractionMessageComponent:
+			s.discordUserInputInteractionCreate(ctx, session, ic, connectionID)
+		}
 	})
 	// connectionID (botUser.ID, resolved above via REST) doubles as the
 	// application id here — true for a standard single-application bot

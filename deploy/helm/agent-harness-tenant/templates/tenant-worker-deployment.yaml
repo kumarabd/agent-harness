@@ -1,6 +1,25 @@
 {{- if .Values.llm.enabled -}}
-{{- if not .Values.llm.openai.model }}
-{{- fail "llm.openai.model is required when llm.enabled=true — the provider's model catalog isn't known ahead of time, so there's no safe default to guess." }}
+{{- /* docs/components/model-registry.md — no cross-tier fallback, no shared provider default. Require at least one tier to be set (rely on the Python-side error to name any specific unset tier that a call resolves to), and require any tier that IS set to be fully configured (provider + model + apiKey; also baseURL for provider=openai). */ -}}
+{{- if and (not .Values.llm.tiers.fast.model) (not .Values.llm.tiers.medium.model) (not .Values.llm.tiers.expert.model) }}
+{{- fail "at least one of llm.tiers.{fast,medium,expert}.model must be set when llm.enabled=true — every configured tier owns its own provider identity (2026-08-28), and no cross-tier fallback exists." }}
+{{- end }}
+{{- $known := list "openai" "anthropic" }}
+{{- range $tier := list "fast" "medium" "expert" }}
+{{- $t := index $.Values.llm.tiers $tier }}
+{{- if $t.model }}
+{{- if not $t.provider }}
+{{- fail (printf "llm.tiers.%s.provider is required when llm.tiers.%s.model is set — must be one of \"openai\" or \"anthropic\". See docs/components/model-registry.md." $tier $tier) }}
+{{- end }}
+{{- if not (has $t.provider $known) }}
+{{- fail (printf "llm.tiers.%s.provider=%q is not supported — must be one of \"openai\" or \"anthropic\"." $tier $t.provider) }}
+{{- end }}
+{{- if not $t.apiKey }}
+{{- fail (printf "llm.tiers.%s.apiKey is required when llm.tiers.%s.model is set — every configured tier owns its own credential." $tier $tier) }}
+{{- end }}
+{{- if and (eq $t.provider "openai") (not $t.baseURL) }}
+{{- fail (printf "llm.tiers.%s.baseURL is required when llm.tiers.%s.provider=openai — there's no single canonical endpoint. (provider=anthropic accepts an empty baseURL — the SDK has its own default.)" $tier $tier) }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- end }}
 apiVersion: apps/v1
@@ -77,81 +96,49 @@ spec:
           {{- end }}
           {{- if .Values.llm.enabled }}
             # Real ModelCall calls only (activities/activities/llm.py) —
-            # turns with a _test_scripted_responses fixture never touch this.
-            - name: PIONEER_BASE_URL
-              value: {{ .Values.llm.openai.baseURL | quote }}
-            - name: PIONEER_MODEL
-              value: {{ .Values.llm.openai.model | quote }}
-            - name: PIONEER_MAX_TOKENS
-              value: {{ .Values.llm.openai.maxTokens | quote }}
-            - name: PIONEER_API_KEY
+            # turns with a _test_scripted_responses fixture never touch
+            # these. Every configured tier owns its own provider triple
+            # (model + apiKey + baseURL) and optional tuning knobs
+            # (maxTokens, contextWindow, pricing). docs/components/
+            # model-registry.md. Rendered per-tier in a loop below;
+            # `apiKey` comes from templates/llm-secret.yaml (one secret
+            # key per configured tier).
+            {{- range $tier := list "fast" "medium" "expert" }}
+            {{- $t := index $.Values.llm.tiers $tier }}
+            {{- if $t.model }}
+            {{- $upper := upper $tier }}
+            - name: LANGUAGE_{{ $upper }}_PROVIDER
+              value: {{ $t.provider | quote }}
+            - name: LANGUAGE_{{ $upper }}_MODEL
+              value: {{ $t.model | quote }}
+            {{- if $t.baseURL }}
+            - name: LANGUAGE_{{ $upper }}_BASE_URL
+              value: {{ $t.baseURL | quote }}
+            {{- end }}
+            - name: LANGUAGE_{{ $upper }}_MAX_TOKENS
+              value: {{ $t.maxTokens | default 4096 | quote }}
+            - name: LANGUAGE_{{ $upper }}_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "agent-harness.fullname" . }}-llm
-                  key: PIONEER_API_KEY
-            # docs/components/model-registry.md — only rendered when set, so
-            # a tenant that hasn't configured per-tier models keeps
-            # today's exact single-model behavior (model_registry.py's own
-            # fallback to PIONEER_MODEL, not duplicated here).
-            {{- if .Values.llm.tiers.fast.model }}
-            - name: LANGUAGE_FAST_MODEL
-              value: {{ .Values.llm.tiers.fast.model | quote }}
+                  name: {{ include "agent-harness.fullname" $ }}-llm
+                  key: LANGUAGE_{{ $upper }}_API_KEY
+            {{- if $t.contextWindow }}
+            - name: LANGUAGE_{{ $upper }}_CONTEXT_WINDOW
+              value: {{ $t.contextWindow | quote }}
             {{- end }}
-            {{- if .Values.llm.tiers.fast.contextWindow }}
-            - name: LANGUAGE_FAST_CONTEXT_WINDOW
-              value: {{ .Values.llm.tiers.fast.contextWindow | quote }}
+            {{- if $t.costPerMillionTokens.input }}
+            - name: LANGUAGE_{{ $upper }}_INPUT_COST_PER_MILLION_TOKENS
+              value: {{ $t.costPerMillionTokens.input | quote }}
             {{- end }}
-            {{- if .Values.llm.tiers.fast.costPerMillionTokens.input }}
-            - name: LANGUAGE_FAST_INPUT_COST_PER_MILLION_TOKENS
-              value: {{ .Values.llm.tiers.fast.costPerMillionTokens.input | quote }}
+            {{- if $t.costPerMillionTokens.output }}
+            - name: LANGUAGE_{{ $upper }}_OUTPUT_COST_PER_MILLION_TOKENS
+              value: {{ $t.costPerMillionTokens.output | quote }}
             {{- end }}
-            {{- if .Values.llm.tiers.fast.costPerMillionTokens.output }}
-            - name: LANGUAGE_FAST_OUTPUT_COST_PER_MILLION_TOKENS
-              value: {{ .Values.llm.tiers.fast.costPerMillionTokens.output | quote }}
+            {{- if $t.costPerMillionTokens.cachedInput }}
+            - name: LANGUAGE_{{ $upper }}_CACHED_INPUT_COST_PER_MILLION_TOKENS
+              value: {{ $t.costPerMillionTokens.cachedInput | quote }}
             {{- end }}
-            {{- if .Values.llm.tiers.fast.costPerMillionTokens.cachedInput }}
-            - name: LANGUAGE_FAST_CACHED_INPUT_COST_PER_MILLION_TOKENS
-              value: {{ .Values.llm.tiers.fast.costPerMillionTokens.cachedInput | quote }}
             {{- end }}
-            {{- if .Values.llm.tiers.medium.model }}
-            - name: LANGUAGE_MEDIUM_MODEL
-              value: {{ .Values.llm.tiers.medium.model | quote }}
-            {{- end }}
-            {{- if .Values.llm.tiers.medium.contextWindow }}
-            - name: LANGUAGE_MEDIUM_CONTEXT_WINDOW
-              value: {{ .Values.llm.tiers.medium.contextWindow | quote }}
-            {{- end }}
-            {{- if .Values.llm.tiers.medium.costPerMillionTokens.input }}
-            - name: LANGUAGE_MEDIUM_INPUT_COST_PER_MILLION_TOKENS
-              value: {{ .Values.llm.tiers.medium.costPerMillionTokens.input | quote }}
-            {{- end }}
-            {{- if .Values.llm.tiers.medium.costPerMillionTokens.output }}
-            - name: LANGUAGE_MEDIUM_OUTPUT_COST_PER_MILLION_TOKENS
-              value: {{ .Values.llm.tiers.medium.costPerMillionTokens.output | quote }}
-            {{- end }}
-            {{- if .Values.llm.tiers.medium.costPerMillionTokens.cachedInput }}
-            - name: LANGUAGE_MEDIUM_CACHED_INPUT_COST_PER_MILLION_TOKENS
-              value: {{ .Values.llm.tiers.medium.costPerMillionTokens.cachedInput | quote }}
-            {{- end }}
-            {{- if .Values.llm.tiers.expert.model }}
-            - name: LANGUAGE_EXPERT_MODEL
-              value: {{ .Values.llm.tiers.expert.model | quote }}
-            {{- end }}
-            {{- if .Values.llm.tiers.expert.contextWindow }}
-            - name: LANGUAGE_EXPERT_CONTEXT_WINDOW
-              value: {{ .Values.llm.tiers.expert.contextWindow | quote }}
-            {{- end }}
-            {{- if .Values.llm.tiers.expert.costPerMillionTokens.input }}
-            - name: LANGUAGE_EXPERT_INPUT_COST_PER_MILLION_TOKENS
-              value: {{ .Values.llm.tiers.expert.costPerMillionTokens.input | quote }}
-            {{- end }}
-            {{- if .Values.llm.tiers.expert.costPerMillionTokens.output }}
-            - name: LANGUAGE_EXPERT_OUTPUT_COST_PER_MILLION_TOKENS
-              value: {{ .Values.llm.tiers.expert.costPerMillionTokens.output | quote }}
-            {{- end }}
-            {{- if .Values.llm.tiers.expert.costPerMillionTokens.cachedInput }}
-            - name: LANGUAGE_EXPERT_CACHED_INPUT_COST_PER_MILLION_TOKENS
-              value: {{ .Values.llm.tiers.expert.costPerMillionTokens.cachedInput | quote }}
             {{- end }}
           {{- end }}
           {{- if .Values.agentBrain.enabled }}

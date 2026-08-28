@@ -28,6 +28,16 @@ var toolActivityOptions = map[string]toolTiming{
 		HeartbeatTimeout:    10 * time.Second,
 		StartToCloseTimeout: 5 * time.Minute,
 	},
+	// merge_subagent_output: Tier B, same tuning as shell_exec — also
+	// filesystem-touching, chunkable per-file work on the same PV, holds a
+	// session-directory lease the same way, needs the same heartbeat cadence
+	// for real cancellation delivery mid-merge. See
+	// docs/components/session-filesystem.md, "Resolved: Subagent Merge-Back
+	// Mechanics."
+	"merge_subagent_output": {
+		HeartbeatTimeout:    10 * time.Second,
+		StartToCloseTimeout: 5 * time.Minute,
+	},
 }
 
 // defaultToolTiming is today's existing local-demo tuning (see the comment

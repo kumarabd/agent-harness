@@ -38,7 +38,7 @@ it):
 | `../interrupt-initial.json` + `../interrupt-followup.json` | scripted | Real cooperative cancellation + signal coalescing. |
 | `../max-iterations.json` | scripted | Loop halts exactly at `max_iterations=20`. |
 | `isolated/tool-call-retry.json` | scripted | A tool call naming an unregistered tool genuinely produces `status='error'` (`tool_call.py`'s real "unknown tool" path, not simulated) and `turn.go`'s `retries` counter increments — without exhausting `max_retries=5`. |
-| `isolated/induced-failure.json` | **real, but against a deliberately broken endpoint** | `ModelCall` exhausts `RetryPolicy.MaximumAttempts=3` (escalate-on-retry, fast→medium→expert, all genuinely attempted) → `failTurn` fires → `turns.status='failed'`, a synthetic error message lands in `messages`, `Deliver` sends it. Run with `PIONEER_BASE_URL` pointed at `http://127.0.0.1:1` (see `run.sh`) — real failures, zero API cost. |
+| `isolated/induced-failure.json` | **real, but against a deliberately broken endpoint** | `ModelCall` exhausts `RetryPolicy.MaximumAttempts=3` (escalate-on-retry, fast→medium→expert, all genuinely attempted) → `failTurn` fires → `turns.status='failed'`, a synthetic error message lands in `messages`, `Deliver` sends it. Run with `LANGUAGE_MEDIUM_BASE_URL` pointed at `http://127.0.0.1:1` (see `run.sh`) — real failures, zero API cost. |
 
 ## What this suite does *not* cover
 

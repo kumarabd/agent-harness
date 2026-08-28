@@ -1,0 +1,39 @@
+{
+  "message": {
+    "role": "user",
+    "content": "produce a large JSON blob and describe its shape from the exploration summary"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Generating ~6KB of JSON — a top-level object with two arrays.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": {
+            "command": "python3 -c \"import json; print(json.dumps({'users': [{'id': i, 'name': f'user-{i}', 'active': i%2==0, 'score': i*1.5} for i in range(200)], 'meta': {'source': 'demo', 'total': 200}}, indent=2))\""
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 30 }
+    },
+    {
+      "content": "The exploration_summary.type should be 'json' and shape.kind should be 'object' with keys ['users', 'meta']. Confirming random access via the claim-check path — jq lets me pull a specific record without loading the whole file.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": {
+            "command": "ls .claim-check/*.stdout.log | head -1 | xargs -I {} python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d[\"users\"][42]); print(\"meta:\", d[\"meta\"])' {}"
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 130, "output_tokens": 30 }
+    },
+    {
+      "content": "JSON exploration summary confirmed — schema described up front by the summary, random access via the claim-check path works.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 150, "output_tokens": 20 }
+    }
+  ]
+}

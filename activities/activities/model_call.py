@@ -27,7 +27,7 @@ import time
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from . import ids, llm, model_registry, permissions
+from . import ids, llm, llm_client, model_registry, permissions
 from .types import ModelCallInput, ModelCallOutput, ToolCallRef, Usage
 
 logger = logging.getLogger(__name__)
@@ -44,10 +44,16 @@ MODEL_CALL_CHUNK_SIGNAL = "ModelCallChunk"
 
 
 class ModelCallActivity:
-    """Bound-method activity so the Postgres pool, OpenAI client, and
-    Temporal client (all created once in tenant_worker.py) are injected per-
-    process rather than held as module-global state — the idiomatic way to
-    give a Temporal Python activity shared resources without globals.
+    """Bound-method activity so the Postgres pool and Temporal client
+    (both created once in tenant_worker.py) are injected per-process
+    rather than held as module-global state — the idiomatic way to give
+    a Temporal Python activity shared resources without globals.
+
+    The AsyncOpenAI client is NOT injected here anymore (2026-08-28,
+    per-tier provider revision): it's resolved per call via
+    llm_client.get_client(model_config), so different tiers can genuinely
+    point at different providers. The cache inside llm_client keeps the
+    connection-pool benefit for the common single-provider case.
 
     temporal_client is used only for the streaming path below (signaling
     the parent TurnWorkflow as chunks become ready) — an activity has no
@@ -55,9 +61,8 @@ class ModelCallActivity:
     is the documented pattern (an activity using its own client, distinct
     from the worker's own gRPC connection to the server for task polling)."""
 
-    def __init__(self, pool, openai_client, temporal_client):
+    def __init__(self, pool, temporal_client):
         self._pool = pool
-        self._openai_client = openai_client
         self._temporal_client = temporal_client
 
     @activity.defn(name="ModelCall")
@@ -132,10 +137,22 @@ class ModelCallActivity:
                 # whole response) — streaming for any other platform would
                 # just be wasted turn_deliveries writes and a signal nobody
                 # ever receives.
+                # Provider is now per-tier (2026-08-28) — resolved from
+                # model_config's own provider/base_url/api_key, cached by
+                # llm_client so a shared-provider deployment still reuses
+                # one HTTP connection pool across tiers. Any provider
+                # (OpenAI-compatible, Anthropic) is dispatched via the
+                # Provider ABC — no shape awareness leaks into this call
+                # site.
+                provider = llm_client.get_provider(model_config)
                 if input.context_seq == 0 and platform in ("discord", "discord-voice"):
-                    real = await self._call_model_streaming_with_delivery(input.turn_id, conversation, model_config.model)
+                    real = await self._call_model_streaming_with_delivery(
+                        input.turn_id, conversation, provider, model_config.model, model_config.max_tokens,
+                    )
                 else:
-                    real = await llm.call_model(self._openai_client, conversation, model_config.model)
+                    real = await provider.call_model(
+                        conversation, model_config.model, model_config.max_tokens, llm.TOOLS_SCHEMA,
+                    )
                 histogram.record(time.monotonic() - started)
                 content, raw_tool_calls, usage = real.content, real.raw_tool_calls, real.usage
                 next_hint_modality, next_hint_tier = real.next_hint_modality, real.next_hint_tier
@@ -237,7 +254,7 @@ class ModelCallActivity:
                 next_hint_tier=next_hint_tier,
             )
 
-    async def _call_model_streaming_with_delivery(self, turn_id: str, conversation: list[dict], model: str):
+    async def _call_model_streaming_with_delivery(self, turn_id: str, conversation: list[dict], provider, model: str, max_tokens: int):
         """Wraps llm.call_model_streaming with this feature's two other real
         pieces (docs/components/gateway.md's "Resolved: ModelCall
         Streaming"): writing each chunk to turn_deliveries and signaling
@@ -285,7 +302,7 @@ class ModelCallActivity:
             # exactly what makes the retry-safety check above correct.
             activity.heartbeat(seq)
 
-        return await llm.call_model_streaming(self._openai_client, conversation, model, on_chunk)
+        return await provider.call_model_streaming(conversation, model, max_tokens, llm.TOOLS_SCHEMA, on_chunk)
 
 def _resolve_gating(tool_name: str, arguments: dict) -> tuple[bool, str, str]:
     """docs/components/user-input.md — the {server, tool} identity being

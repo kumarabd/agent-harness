@@ -1,0 +1,13 @@
+{
+  "message": {
+    "role": "user",
+    "content": "hello — exercise the Anthropic provider path"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Hello. This scenario is scripted (fixture-only) and doesn't actually hit any provider — the fixture short-circuit in model_call.py runs before the provider is even resolved. To exercise the real Anthropic provider end-to-end, delete this scenario's rows from _test_scripted_responses and configure a tier with LANGUAGE_MEDIUM_PROVIDER=anthropic + LANGUAGE_MEDIUM_MODEL=claude-3-5-sonnet-... + LANGUAGE_MEDIUM_API_KEY=sk-ant-... (BASE_URL is optional for anthropic). See docs/components/model-registry.md.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 100, "output_tokens": 40 }
+    }
+  ]
+}

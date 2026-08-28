@@ -20,15 +20,22 @@ deploy/docker/tenant-worker.Dockerfile and deploy/helm/agent-harness-tenant:
                          at the tenant PV's session mount (/sessions in the
                          Helm chart); defaults to /tmp/agent-harness-sessions
                          for local dev. See tools.py.
-    PIONEER_API_KEY      Required for real ModelCall calls (llm.py) — Pioneer,
-                         an OpenAI-API-compatible provider (openai SDK's
-                         base_url override). Fixture-only turns (a row in
-                         _test_scripted_responses) never need it.
-    PIONEER_BASE_URL     Default: https://api.pioneer.ai/v1. See llm.py.
-    PIONEER_MODEL        Required for real calls — no default (Pioneer's
-                         model catalog isn't known ahead of time; guessing
-                         one would likely just be wrong). See llm.py.
-    PIONEER_MAX_TOKENS   Default: 4096. See llm.py.
+    Model + provider config is entirely PER-TIER now — see
+    docs/components/model-registry.md. Each tier the deployment actually
+    uses (fast/medium/expert) must set its own full triple:
+        LANGUAGE_<TIER>_MODEL         Required.
+        LANGUAGE_<TIER>_API_KEY       Required.
+        LANGUAGE_<TIER>_BASE_URL      Required.
+        LANGUAGE_<TIER>_MAX_TOKENS    Optional, defaults to 4096.
+        LANGUAGE_<TIER>_CONTEXT_WINDOW           Optional, defaults to 128000.
+        LANGUAGE_<TIER>_{INPUT,OUTPUT,CACHED_INPUT}_COST_PER_MILLION_TOKENS
+                                      Optional, defaults to 0 (unknown, not free).
+    There is no cross-tier fallback and no process-wide LLM_PROVIDER_*
+    defaults (both removed 2026-08-28). Fixture-only turns (a row in
+    _test_scripted_responses) never touch any of these. The AsyncOpenAI
+    client is cached per (base_url, api_key) pair by llm_client.py, so a
+    deployment where all three tiers point at the same provider still
+    gets one shared HTTP connection pool for free.
     METRICS_BIND_ADDRESS Host:port the Prometheus exposition endpoint listens
                          on. Default: 0.0.0.0:9090. See
                          docs/components/budget-guardrails.md, "Resolved:
@@ -62,12 +69,11 @@ import asyncio
 import logging
 import os
 
-from openai import AsyncOpenAI
 from temporalio.client import Client
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
-from . import shell_hub
+from . import llm_client, shell_hub
 from .compress_context import CompressContextActivity
 from .db import create_pool
 from .deliver import DeliverActivity
@@ -76,6 +82,7 @@ from .insert_message import InsertMessageActivity
 from .model_call import ModelCallActivity
 from .persist import PersistActivity
 from .seed_child_session import SeedChildSessionContextActivity
+from .subagent_manifest import SubagentManifestActivity
 from .tool_call import DenyToolCallActivity, ToolCallActivity
 from .user_input import CloseUserInputActivity, RequestUserInputActivity
 from .write_memory import WriteMemoryActivity
@@ -90,26 +97,15 @@ async def main() -> None:
 
     pool = await create_pool()
     # docs/components/tool-registry.md, "Resolved: Native-Tool Discovery" —
-    # builds shell_hub's in-process zvec index once at startup, same
-    # once-not-per-call rationale as the Postgres pool/OpenAI client here.
+    # builds shell_hub's in-process zvec index once at startup.
     # No-op if shell_hub.CATALOG is empty or EMBEDDING_BASE_URL isn't set.
     await shell_hub.init()
-    # Constructed once and reused, same rationale as the Postgres pool above —
-    # not created per-call, not global state, injected via ModelCallActivity's
-    # constructor. AsyncOpenAI() validates api_key eagerly at construction
-    # (confirmed directly - raises OpenAIError immediately if unset), which
-    # would otherwise crash the whole worker at startup even for pure
-    # fixture-only usage that never needs a real model call at all
-    # (model_call.py's fixture-first branch never calls llm.py). A placeholder
-    # here defers any real failure to actual call time, where a bad/missing
-    # key surfaces the same way any other real API error does.
-    #
-    # Pioneer is OpenAI-API-compatible - same SDK, just pointed at a
-    # different base_url, no separate client library needed.
-    openai_client = AsyncOpenAI(
-        api_key=os.environ.get("PIONEER_API_KEY") or "unset",
-        base_url=os.environ.get("PIONEER_BASE_URL", "https://api.pioneer.ai/v1"),
-    )
+    # AsyncOpenAI clients are no longer constructed here (2026-08-28,
+    # per-tier provider revision) — every activity that needs one
+    # resolves it via llm_client.get_client(model_config), keyed on the
+    # tier's own base_url/api_key. See docs/components/model-registry.md.
+    # The cache in llm_client keeps the connection-pool benefit for the
+    # common case where every configured tier points at the same provider.
 
     # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
     # temporalio's built-in Prometheus support: no new dependency, no
@@ -131,18 +127,19 @@ async def main() -> None:
         client,
         task_queue=task_queue,
         activities=[
-            ModelCallActivity(pool, openai_client, client).__call__,
+            ModelCallActivity(pool, client).__call__,
             ToolCallActivity(pool).__call__,
             InsertMessageActivity(pool).__call__,
             GetMaxTurnSeqActivity(pool).__call__,
             PersistActivity(pool).__call__,
             DeliverActivity(pool).__call__,
             WriteMemoryActivity(pool).__call__,
-            CompressContextActivity(pool, openai_client).__call__,
+            CompressContextActivity(pool).__call__,
             DenyToolCallActivity(pool).__call__,
             RequestUserInputActivity(pool).__call__,
             CloseUserInputActivity(pool).__call__,
             SeedChildSessionContextActivity(pool).__call__,
+            SubagentManifestActivity(pool).__call__,
         ],
     )
     logging.getLogger(__name__).info(
@@ -151,7 +148,7 @@ async def main() -> None:
     try:
         await worker.run()
     finally:
-        await openai_client.close()
+        await llm_client.close_all()
         await pool.close()
 
 

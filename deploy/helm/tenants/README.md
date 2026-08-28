@@ -20,9 +20,14 @@ chart's own default (`"default"`) is a local-dev-only value, not meant to be
 used for a real tenant. Add whatever else differs for that tenant:
 `tenantVolume.accessMode`/`storageClassName` (cluster's available storage
 classes vary), `tenantWorker.replicaCount`/`resources`, `postgres.*`, etc.
-This is also where a real `llm.openai.apiKey` belongs, if this tenant needs
-real LLM calls — never in the chart's own `values.yaml` defaults, which are
-shared by every tenant install.
+This is also where a tenant's real `llm.tiers.<tier>.{model,apiKey,baseURL}`
+triples belong, if this tenant needs real LLM calls — never in the chart's
+own `values.yaml` defaults, which are shared by every tenant install.
+Every configured tier owns its own provider identity
+(`docs/components/model-registry.md`, 2026-08-28); different tiers can
+point at different providers, and there is no cross-tier or shared-default
+fallback, so every tier this tenant actually uses must be configured
+explicitly (all three fields together).
 
 Don't forget the other half of onboarding, which lives outside this
 directory: the tenant's Temporal namespace itself must already exist

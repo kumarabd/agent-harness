@@ -23,12 +23,24 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCENARIOS_DIR="$REPO_ROOT/workflows/scenarios"
 SUITE_DIR="$SCENARIOS_DIR/deep-conversation"
 
-: "${PIONEER_API_KEY:?set PIONEER_API_KEY before running}"
+: "${LANGUAGE_MEDIUM_API_KEY:?set LANGUAGE_MEDIUM_API_KEY before running}"
 : "${AGENT_BRAIN_API_KEY:?set AGENT_BRAIN_API_KEY before running}"
 : "${EMBEDDING_API_KEY:?set EMBEDDING_API_KEY before running}"
 
-PIONEER_BASE_URL_REAL="https://api.inference.crusoecloud.com/v1"
-PIONEER_MODEL="deepseek-ai/DeepSeek-V4-Pro"
+# Per-tier provider + model config via model_registry.py — no cross-tier
+# fallback, no shared provider default, and provider kind is required
+# per tier (docs/components/model-registry.md, 2026-08-28, third
+# revision — real multi-provider abstraction landed). This suite's
+# scenarios all resolve to the default `medium` tier; a scenario that
+# exercised `fast` or `expert` explicitly would need those tiers' own
+# PROVIDER/MODEL/API_KEY/BASE_URL quadruples set too.
+#
+# Crusoe/DeepSeek/Qwen/Groq/OpenRouter/real OpenAI all speak the
+# OpenAI-compatible protocol — provider="openai" covers every one of
+# them; the difference is BASE_URL + MODEL, not the provider ABI.
+LANGUAGE_MEDIUM_PROVIDER="openai"
+LANGUAGE_MEDIUM_BASE_URL_REAL="https://api.inference.crusoecloud.com/v1"
+LANGUAGE_MEDIUM_MODEL="deepseek-ai/DeepSeek-V4-Pro"
 
 cleanup() {
   echo "--- cleanup ---"
@@ -76,8 +88,9 @@ COMMON_ENV=(
   AGENT_BRAIN_BASE_URL=http://localhost:8080
   AGENT_BRAIN_API_KEY="$AGENT_BRAIN_API_KEY"
   AGENT_BRAIN_AGENT_ID=agent-harness
-  PIONEER_MODEL="$PIONEER_MODEL"
-  PIONEER_API_KEY="$PIONEER_API_KEY"
+  LANGUAGE_MEDIUM_PROVIDER="$LANGUAGE_MEDIUM_PROVIDER"
+  LANGUAGE_MEDIUM_MODEL="$LANGUAGE_MEDIUM_MODEL"
+  LANGUAGE_MEDIUM_API_KEY="$LANGUAGE_MEDIUM_API_KEY"
   MCP_HUB_URL=http://localhost:8000
   EMBEDDING_BASE_URL=http://localhost:4000
   EMBEDDING_MODEL=text-embedding-3-small
@@ -93,7 +106,7 @@ start_loop_worker() {
 start_tenant_worker() {
   local base_url="$1"
   (cd "$REPO_ROOT/activities" && source .venv/bin/activate && \
-    env "${COMMON_ENV[@]}" PIONEER_BASE_URL="$base_url" "$@" \
+    env "${COMMON_ENV[@]}" LANGUAGE_MEDIUM_BASE_URL="$base_url" "$@" \
     python3 -m activities.tenant_worker) > /tmp/dc-tenant-worker.log 2>&1 &
   echo $!
 }
@@ -106,7 +119,7 @@ run_scenario() {
 echo "=== Phase 1: main chained session (deep-conv-1) ==="
 LOOP_PID=$(start_loop_worker)
 TENANT_PID=$(env "${COMMON_ENV[@]}" LANGUAGE_MEDIUM_CONTEXT_WINDOW=8000 \
-  bash -c "cd '$REPO_ROOT/activities' && source .venv/bin/activate && env PIONEER_BASE_URL='$PIONEER_BASE_URL_REAL' python3 -m activities.tenant_worker > /tmp/dc-tenant-worker.log 2>&1 & echo \$!")
+  bash -c "cd '$REPO_ROOT/activities' && source .venv/bin/activate && env LANGUAGE_MEDIUM_BASE_URL='$LANGUAGE_MEDIUM_BASE_URL_REAL' python3 -m activities.tenant_worker > /tmp/dc-tenant-worker.log 2>&1 & echo \$!")
 sleep 3
 
 SESSION=deep-conv-1
@@ -131,7 +144,7 @@ pkill -f "activities.tenant_worker" 2>/dev/null || true
 sleep 2
 
 echo "=== Phase 2: isolated scenarios ==="
-TENANT_PID=$(start_tenant_worker "$PIONEER_BASE_URL_REAL")
+TENANT_PID=$(start_tenant_worker "$LANGUAGE_MEDIUM_BASE_URL_REAL")
 sleep 3
 
 run_scenario interrupt-demo "$SCENARIOS_DIR/interrupt-initial.json"

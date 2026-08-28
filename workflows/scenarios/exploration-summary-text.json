@@ -1,0 +1,39 @@
+{
+  "message": {
+    "role": "user",
+    "content": "produce a large log-like text blob and see the exploration summary describe it"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Generating ~6KB of log-like unstructured text — a mix of INFO/WARN/ERROR lines.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": {
+            "command": "python3 -c \"import random; random.seed(0); levels=['INFO','INFO','INFO','WARN','ERROR']; [print(f'2026-08-28T12:00:{i%60:02d} {random.choice(levels)} worker-{i%4} processed request req-{i} in {random.randint(2,120)}ms') for i in range(120)]\""
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 30 }
+    },
+    {
+      "content": "exploration_summary.type should be 'text' with line_count/word_count populated; if a model is configured, a natural-language summary is also present naming this as log output. Counting the ERROR lines directly on the claim-check file for a specific answer beyond what the summary tells me.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": {
+            "command": "grep -c ERROR .claim-check/*.stdout.log"
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 130, "output_tokens": 30 }
+    },
+    {
+      "content": "Text exploration summary confirmed — deterministic metrics plus optional LLM description, and grep gives me the specific answer the summary can't.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 150, "output_tokens": 20 }
+    }
+  ]
+}

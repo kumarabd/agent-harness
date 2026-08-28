@@ -7,6 +7,11 @@ dependencies = [
     "temporalio>=1.7,<2",
     "asyncpg>=0.29,<1",
     "openai>=1.40,<2",
+    # docs/components/model-registry.md — Anthropic is a first-class
+    # provider alongside OpenAI-compatible ones. providers/anthropic_provider.py
+    # uses this SDK; DeepSeek/Qwen/Groq/OpenRouter/Crusoe all speak the
+    # OpenAI-compatible protocol and use the `openai` package above instead.
+    "anthropic>=0.40,<1",
     # docs/components/memory-slot.md — direct agent-brain MCP integration
     # (agent_brain.py). Same SDK also used for mcp-hub (mcp_hub.py).
     # Official SDK, not a hand-rolled JSON-RPC/streamable-HTTP

@@ -136,7 +136,7 @@ def compression_state(context_tokens: int, soft_threshold: int, hard_threshold: 
     return "none"
 
 
-async def compact(conn, session_key: str, openai_client, model: str) -> None:
+async def compact(conn, session_key: str, provider, model: str) -> None:
     """Three-Level Escalation (docs/components/context-slot.md, "Resolved:
     Duties and Strategies" #3) — real body for CompressContext, replacing
     the no-op stub. Summarizes the oldest not-yet-covered span of messages
@@ -165,7 +165,7 @@ async def compact(conn, session_key: str, openai_client, model: str) -> None:
         return
 
     transcript = "\n".join(f"{m['role']}: {m['content']}" for m in span if m["content"])
-    content = await _escalating_summarize(openai_client, model, transcript)
+    content = await _escalating_summarize(provider, model, transcript)
 
     await conn.execute(
         "INSERT INTO context_summaries (session_key, kind, covers, content, token_count) "
@@ -177,7 +177,7 @@ async def compact(conn, session_key: str, openai_client, model: str) -> None:
     )
     logger.info("lcm.compact[%s]: wrote leaf summary covering %d messages", session_key, len(span))
 
-    await _fold_leaves_if_due(conn, session_key, openai_client, model)
+    await _fold_leaves_if_due(conn, session_key, provider, model)
 
 
 async def _session_messages(conn, session_key: str) -> list:
@@ -193,14 +193,14 @@ async def _session_messages(conn, session_key: str) -> list:
     )
 
 
-async def _escalating_summarize(openai_client, model: str, transcript: str) -> str:
+async def _escalating_summarize(provider, model: str, transcript: str) -> str:
     input_tokens = estimate_tokens(transcript)
 
-    content = await _summarize(openai_client, model, transcript, aggressive=False)
+    content = await _summarize(provider, model, transcript, aggressive=False)
     if estimate_tokens(content) < input_tokens:
         return content
 
-    content = await _summarize(openai_client, model, transcript, aggressive=True)
+    content = await _summarize(provider, model, transcript, aggressive=True)
     if estimate_tokens(content) < input_tokens:
         return content
 
@@ -209,24 +209,22 @@ async def _escalating_summarize(openai_client, model: str, transcript: str) -> s
     return transcript[: max(1, len(transcript) // 4)] + " ...[truncated]"
 
 
-async def _summarize(openai_client, model: str, transcript: str, aggressive: bool) -> str:
+async def _summarize(provider, model: str, transcript: str, aggressive: bool) -> str:
     instruction = (
         "Summarize this conversation span as terse bullet points, maximally "
         "compressed, losing detail if needed to be short."
         if aggressive
         else "Summarize this conversation span, preserving important details."
     )
-    response = await openai_client.chat.completions.create(
+    result = await provider.summarize_text(
+        system_prompt=instruction,
+        user_content=transcript,
         model=model,
-        messages=[
-            {"role": "system", "content": instruction},
-            {"role": "user", "content": transcript},
-        ],
     )
-    return response.choices[0].message.content or ""
+    return result.content
 
 
-async def _fold_leaves_if_due(conn, session_key: str, openai_client, model: str) -> None:
+async def _fold_leaves_if_due(conn, session_key: str, provider, model: str) -> None:
     """Recursively folds the summary DAG once any level crosses
     LEAF_FOLD_THRESHOLD — leaves first, then repeatedly condensed-of-condensed
     while condensed count is still at/above threshold (a leaf-fold can itself
@@ -246,12 +244,12 @@ async def _fold_leaves_if_due(conn, session_key: str, openai_client, model: str)
     `context_summaries.covers` was already documented as "condensed: child
     summary_ids", i.e. a condensed row folding other condensed rows was
     always the intended shape, just never implemented."""
-    await _fold_kind_if_due(conn, session_key, openai_client, model, "leaf")
-    while await _fold_kind_if_due(conn, session_key, openai_client, model, "condensed"):
+    await _fold_kind_if_due(conn, session_key, provider, model, "leaf")
+    while await _fold_kind_if_due(conn, session_key, provider, model, "condensed"):
         pass
 
 
-async def _fold_kind_if_due(conn, session_key: str, openai_client, model: str, kind: str) -> bool:
+async def _fold_kind_if_due(conn, session_key: str, provider, model: str, kind: str) -> bool:
     """Folds every `kind` row into one new 'condensed' row, if at least
     LEAF_FOLD_THRESHOLD of them exist. Returns whether a fold happened, so
     the recursive condensed-of-condensed loop above knows whether to keep
@@ -266,7 +264,7 @@ async def _fold_kind_if_due(conn, session_key: str, openai_client, model: str, k
         return False
 
     combined = "\n".join(row["content"] for row in rows)
-    condensed_content = await _escalating_summarize(openai_client, model, combined)
+    condensed_content = await _escalating_summarize(provider, model, combined)
 
     async with conn.transaction():
         await conn.execute(

@@ -234,7 +234,19 @@ func (s *server) voiceJoin(ctx context.Context, dg *discordgo.Session, ic *disco
 	// once Deliver/DeliverChunk's already-existing startPlayback call
 	// happens, not anything this struct coordinates itself.
 	filler := newVoiceFillerPlayer(s.voiceFillerCache)
-	deliverActivity := &voiceDeliverActivity{vc: vc, pool: s.pool, connectionID: connectionID, bargeIn: bargeIn, lifecycle: lifecycle, latency: latency}
+	deliverActivity := &voiceDeliverActivity{
+		vc: vc, pool: s.pool, connectionID: connectionID,
+		// session + voiceChannelID — docs/components/user-input.md,
+		// "Resolved: Response-Routing for Discord Voice — Reuse the
+		// Text Button Flow". DeliverInterim needs both to push a text
+		// message with buttons to the voice channel's attached text
+		// chat alongside the spoken prompt (Discord's voice channels
+		// have unified voice+text since 2022 — same channel ID for
+		// both). vc alone can send audio but not text; session is the
+		// parent that opened this connection.
+		session: dg, voiceChannelID: channelID,
+		bargeIn: bargeIn, lifecycle: lifecycle, latency: latency,
+	}
 	deliverWkr := worker.New(s.temporal, "deliver:discord-voice:"+connectionID, worker.Options{DisableWorkflowWorker: true})
 	deliverWkr.RegisterActivityWithOptions(deliverActivity.Deliver, activity.RegisterOptions{Name: "VoiceDeliver"})
 	deliverWkr.RegisterActivityWithOptions(deliverActivity.DeliverChunk, activity.RegisterOptions{Name: "VoiceDeliverChunk"})

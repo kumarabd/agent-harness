@@ -1,0 +1,68 @@
+{
+  "message": {
+    "role": "user",
+    "content": "delegate writing a file to a subagent, then merge it back"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "I'll delegate the write to a subagent.",
+      "tool_calls": [
+        {
+          "name": "spawn_subagent",
+          "is_subagent": true,
+          "arguments": {
+            "prompt": "create result.txt with 'hello from subagent'",
+            "scripted_model_responses": [
+              {
+                "content": "Writing result.txt.",
+                "tool_calls": [
+                  {
+                    "name": "shell_exec",
+                    "arguments": { "command": "echo 'hello from subagent' > result.txt" },
+                    "is_subagent": false
+                  }
+                ],
+                "usage": { "input_tokens": 60, "output_tokens": 20 }
+              },
+              {
+                "content": "File written.",
+                "tool_calls": [],
+                "usage": { "input_tokens": 70, "output_tokens": 15 }
+              }
+            ]
+          }
+        }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 40 }
+    },
+    {
+      "content": "Subagent finished — its manifest lists result.txt. Merging it into my working directory.",
+      "tool_calls": [
+        {
+          "name": "merge_subagent_output",
+          "arguments": {
+            "subagent_turn_id": "merge-happy:turn:1:sub:1"
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 120, "output_tokens": 30 }
+    },
+    {
+      "content": "Verifying the merged file is in my own working directory.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": { "command": "cat result.txt" },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 140, "output_tokens": 20 }
+    },
+    {
+      "content": "Merge complete — result.txt is now in the parent's directory.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 160, "output_tokens": 20 }
+    }
+  ]
+}

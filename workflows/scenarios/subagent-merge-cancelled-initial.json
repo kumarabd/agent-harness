@@ -1,0 +1,70 @@
+{
+  "message": {
+    "role": "user",
+    "content": "delegate a slow write to a subagent (will get interrupted)"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Delegating a slow, multi-step write to a subagent.",
+      "tool_calls": [
+        {
+          "name": "spawn_subagent",
+          "is_subagent": true,
+          "arguments": {
+            "prompt": "write early.txt fast, then sleep, then write late.txt",
+            "scripted_model_responses": [
+              {
+                "content": "Writing early.txt, then sleeping before the second write.",
+                "tool_calls": [
+                  {
+                    "name": "shell_exec",
+                    "arguments": {
+                      "command": "echo 'early write, before interrupt' > early.txt && sleep 30 && echo 'late write, after interrupt' > late.txt"
+                    },
+                    "is_subagent": false
+                  }
+                ],
+                "usage": { "input_tokens": 60, "output_tokens": 20 }
+              },
+              {
+                "content": "Both writes complete (only reachable if no interrupt landed).",
+                "tool_calls": [],
+                "usage": { "input_tokens": 70, "output_tokens": 15 }
+              }
+            ]
+          }
+        }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 40 }
+    },
+    {
+      "content": "Subagent returned. Its manifest should still be written even if it was cancelled — checking what actually landed by trying to merge.",
+      "tool_calls": [
+        {
+          "name": "merge_subagent_output",
+          "arguments": {
+            "subagent_turn_id": "merge-cancelled:turn:1:sub:1"
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 120, "output_tokens": 30 }
+    },
+    {
+      "content": "Merge complete — early.txt should be present, late.txt should not.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": { "command": "ls -1 && (test -f late.txt && echo LATE-PRESENT || echo LATE-ABSENT)" },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 140, "output_tokens": 20 }
+    },
+    {
+      "content": "Cancelled-subagent merge-back confirmed.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 160, "output_tokens": 20 }
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 {
   "message": {
     "role": "user",
-    "content": "this turn is expected to fail all the way through — run only with PIONEER_BASE_URL pointed at an unreachable endpoint"
+    "content": "this turn is expected to fail all the way through — run only with LANGUAGE_MEDIUM_BASE_URL pointed at an unreachable endpoint"
   }
 }

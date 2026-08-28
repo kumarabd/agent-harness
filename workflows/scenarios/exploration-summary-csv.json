@@ -1,0 +1,39 @@
+{
+  "message": {
+    "role": "user",
+    "content": "produce a large CSV and read its columns from the exploration summary"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Generating ~5KB of CSV — 500 rows, 4 columns.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": {
+            "command": "python3 -c \"print('id,name,region,score'); [print(f'{i},row-{i},region-{i%5},{i*0.7:.2f}') for i in range(500)]\""
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 30 }
+    },
+    {
+      "content": "exploration_summary.type should be 'csv' with columns ['id','name','region','score'] and row_count 500. Grepping the claim-check file for a specific region to demonstrate ordinary shell tools work on the persisted output.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": {
+            "command": "grep -c ',region-2,' .claim-check/*.stdout.log"
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 130, "output_tokens": 30 }
+    },
+    {
+      "content": "CSV exploration summary confirmed — columns + row count described up front, targeted grep works against the claim-check path.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 150, "output_tokens": 20 }
+    }
+  ]
+}

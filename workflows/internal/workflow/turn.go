@@ -765,6 +765,19 @@ loop:
 			for _, c := range calls {
 				drainResult(ctx, c.toolCallID, c.future, c.isSubagent, c.isApprovalGated)
 			}
+			// Even a cancelled subagent may have written files before its
+			// interrupt landed — surface those to the parent's next
+			// ModelCall (fold-in below) so the model can decide whether to
+			// merge them, same reasoning as the ok-path dispatch further
+			// down. See docs/components/session-filesystem.md, "Resolved:
+			// Subagent Merge-Back Mechanics."
+			var subagentIDs []string
+			for _, c := range calls {
+				if c.isSubagent {
+					subagentIDs = append(subagentIDs, c.toolCallID)
+				}
+			}
+			dispatchSubagentManifests(ctx, subagentIDs)
 
 			// Dequeue exactly ONE pending message — never batch multiple
 			// queued messages into a single fold-in (components/temporal-workflow.md,
@@ -787,6 +800,19 @@ loop:
 				retries++
 			}
 		}
+		// Every subagent that ran this step gets a manifest activity
+		// dispatched against its own turn_id, so the changed-file list is
+		// folded into its tool_calls.result before the parent's next
+		// ModelCall reads it (via lcm.assemble). See
+		// docs/components/session-filesystem.md, "Resolved: Subagent
+		// Merge-Back Mechanics."
+		var subagentIDs []string
+		for _, c := range calls {
+			if c.isSubagent {
+				subagentIDs = append(subagentIDs, c.toolCallID)
+			}
+		}
+		dispatchSubagentManifests(ctx, subagentIDs)
 	}
 
 	metrics.Counter("turn_iterations_total").Inc(int64(iterations))
@@ -838,6 +864,36 @@ loop:
 
 	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "interrupted_during_delivery", interruptedPayload != nil)
 	return types.TurnResult{TurnID: input.TurnID, StopReason: stopReason, Iterations: iterations, InterruptedDuringDelivery: interruptedPayload}, nil
+}
+
+// dispatchSubagentManifests fans out one SubagentManifest activity per
+// completed subagent turn and waits for all of them to finish before
+// returning — the parent's next ModelCall reads each subagent's
+// tool_calls.result via lcm.assemble, so the manifest must be written
+// before the next iteration's ModelCall runs (or, in the interrupt path,
+// before InsertMessage folds in the follow-up and the next iteration
+// starts). Tier A: just a directory walk and a single UPDATE.
+// docs/components/session-filesystem.md, "Resolved: Subagent Merge-Back
+// Mechanics."
+func dispatchSubagentManifests(ctx workflow.Context, subagentIDs []string) {
+	if len(subagentIDs) == 0 {
+		return
+	}
+	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+	actx := workflow.WithActivityOptions(ctx, ao)
+	futures := make([]workflow.Future, 0, len(subagentIDs))
+	for _, id := range subagentIDs {
+		futures = append(futures, workflow.ExecuteActivity(actx, "SubagentManifest", id))
+	}
+	// Fold errors into the log rather than failing the whole turn — a
+	// missing manifest degrades the parent's model to the same "no
+	// changed-file info" state it'd see for a subagent that wrote nothing,
+	// not a turn-ending failure.
+	for i, f := range futures {
+		if err := f.Get(actx, nil); err != nil {
+			workflow.GetLogger(ctx).Warn("SubagentManifest failed", "subagent_turn_id", subagentIDs[i], "error", err)
+		}
+	}
 }
 
 // drainResult calls Get on an already-ready (or now-cancelled) future purely

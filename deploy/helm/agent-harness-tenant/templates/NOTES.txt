@@ -65,14 +65,27 @@ single Postgres pod only.
 {{- if .Values.llm.enabled }}
 
 Real LLM calls are configured for this release (activities/activities/llm.py,
-OpenAI-compatible provider) — turns with no _test_scripted_responses fixture
-row will call model {{ .Values.llm.openai.model }} at {{ .Values.llm.openai.baseURL }}.
+Provider ABC dispatch). Every configured tier owns its own provider identity
+(docs/components/model-registry.md, 2026-08-28) — the provider client is
+cached per (provider, baseURL, apiKey) triple, so tiers pointing at the same
+provider still share one HTTP connection pool.
+Configured tiers:
+{{- range $tier := list "fast" "medium" "expert" }}
+{{- $t := index $.Values.llm.tiers $tier }}
+{{- if $t.model }}
+  - {{ $tier }}: {{ $t.model }} via {{ $t.provider }}{{ if $t.baseURL }} @ {{ $t.baseURL }}{{ end }}
+{{- end }}
+{{- end }}
+Any tier NOT listed above is unconfigured and will surface a real error at
+call time if that tier ever resolves — there is no cross-tier fallback and
+no shared provider default.
 {{- else }}
 
 Real LLM calls are NOT configured for this release (llm.enabled=false) — any
 turn with no _test_scripted_responses fixture row will fail with a clear
-error from ModelCall rather than silently faking a response. Set llm.enabled,
-llm.openai.model, and llm.openai.apiKey to wire up real calls.
+error from ModelCall rather than silently faking a response. Set llm.enabled
+and at least one of llm.tiers.{fast,medium,expert} (provider + model +
+apiKey + baseURL) to wire up real calls.
 {{- end }}
 
 Note: no real gateway is wired up yet — Deliver is still a stub (logs the

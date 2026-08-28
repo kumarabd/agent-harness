@@ -1,0 +1,7 @@
+{
+  "message": {
+    "role": "user",
+    "content": "stop that — interrupt the running subagent"
+  },
+  "scripted_model_responses": []
+}

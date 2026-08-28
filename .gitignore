@@ -17,5 +17,5 @@ workflows/cmd/_*/
 dist/
 
 # Per-tenant Helm overrides (deploy/helm/tenants/README.md) contain real
-# credentials (e.g. llm.openai.apiKey) — never commit these to a public repo.
+# credentials (e.g. llm.tiers.<tier>.apiKey) — never commit these to a public repo.
 deploy/helm/tenants/*.yaml

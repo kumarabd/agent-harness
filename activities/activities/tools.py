@@ -44,15 +44,16 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 import asyncpg
 from temporalio import activity
 from temporalio.exceptions import CancelledError
 
-from . import agent_brain, leases, mcp_hub, shell_hub
+from . import agent_brain, claim_check, ids, leases, mcp_hub, shell_hub
 
 _SESSION_ROOT_ENV = "SESSION_ROOT"
 # Local-dev fallback; real deployments set SESSION_ROOT to match the Helm
@@ -60,13 +61,14 @@ _SESSION_ROOT_ENV = "SESSION_ROOT"
 # the session filesystem tree at /sessions).
 _DEFAULT_SESSION_ROOT = "/tmp/agent-harness-sessions"
 
-# Bytes, not characters - applied per stream (stdout/stderr independently).
-# The full claim-check large-payload route through the PV (rather than
-# Postgres) is still open in docs/components/session-filesystem.md (no
-# numeric large-vs-small threshold specified) - out of scope here; this is
-# just a safety cap so a runaway command can't push an unbounded blob into
-# the tool_calls.result jsonb column.
-_MAX_OUTPUT_BYTES = 4096
+# Per-stream (stdout/stderr independently) large-output policy — the
+# threshold and behavior both live in claim_check.py now
+# (docs/components/session-filesystem.md, "Resolved: This PV Serves as
+# the Claim-Check Store for Large Content"): outputs above the threshold
+# get written to the PV under the tool's own session directory and
+# returned as a reference the model can `cat`/`head`/`tail`/`grep` via
+# ordinary shell_exec, instead of being flat-truncated and silently
+# dropped as the pre-claim-check code did.
 
 
 def resolve_session_dir(fs_path: str) -> str:
@@ -82,13 +84,29 @@ def resolve_session_dir(fs_path: str) -> str:
 class ToolContext:
     """Everything a tool handler needs beyond its own arguments: DB access
     for lease renewal, the resolved working directory, and this call's
-    unique lease-holder identity."""
+    unique lease-holder identity.
+
+    tool_call_id is threaded through so handlers producing artifacts on
+    disk (claim_check.py's large-output route, currently) can name those
+    artifacts deterministically per-call rather than racing on a shared
+    name — one tool call owns exactly one claim-check filename slot.
+
+    summary_provider is a Provider instance (providers/base.py) resolved
+    from the medium tier's config — needed here so the
+    exploration_summary.py LLM path (unstructured text tier) has
+    somewhere to send its natural-language summary request. `None` when
+    the tier isn't fully configured (missing PROVIDER/MODEL/API_KEY/
+    BASE_URL); every consumer of this field tolerates that (degrades to
+    a deterministic-only summary)."""
 
     pool: asyncpg.Pool
     session_key: str
     fs_path: str
     session_dir: str
     holder_id: str
+    tool_call_id: str
+    summary_provider: Any
+    summary_model: str
     heartbeat_interval_seconds: float
     lease_ttl_seconds: float
 
@@ -138,14 +156,6 @@ async def _terminate_process_group(proc: "asyncio.subprocess.Process", grace_sec
     except ProcessLookupError:
         return
     await proc.wait()
-
-
-def _truncate(data: bytes) -> tuple[str, bool]:
-    text = data.decode("utf-8", errors="replace")
-    if len(text.encode("utf-8")) <= _MAX_OUTPUT_BYTES:
-        return text, False
-    truncated_bytes = text.encode("utf-8")[:_MAX_OUTPUT_BYTES]
-    return truncated_bytes.decode("utf-8", errors="replace"), True
 
 
 async def shell_exec(arguments: dict, ctx: ToolContext) -> dict:
@@ -200,14 +210,173 @@ async def shell_exec(arguments: dict, ctx: ToolContext) -> dict:
     finally:
         await leases.release(ctx.pool, ctx.session_key, ctx.fs_path, ctx.holder_id)
 
-    stdout, stdout_truncated = _truncate(stdout_bytes)
-    stderr, stderr_truncated = _truncate(stderr_bytes)
+    # Each stream is independently either inlined or routed through the
+    # claim-check store — big stdout with tiny stderr (or vice versa)
+    # shouldn't drag the small stream through the PV too. The returned
+    # value under each key is either {"inline": text} (small) or a
+    # reference dict with head/tail/exploration_summary/claim_check_path
+    # (large); the model sees the same key regardless. See claim_check.py
+    # and exploration_summary.py.
+    stdout_result = await claim_check.store_if_large(
+        ctx.session_dir, ctx.tool_call_id, "stdout", stdout_bytes,
+        summary_provider=ctx.summary_provider, summary_model=ctx.summary_model,
+    )
+    stderr_result = await claim_check.store_if_large(
+        ctx.session_dir, ctx.tool_call_id, "stderr", stderr_bytes,
+        summary_provider=ctx.summary_provider, summary_model=ctx.summary_model,
+    )
     return {
         "exit_code": proc.returncode,
-        "stdout": stdout,
-        "stderr": stderr,
-        "truncated": stdout_truncated or stderr_truncated,
+        "stdout": stdout_result,
+        "stderr": stderr_result,
     }
+
+
+async def merge_subagent_output(arguments: dict, ctx: ToolContext) -> dict:
+    """docs/components/session-filesystem.md, "Resolved: Subagent Merge-Back
+    Mechanics" — model-invoked, explicit merge of a completed subagent's file
+    changes into its parent's working directory.
+
+    Args:
+      subagent_turn_id: str — the subagent whose files to merge. Must be a
+        direct child of THIS tool call's own turn (ctx.session_key +
+        parent_id check below); merging from a random other subagent isn't
+        supported and would break the parent-dir lease scoping.
+      files: optional list[str] of relative paths to merge (a subset of the
+        SubagentManifest's changed_files). Omitted / None / empty → merge
+        every file in the subagent's subtree.
+
+    Conflict rule (per the doc): for each source file, if the destination in
+    the parent's directory has an mtime newer than the subagent's own
+    `turns.started_at`, something else wrote there concurrently — skip and
+    report, don't silently overwrite. Same "surface honestly, don't silently
+    resolve" pattern the cancellation `side_effect: unknown` observation
+    already uses.
+
+    Also surfaces two edge cases the doc's rule doesn't explicitly call out:
+      - destinations that already existed before the subagent started and
+        were overwritten by the subagent's work (no conflict — this is the
+        whole point — but named in the result so the model isn't surprised).
+      - destinations the parent created concurrently (would-be conflict) —
+        skipped, reported.
+    """
+    subagent_turn_id = arguments.get("subagent_turn_id")
+    if not isinstance(subagent_turn_id, str) or not subagent_turn_id:
+        raise ValueError("merge_subagent_output requires a string 'subagent_turn_id'")
+
+    # Restrict merges to direct children of this tool call's own turn — the
+    # parent-directory lease below is scoped to ctx.fs_path (this call's
+    # own turn's dir), so accepting a random subagent_turn_id from
+    # elsewhere in the session would compute a source path that doesn't
+    # sit under the leased destination and could race against writers we
+    # aren't coordinating with.
+    expected_parent_prefix = ctx.fs_path.rstrip("/") + "/sub/"
+    subagent_fs_path = ids.session_fs_path(subagent_turn_id)
+    if not subagent_fs_path.startswith(expected_parent_prefix):
+        raise ValueError(
+            f"merge_subagent_output: {subagent_turn_id!r} is not a direct subagent "
+            f"of this turn ({ctx.fs_path!r})"
+        )
+
+    row = await ctx.pool.fetchrow(
+        "SELECT started_at FROM turns WHERE turn_id = $1",
+        subagent_turn_id,
+    )
+    if row is None:
+        raise ValueError(f"merge_subagent_output: no turns row for {subagent_turn_id!r}")
+    subagent_started_at = row["started_at"].timestamp()
+
+    source_root = resolve_session_dir(subagent_fs_path)
+    dest_root = ctx.session_dir
+
+    if not os.path.isdir(source_root):
+        return {"merged": [], "skipped_conflicts": [], "overwrote_parent_earlier": []}
+
+    requested_files = arguments.get("files")
+    if requested_files is None:
+        candidates: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(source_root):
+            # Same pruning as subagent_manifest.py — a subagent's
+            # tool-output claim-check artifacts aren't merge candidates,
+            # they belong to that subagent's own turn's lifecycle.
+            dirnames[:] = [d for d in dirnames if not claim_check.is_claim_check_dir(d)]
+            for name in filenames:
+                absolute = os.path.join(dirpath, name)
+                if not os.path.isfile(absolute):
+                    continue
+                candidates.append(os.path.relpath(absolute, source_root))
+        candidates.sort()
+    else:
+        if not isinstance(requested_files, list) or not all(isinstance(p, str) for p in requested_files):
+            raise ValueError("merge_subagent_output: 'files' must be a list of strings if provided")
+        candidates = list(requested_files)
+
+    os.makedirs(dest_root, exist_ok=True)
+    await _acquire_lease_blocking(ctx)
+    merged: list[str] = []
+    skipped_conflicts: list[dict] = []
+    overwrote_parent_earlier: list[str] = []
+    missing_sources: list[str] = []
+    try:
+        for rel in candidates:
+            # Reject path escapes — a subagent-supplied name that resolves
+            # outside the subtree could otherwise clobber unrelated
+            # tenant files. commonpath handles both '..' and absolute paths.
+            source = os.path.abspath(os.path.join(source_root, rel))
+            dest = os.path.abspath(os.path.join(dest_root, rel))
+            if os.path.commonpath([source_root, source]) != os.path.abspath(source_root):
+                skipped_conflicts.append({"path": rel, "reason": "path_escapes_source"})
+                continue
+            if os.path.commonpath([dest_root, dest]) != os.path.abspath(dest_root):
+                skipped_conflicts.append({"path": rel, "reason": "path_escapes_destination"})
+                continue
+            if not os.path.isfile(source):
+                missing_sources.append(rel)
+                continue
+
+            dest_exists = os.path.exists(dest)
+            if dest_exists:
+                dest_mtime = os.stat(dest).st_mtime
+                if dest_mtime > subagent_started_at:
+                    skipped_conflicts.append(
+                        {"path": rel, "reason": "destination_written_after_subagent_started"}
+                    )
+                    continue
+                # Destination existed before the subagent started; the copy
+                # below will overwrite the parent's earlier version. This
+                # is exactly what merge-back is for, but surface it so the
+                # model isn't surprised the parent's prior write is gone.
+                overwrote_parent_earlier.append(rel)
+
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            # copy2 preserves the source's mtime, which matters for a
+            # follow-up merge from a sibling subagent: the just-copied
+            # destination's mtime is now the subagent's write time, not
+            # `now()`, so the conflict rule stays coherent across a chain
+            # of merges.
+            shutil.copy2(source, dest)
+            merged.append(rel)
+
+            # Cooperative-cancellation contract — a merge over many files can
+            # take real time, so heartbeat and renew per file the same way
+            # shell_exec heartbeats between its own timed waits.
+            activity.heartbeat()
+            await leases.acquire_or_renew(
+                ctx.pool, ctx.session_key, ctx.fs_path, ctx.holder_id, ctx.lease_ttl_seconds
+            )
+            if activity.is_cancelled():
+                raise CancelledError("merge_subagent_output cancelled")
+    finally:
+        await leases.release(ctx.pool, ctx.session_key, ctx.fs_path, ctx.holder_id)
+
+    result: dict = {
+        "merged": merged,
+        "skipped_conflicts": skipped_conflicts,
+        "overwrote_parent_earlier": overwrote_parent_earlier,
+    }
+    if missing_sources:
+        result["missing_sources"] = missing_sources
+    return result
 
 
 async def memory_search(arguments: dict, ctx: ToolContext) -> dict:
@@ -299,6 +468,16 @@ _DEMO_TOOL_SPEC = ToolSpec(
 TOOL_REGISTRY: dict[str, ToolSpec] = {
     "shell_exec": ToolSpec(
         handler=shell_exec,
+        heartbeat_interval_seconds=3.0,
+        heartbeat_timeout_seconds=10.0,
+        start_to_close_timeout_seconds=300.0,
+    ),
+    # Tier B, matching shell_exec — a merge of many files is filesystem-
+    # touching, chunkable work on the same PV, holds a session-directory
+    # lease the same way, and needs the same heartbeat cadence for real
+    # cancellation delivery mid-merge.
+    "merge_subagent_output": ToolSpec(
+        handler=merge_subagent_output,
         heartbeat_interval_seconds=3.0,
         heartbeat_timeout_seconds=10.0,
         start_to_close_timeout_seconds=300.0,

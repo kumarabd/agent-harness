@@ -47,7 +47,7 @@ Verified against the real mcp-hub server code (`/Users/abishekkumar/Documents/in
 search_tools(query, top_k=5) -> [{server, tool, description, input_schema}]
 call_tool(server, tool, arguments) -> CallToolResult
 ```
-(`search_skills`/`get_skill` exist on the same server but are explicitly out of scope for this pass.)
+(`search_skills`/`get_skill` exist on the same server; **designed as of 2026-08-28 in the new `components/skills.md`**, structurally identical to `search_tools`/`call_tool`. Same mcp-hub client, same graceful-degradation posture, same per-tenant isolation. Not yet implemented.)
 
 Same integration shape as agent-brain, same reasoning: expose the real MCP tools directly to the model as two new native tools named `search_tools`/`call_tool` (matching mcp-hub's own names, not a paraphrased wrapper), via a new thin client module (`mcp_hub.py`, no auth headers needed — simpler than `agent_brain.py` for exactly that reason) calling mcp-hub's real endpoint (`MCP_HUB_URL`, already wired into the tenant-worker pod). `call_tool`'s handler is a straight proxy; `search_tools`' handler additionally fans out to shell-hub below and returns the union.
 

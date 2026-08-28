@@ -42,7 +42,7 @@ import time
 from temporalio import activity
 from temporalio.exceptions import CancelledError
 
-from . import ids
+from . import ids, llm_client, model_registry
 from .tools import TOOL_REGISTRY, ToolContext, resolve_session_dir
 from .types import ToolCallInput, ToolCallOutput
 
@@ -52,6 +52,10 @@ logger = logging.getLogger(__name__)
 class ToolCallActivity:
     def __init__(self, pool):
         self._pool = pool
+        # The AsyncOpenAI client is NOT injected anymore (2026-08-28,
+        # per-tier provider revision) — it's resolved per call via
+        # llm_client.get_client(model_config), from whichever tier's
+        # config the summary path actually uses. See __call__ below.
 
     @activity.defn(name="ToolCall")
     async def __call__(self, input: ToolCallInput) -> ToolCallOutput:
@@ -76,12 +80,35 @@ class ToolCallActivity:
             return await self._finish_error(input.tool_call_id, f"unknown tool: {tool_name}")
 
         fs_path = ids.session_fs_path(turn_id)
+        # Resolve the default-tier config once here so per-tool
+        # exploration_summary calls don't each re-read env vars. Uses
+        # the "medium" tier deliberately (bootstrap default) — the same
+        # tier compress_context uses, for the same reasoning
+        # (fixed-purpose call, not model-hint-driven). If that tier
+        # isn't configured we degrade to no-LLM summary, matching
+        # exploration_summary's own graceful-degradation contract —
+        # never fails a tool call over the summary path.
+        summary_config = model_registry.resolve(*model_registry.default_hint())
+        summary_provider = None
+        if summary_config.model:
+            try:
+                summary_provider = llm_client.get_provider(summary_config)
+            except RuntimeError as exc:
+                logger.info(
+                    "ToolCall[%s]: no summary provider (%s) — exploration_summary will run deterministic-only",
+                    input.tool_call_id, exc,
+                )
+                summary_provider = None
+
         ctx = ToolContext(
             pool=self._pool,
             session_key=ids.session_key_of(turn_id),
             fs_path=fs_path,
             session_dir=resolve_session_dir(fs_path),
             holder_id=activity.info().task_token.hex(),
+            tool_call_id=input.tool_call_id,
+            summary_provider=summary_provider,
+            summary_model=summary_config.model,
             heartbeat_interval_seconds=spec.heartbeat_interval_seconds,
             lease_ttl_seconds=spec.heartbeat_timeout_seconds,
         )

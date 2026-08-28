@@ -115,7 +115,7 @@ gateway:
     # rendered together into one Secret (templates/gateway-discord-secret.yaml),
     # not a plain value. Do NOT commit real values here; set them per tenant
     # in deploy/helm/tenants/<tenant>.yaml instead, same discipline as
-    # llm.openai.apiKey above.
+    # llm.tiers.<tier>.apiKey above.
     #
     # bots:
     #   - botToken: ""
@@ -296,67 +296,87 @@ agentBrain:
   # chart level.
   ownerUserID: "tenant-worker"
 
-# -- Real LLM provider config for ModelCall (activities/activities/llm.py).
-# Only needed for turns with no _test_scripted_responses fixture row — pure
+# -- Real LLM config for ModelCall (activities/activities/llm.py). Only
+# needed for turns with no _test_scripted_responses fixture row — pure
 # fixture-based usage (e.g. workflows/scenarios/) never touches this, so
 # it's fine to leave disabled for local/demo deployments.
+#
+# Every configured tier owns its OWN provider identity (2026-08-28):
+# apiKey/baseURL/maxTokens live on the tier itself, so different tiers
+# can genuinely point at different providers (fast at Groq, medium at
+# Crusoe, expert at Anthropic, etc.). There is no cross-tier fallback
+# and no shared provider default — every tier the deployment actually
+# uses must set MODEL, apiKey, and baseURL. A tier left partially or
+# fully empty surfaces at call time as a real error naming that
+# specific tier (llm.py's "no model resolved" / llm_client.py's "no base
+# url" checks), not a silent fallback.
+#
+# The AsyncOpenAI client is cached per (baseURL, apiKey) pair by
+# llm_client.py, so a deployment where every tier points at the same
+# provider still gets one shared HTTP connection pool for free — no
+# per-call construction overhead in the common single-provider case.
 llm:
   enabled: false
-  # -- Config for providers reachable via the OpenAI-compatible API (the
-  # openai SDK's base_url override — covers Pioneer today, and most other
-  # providers: real OpenAI, Groq, OpenRouter, etc. all speak this same
-  # protocol). Nested under its own key, sibling to future differently-shaped
-  # providers (e.g. a native, non-OpenAI-compatible API) that would need
-  # their own block here rather than reshaping this one — currently the
-  # only provider this chart (and activities/activities/llm.py) knows how to
-  # configure.
-  openai:
-    baseURL: "https://api.inference.crusoecloud.com/v1/"
-    # -- REQUIRED if llm.enabled — no safe default. The specific provider's
-    # model catalog isn't known ahead of time, so guessing one would likely
-    # just be wrong (matches llm.py's own runtime check).
-    model: ""
-    maxTokens: 4096
-    # -- REQUIRED if llm.enabled. Rendered into a chart-managed Secret
-    # (templates/llm-secret.yaml) rather than a raw Pod env value — same
-    # credentials-live-in-a-Secret shape postgres.existingSecret's generated
-    # Secret already uses below, just sourced directly from this field.
-    #
-    # Do NOT commit a real key here — this is the chart's own DEFAULT values
-    # file, shared by every tenant install. Set the real value per tenant in
-    # deploy/helm/tenants/<tenant>.yaml instead (see that directory's
-    # README.md), which stays out of the chart's own tracked defaults.
-    apiKey: ""
-  # -- docs/components/model-registry.md — per-tier model overrides. All
-  # optional: a tier left as "" falls back to llm.openai.model
-  # (model_registry.py's own behavior, not re-implemented here), so a
-  # tenant that hasn't configured this at all keeps behaving exactly like
-  # today's single-model setup — every tier just resolves to the same
-  # model. contextWindow similarly falls back to a conservative 128000
-  # default if left at 0. Set real values per tenant only if you actually
-  # want different models per tier.
+  # -- docs/components/model-registry.md — per-tier model + provider
+  # configuration. Each tier is optional; a tier with model="" is treated
+  # as unconfigured and never resolved to. `contextWindow` falls back to
+  # a conservative 128000 default only when non-zero isn't set — that
+  # fallback is for a tier that's otherwise fully configured but whose
+  # provider hasn't published a context-window value, NOT for an unset
+  # tier. `maxTokens` similarly defaults to 4096 when omitted.
+  #
+  # `provider` is REQUIRED per configured tier — one of "openai" or
+  # "anthropic". "openai" covers every OpenAI-API-compatible endpoint
+  # (real OpenAI, DeepSeek, Qwen/DashScope, Groq, OpenRouter, Crusoe,
+  # etc.) — they all speak the same protocol and differ only in
+  # baseURL + model name. "anthropic" is Anthropic's native Messages
+  # API (a separate SDK, different request/response shape, handled by
+  # activities/activities/providers/anthropic_provider.py). Any tier
+  # with a non-empty `model` must also set `provider` and `apiKey`;
+  # `baseURL` is required for provider=openai and optional for
+  # provider=anthropic (that SDK has its own default).
+  #
+  # apiKey is REQUIRED per configured tier. Rendered into a chart-
+  # managed Secret (templates/llm-secret.yaml) with one key per tier;
+  # the Pod pulls each tier's key via `valueFrom.secretKeyRef`. Do NOT
+  # commit real keys here — this is the chart's default values file.
+  # Set real values per tenant in deploy/helm/tenants/<tenant>.yaml
+  # instead (see that directory's README.md).
+  #
+  # costPerMillionTokens.* — docs/components/model-registry.md's pricing
+  # table, in $/1M tokens (how providers publish pricing). "" (unset)
+  # means no cost data for that rate, not free — budget-guardrails.md's
+  # cost-based metrics stay honestly absent until a real number is filled
+  # in, same as an unset context-window falls back rather than guessing.
   tiers:
-    # costPerMillionTokens.* — docs/components/model-registry.md's pricing
-    # table, in $/1M tokens (how providers publish pricing). "" (unset) means
-    # no cost data for that rate, not free — budget-guardrails.md's
-    # cost-based metrics stay honestly absent until a real number is filled
-    # in, same as an unset model/contextWindow falls back rather than guessing.
     fast:
+      provider: ""
       model: ""
+      apiKey: ""
+      baseURL: ""
+      maxTokens: 4096
       contextWindow: 0
       costPerMillionTokens:
         input: ""
         output: ""
         cachedInput: ""
     medium:
+      provider: ""
       model: ""
+      apiKey: ""
+      baseURL: ""
+      maxTokens: 4096
       contextWindow: 0
       costPerMillionTokens:
         input: ""
         output: ""
         cachedInput: ""
     expert:
+      provider: ""
       model: ""
+      apiKey: ""
+      baseURL: ""
+      maxTokens: 4096
       contextWindow: 0
       costPerMillionTokens:
         input: ""
@@ -415,8 +435,10 @@ agent-brain:
   # mining.llm for why this is a direct provider call, not the shared LiteLLM proxy).
   # baseURL/model are plain values here (not secrets); the actual API key is NOT
   # set here — templates/agent-brain-creds-secret.yaml computes it directly from
-  # llm.openai.apiKey below (same real Crusoe credential tenant-worker's own
-  # ModelCall already uses — one credential, not a second hand-copied one).
+  # llm.tiers.medium.apiKey below (mining is treated as a medium-tier consumer
+  # 2026-08-28, since every tier now owns its own credential — no shared
+  # provider key exists anymore; keeping mining coupled to one specific tier
+  # is deliberate).
   mining:
     llm:
       baseURL: ""

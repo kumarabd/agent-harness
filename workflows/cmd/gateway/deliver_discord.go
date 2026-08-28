@@ -4,13 +4,65 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// buildUserInputComponents turns a user_input_requests row's options into
+// Discord message components (buttons), one row of up to 5 buttons each,
+// max 5 rows (Discord's own limits). custom_id encodes the routing —
+// discord_user_input.go's interaction handler parses it back apart on
+// click. Deliberately hard-caps at 25 options: beyond that, a select-menu
+// component would be the right shape, but no consumer today generates
+// more than a handful of options, so accepting the cap now rather than
+// adding an unused fallback path.
+//
+// The custom_id format ("user_input:<request_id>:<option_id>") stays
+// under Discord's 100-char custom_id ceiling for realistic values —
+// request_id is a UUID (36 chars) and option_id is a short string
+// ("approve", "deny") in the only consumer that exists today (permission
+// gating). If a future consumer introduces longer option ids, the button
+// build call will still succeed but the click handler will reject
+// oversized ids with a clean error — no silent truncation.
+func buildUserInputComponents(requestID string, options []struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}) []discordgo.MessageComponent {
+	const (
+		maxButtonsPerRow = 5
+		maxRows          = 5
+		maxOptions       = maxButtonsPerRow * maxRows
+	)
+	if len(options) > maxOptions {
+		options = options[:maxOptions]
+	}
+	var rows []discordgo.MessageComponent
+	for i := 0; i < len(options); i += maxButtonsPerRow {
+		end := i + maxButtonsPerRow
+		if end > len(options) {
+			end = len(options)
+		}
+		var buttons []discordgo.MessageComponent
+		for _, opt := range options[i:end] {
+			buttons = append(buttons, discordgo.Button{
+				Label: opt.Label,
+				Style: discordgo.PrimaryButton,
+				// Prefix scopes this custom_id to the user-input feature —
+				// discord_user_input.go's handler filters on this exact
+				// prefix so we never accidentally handle a click for a
+				// future unrelated button type. Colons are safe because
+				// request_id (UUID) and option_id ("approve"/"deny"/...)
+				// don't contain them in any consumer today.
+				CustomID: "user_input:" + requestID + ":" + opt.ID,
+			})
+		}
+		rows = append(rows, discordgo.ActionsRow{Components: buttons})
+	}
+	return rows
+}
 
 // discordDeliverActivity is the real implementation of docs/components/
 // gateway.md's "Resolved: Outbound Flow" DeliverActivity, for Discord
@@ -173,13 +225,22 @@ func (a *discordDeliverActivity) recordAmbientBotMessage(ctx context.Context, ch
 // wrote it (reference-passing contract: the workflow hands over an ID, this
 // activity reads the actual content).
 //
-// Deliberately plain text, not Discord message components (buttons) — that's
-// real, separate future scope (this doc's own Open Questions, "interactive
-// components for response routing"), not attempted here. This pass only
-// closes the PUSH half of the gap; a human answering still has to go through
-// whatever response-routing mechanism gets built next (a slash command, a
-// button, or — until then — nothing at all for Discord specifically, same
-// as before this activity existed).
+// **Options render as real Discord buttons** (message components) —
+// docs/components/user-input.md's response-routing resolution for Discord
+// text (2026-08-28). Each button's custom_id is
+// "user_input:{request_id}:{option_id}", which discord_user_input.go's
+// interaction handler parses to route the click back as a
+// UserInputResponse signal against the exact target workflow. Falls back
+// to plain text (no components) for zero-options requests — a free-text-
+// only request has nothing to render as a button, and Discord rejects an
+// ActionRow with zero children anyway.
+//
+// Discord's own limits (verified against the API docs before writing):
+// max 5 buttons per ActionRow, max 5 ActionRows per message, custom_id
+// max 100 chars. We hard-cap options at 25 (5 rows × 5 each) — beyond
+// that a UI-selectable list would be the right shape, but no consumer
+// today generates more than a handful of options, so accepting the cap
+// rather than adding an unused fallback path.
 //
 // Idempotency via prompt_delivered_at (008_user_input_interim_delivery.sql),
 // deliberately separate from user_input_requests.status: "was the prompt
@@ -220,15 +281,11 @@ func (a *discordDeliverActivity) DeliverInterim(ctx context.Context, requestID s
 		return err
 	}
 
-	content := prompt
-	for i, opt := range options {
-		content += fmt.Sprintf("\n%d. %s", i+1, opt.Label)
-	}
+	send := &discordgo.MessageSend{Content: prompt}
 	if len(options) > 0 {
-		content += "\n\nReply with the option's number."
+		send.Components = buildUserInputComponents(requestID, options)
 	}
-
-	msg, err := a.session.ChannelMessageSend(channelID, content)
+	msg, err := a.session.ChannelMessageSendComplex(channelID, send)
 	if err != nil {
 		return err
 	}
@@ -236,8 +293,10 @@ func (a *discordDeliverActivity) DeliverInterim(ctx context.Context, requestID s
 	// this, a later organic reply to this exact prompt message would hit
 	// resolveDiscordThreadRoot's "bot message has no ambient row" gap all
 	// over again (the fix built earlier this session), just for a different
-	// kind of bot-sent message.
-	a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, content)
+	// kind of bot-sent message. Records the prompt text only (not the
+	// options, which are now buttons rather than inline text) — the
+	// options are Discord UI state, not conversational content.
+	a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, prompt)
 
 	if _, err := a.pool.Exec(ctx,
 		"UPDATE user_input_requests SET prompt_delivered_at = now() WHERE request_id = $1", requestID,

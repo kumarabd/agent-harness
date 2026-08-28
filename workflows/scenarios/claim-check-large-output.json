@@ -1,0 +1,39 @@
+{
+  "message": {
+    "role": "user",
+    "content": "produce some large stdout, then inspect the claim-check file"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Producing ~6KB of stdout — should be too big to inline and get routed to the claim-check store.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": {
+            "command": "seq 1 1000 | awk '{printf \"line-%04d payload-payload-payload\\n\", $1}'"
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 30 }
+    },
+    {
+      "content": "Output was large — the reference has a claim_check_path. Reading the last few lines to confirm the tail is available on disk.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": {
+            "command": "tail -3 .claim-check/*.stdout.log && wc -c .claim-check/*.stdout.log"
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 130, "output_tokens": 30 }
+    },
+    {
+      "content": "Claim-check round trip verified — full output persisted, model retrieved the tail via a normal shell command.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 150, "output_tokens": 20 }
+    }
+  ]
+}

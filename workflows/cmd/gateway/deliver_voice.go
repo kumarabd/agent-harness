@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"time"
@@ -25,6 +24,23 @@ type voiceDeliverActivity struct {
 	vc           *discordgo.VoiceConnection
 	pool         *pgxpool.Pool
 	connectionID string
+	// session — the PARENT Discord session that opened vc. Used by
+	// DeliverInterim below to send the text-chat message carrying the
+	// user-input buttons (docs/components/user-input.md, "Resolved:
+	// Response-Routing for Discord Voice — Reuse the Text Button Flow"):
+	// vc alone can send audio but not text messages, so speaking the
+	// prompt AND pushing buttons to the voice channel's attached text
+	// chat both happen from this activity, needing both the voice
+	// connection and the parent session.
+	session *discordgo.Session
+	// voiceChannelID — the Discord voice channel ID this vc joined,
+	// which (Discord's own unified voice+text chat, since 2022) doubles
+	// as the text-chat channel ID DeliverInterim posts the buttons
+	// message to. Same value as sessions.channel_id for this voice
+	// session (discord_voice.go's inbound MessageEvent uses
+	// ChannelID=channelID), which is what makes discord_user_input.go's
+	// per-channel defense check pass unchanged.
+	voiceChannelID string
 	// bargeIn — docs/components/gateway.md's "Resolved: Voice Platforms —
 	// Cascaded Architecture" fast-path barge-in. Shared with
 	// discord_voice.go's voiceCaptureLoop for this same connection
@@ -218,27 +234,49 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	return markDelivered()
 }
 
-// DeliverInterim speaks a pending user_input_requests row's prompt+options
-// — docs/components/user-input.md's "Mid-turn interim delivery" (push half,
-// A+B). Takes requestID, not turnID: everything this needs (prompt, options,
-// and its own idempotency marker) lives on that row itself, written by
-// RequestUserInput right before UserInputRequestWorkflow dispatches this —
-// the same reference-passing shape Deliver's own turnID param has, just
-// pointed at a different table.
+// DeliverInterim speaks a pending user_input_requests row's prompt AND
+// posts a buttons-message to the same voice channel's text chat — the
+// spoken half is the audible cue that a decision is required, the text
+// buttons are how the human actually answers (docs/components/user-input.md,
+// "Resolved: Response-Routing for Discord Voice — Reuse the Text Button
+// Flow"). Takes requestID, not turnID: everything this needs (prompt,
+// options, and its own idempotency marker) lives on that row itself,
+// written by RequestUserInput right before UserInputRequestWorkflow
+// dispatches this — the same reference-passing shape Deliver's own
+// turnID param has, just pointed at a different table.
 //
-// Deliberately the simplest possible spoken rendering — prompt, then each
-// option's label read out with its number — not a real dialogue turn (no
-// attempt at natural phrasing/TTS-friendly restructuring the way
-// platform_prompts.go's system prompt shapes a real model response).
-// Response-routing (recognizing the next utterance as an answer to THIS
-// request rather than a new ordinary turn) is real, separate, harder future
-// scope — gateway/discord-voice.md doesn't have a button equivalent for
-// voice — not attempted here; this only closes the push half.
+// **Response-routing reuses the Discord text flow verbatim.** Discord
+// voice channels have unified voice+text since 2022: the voice channel's
+// attached text chat shares its channel ID exactly. So a text-with-
+// buttons message posted to the voice channel is visible to everyone in
+// the voice call, and a button click goes through the SAME
+// discord_user_input.go handler (its per-channel defense check
+// `sessions.channel_id == ic.ChannelID` passes because the voice
+// session's channel_id IS the voice channel's ID). No new handler, no
+// new signal, no new schema — the button click resolves the same
+// UserInputRequestWorkflow the spoken prompt referred to. A native
+// voice-only response mechanism (utterance gating + fuzzy label
+// matching) is genuinely separate work and can replace this later; for
+// now, buttons in text chat is a real working answer path where none
+// existed before.
+//
+// The spoken half deliberately does NOT read out the options — the
+// user is already going to look at the text chat to click; reading
+// numbered options aloud would be redundant and awkward. The spoken
+// content is just the prompt followed by "See the text chat to
+// respond." — a clean audible cue, not a full dialogue turn.
 //
 // Idempotency via prompt_delivered_at, independent of delivered_responses
 // (that ledger is turn-final-answer-only) and independent of
 // user_input_requests.status — same reasoning as DiscordDeliverInterim's
-// own comment (deliver_discord.go).
+// own comment (deliver_discord.go). Covers both the speak and the
+// text-post together — either both happen (marked delivered) or the
+// activity retries. A retry that ran ONE of them successfully but
+// failed the other would be a genuine issue, but the ordering below
+// (speak first, then post buttons, then mark delivered) keeps the
+// dominant failure case — a Kokoro or Discord API failure — on the
+// side that hasn't yet marked complete, so a retry redoes the whole
+// thing rather than leaving an orphan.
 func (a *voiceDeliverActivity) DeliverInterim(ctx context.Context, requestID string) error {
 	var alreadyDelivered bool
 	if err := a.pool.QueryRow(ctx,
@@ -266,8 +304,13 @@ func (a *voiceDeliverActivity) DeliverInterim(ctx context.Context, requestID str
 	}
 
 	spoken := prompt
-	for i, opt := range options {
-		spoken += fmt.Sprintf(". Option %d: %s", i+1, opt.Label)
+	if len(options) > 0 {
+		// The audible cue that a decision is required — the human is
+		// going to answer via buttons in the text chat, not by
+		// speaking, so this deliberately does NOT read out the
+		// numbered options (would be redundant + awkward). Confirmed
+		// UX choice 2026-08-28.
+		spoken += ". See the text chat to respond."
 	}
 	spoken = sanitizeForSpeech(spoken)
 	if spoken == "" {
@@ -307,6 +350,24 @@ func (a *voiceDeliverActivity) DeliverInterim(ctx context.Context, requestID str
 		log.Printf("discord-voice: interim prompt playback interrupted by barge-in for request %s", requestID)
 	} else if err := a.vc.Speaking(false); err != nil {
 		log.Printf("discord-voice: failed to clear speaking state: %v", err)
+	}
+
+	// Post the buttons to the voice channel's text chat. Skipped for
+	// zero-option (free-text) requests — no buttons to render, and a
+	// text-based free-text answer path for voice isn't built yet
+	// (a future utterance-gating mechanism would cover it natively).
+	// A text-post failure logs but doesn't fail the whole activity:
+	// the spoken prompt already played, retrying it would replay audio
+	// the user already heard, and the human can still respond by
+	// asking again next turn — degrades honestly, not silently.
+	if len(options) > 0 {
+		send := &discordgo.MessageSend{
+			Content:    prompt,
+			Components: buildUserInputComponents(requestID, options),
+		}
+		if _, err := a.session.ChannelMessageSendComplex(a.voiceChannelID, send); err != nil {
+			log.Printf("discord-voice: failed to post user-input buttons to text chat for request %s: %v", requestID, err)
+		}
 	}
 
 	if _, err := a.pool.Exec(ctx,

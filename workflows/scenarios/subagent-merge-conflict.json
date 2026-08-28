@@ -1,0 +1,79 @@
+{
+  "message": {
+    "role": "user",
+    "content": "delegate a write, then also write the same file locally, then try to merge"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Delegating the initial write.",
+      "tool_calls": [
+        {
+          "name": "spawn_subagent",
+          "is_subagent": true,
+          "arguments": {
+            "prompt": "create shared.txt with 'from subagent'",
+            "scripted_model_responses": [
+              {
+                "content": "Writing shared.txt in my own subtree.",
+                "tool_calls": [
+                  {
+                    "name": "shell_exec",
+                    "arguments": { "command": "echo 'from subagent' > shared.txt" },
+                    "is_subagent": false
+                  }
+                ],
+                "usage": { "input_tokens": 60, "output_tokens": 20 }
+              },
+              {
+                "content": "Done.",
+                "tool_calls": [],
+                "usage": { "input_tokens": 70, "output_tokens": 15 }
+              }
+            ]
+          }
+        }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 40 }
+    },
+    {
+      "content": "Subagent is done. Before merging, I'll write shared.txt locally too — this will race with the merge and should be reported as a conflict.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": { "command": "echo 'from parent, written after subagent finished' > shared.txt" },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 120, "output_tokens": 30 }
+    },
+    {
+      "content": "Now attempting the merge. The destination shared.txt was written AFTER the subagent started, so the merge should skip it and report a conflict rather than overwrite.",
+      "tool_calls": [
+        {
+          "name": "merge_subagent_output",
+          "arguments": {
+            "subagent_turn_id": "merge-conflict:turn:1:sub:1"
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 140, "output_tokens": 30 }
+    },
+    {
+      "content": "Confirming the parent's own version survived the merge.",
+      "tool_calls": [
+        {
+          "name": "shell_exec",
+          "arguments": { "command": "cat shared.txt" },
+          "is_subagent": false
+        }
+      ],
+      "usage": { "input_tokens": 160, "output_tokens": 20 }
+    },
+    {
+      "content": "Conflict correctly reported and the parent's file was preserved.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 180, "output_tokens": 20 }
+    }
+  ]
+}

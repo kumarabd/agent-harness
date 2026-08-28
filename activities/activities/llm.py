@@ -1,8 +1,13 @@
-"""Real LLM integration for ModelCall (activities/activities/model_call.py) —
-provider is Pioneer, an OpenAI-API-compatible endpoint (the openai SDK's
-base_url override, no separate client library needed — see worker.py's
-AsyncOpenAI construction). No provider is specified anywhere in docs/; this
-was a free choice.
+"""Real LLM integration for ModelCall (activities/activities/model_call.py).
+
+This module owns the provider-NEUTRAL side of the LLM call: the tools
+schema every provider advertises, the default system prompt, the
+`build_conversation` context-assembly helper (session-start memory
+retrieval + LCM assembly), and the RealModelResult return shape. The
+actual per-provider request/response translation lives in
+activities/activities/providers/ (Provider ABC — OpenAI-compatible
+covers real OpenAI, DeepSeek, Qwen/DashScope, Groq, OpenRouter, Crusoe,
+etc.; Anthropic is its own class). See docs/components/model-registry.md.
 
 Only invoked when no test fixture exists for a given (turn_id, context_seq) —
 model_call.py's fixture-first branch is unchanged; this module only fills in
@@ -57,14 +62,10 @@ instead.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 from dataclasses import dataclass, field
 
-from openai import AsyncOpenAI
-
-from . import agent_brain, ids, lcm, model_registry, sentence_segmenter
+from . import agent_brain, ids, lcm, model_registry
 from .types import Usage
 
 logger = logging.getLogger(__name__)
@@ -89,13 +90,64 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "shell_exec",
-            "description": "Execute a shell command in the session's working directory.",
+            "description": (
+                "Execute a shell command in the session's working directory. "
+                "stdout and stderr are each returned as either {\"inline\": <text>} "
+                "(small output) or a claim-check reference "
+                "{\"claim_check_path\": <path>, \"size_bytes\": N, \"head\": ..., "
+                "\"tail\": ..., \"exploration_summary\": {...}, \"note\": ...} "
+                "(large output). exploration_summary is type-aware: for JSON it "
+                "describes the schema/shape (keys, value types, array lengths); "
+                "for CSV it lists columns + row count + a few sample rows; for "
+                "unstructured text it includes a short natural-language summary "
+                "plus line/word counts. For a claim-check reference, use another "
+                "shell_exec call (cat, head, tail, grep) against claim_check_path "
+                "— which is relative to the session's working directory — to read "
+                "whichever specific part of the full output you need beyond what "
+                "the summary already tells you."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "The shell command to run."},
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "merge_subagent_output",
+            # docs/components/session-filesystem.md, "Resolved: Subagent
+            # Merge-Back Mechanics" — explicit, model-driven (never
+            # automatic). Files argument is optional: omitting it merges the
+            # whole subtree; providing a subset merges just those relative
+            # paths. Conflict rule (per the doc): a destination written
+            # after the subagent's start time is skipped and reported, not
+            # silently overwritten.
+            "description": (
+                "Merge a completed subagent's file changes into this turn's working directory. "
+                "Read the subagent's manifest (in its tool-call result) first to see what it "
+                "changed. Files newer in the destination than the subagent's start time are "
+                "skipped and returned in skipped_conflicts, not silently overwritten. "
+                "Destinations you wrote before the subagent started that the subagent then "
+                "modified are overwritten and returned in overwrote_parent_earlier."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "subagent_turn_id": {
+                        "type": "string",
+                        "description": "The subagent's turn_id (also its tool_call_id).",
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional subset of the manifest's relative paths to merge. Omit to merge everything.",
+                    },
+                },
+                "required": ["subagent_turn_id"],
             },
         },
     },
@@ -334,176 +386,13 @@ async def build_conversation(conn, turn_id: str, system_prompt: str) -> tuple[li
     return conversation, context_tokens
 
 
-async def call_model(client: AsyncOpenAI, conversation: list[dict], model: str) -> RealModelResult:
-    """model is resolved by the caller (model_call.py, via model_registry.py)
-    from this step's hint — not read from PIONEER_MODEL directly here
-    anymore, docs/components/model-registry.md's whole point being that the
-    model isn't fixed for the process's lifetime."""
-    if not model:
-        raise RuntimeError(
-            "No model resolved for this step - model_registry.py's LANGUAGE_<TIER>_MODEL/"
-            "PIONEER_MODEL are both unset. Set at least PIONEER_MODEL."
-        )
-    max_tokens = int(os.environ.get("PIONEER_MAX_TOKENS", "4096"))
-
-    response = await client.chat.completions.create(
-        model=model,
-        messages=conversation,
-        tools=TOOLS_SCHEMA,
-        max_tokens=max_tokens,
-    )
-    message = response.choices[0].message
-
-    raw_tool_calls = []
-    next_hint_modality, next_hint_tier = model_registry.default_hint()
-    for tc in message.tool_calls or []:
-        if tc.function.name == _NEXT_STEP_HINT_TOOL_NAME:
-            # Not a real, dispatchable tool call — pulled out here so
-            # tool_call.py/turn.go never see it as one. Malformed hint
-            # arguments degrade to the bootstrap default rather than
-            # failing the whole response.
-            try:
-                hint_args = json.loads(tc.function.arguments)
-                next_hint_modality = hint_args.get("modality", next_hint_modality)
-                next_hint_tier = hint_args.get("tier", next_hint_tier)
-            except (json.JSONDecodeError, AttributeError):
-                logger.warning("call_model: malformed %s arguments, using default hint", _NEXT_STEP_HINT_TOOL_NAME)
-            continue
-        raw_tool_calls.append(
-            {"name": tc.function.name, "arguments": json.loads(tc.function.arguments), "is_subagent": False}
-        )
-
-    usage = Usage(
-        input_tokens=response.usage.prompt_tokens if response.usage else 0,
-        output_tokens=response.usage.completion_tokens if response.usage else 0,
-    )
-    # messages.content is NOT NULL - the API can return content=None when the
-    # response is tool-calls-only.
-    return RealModelResult(
-        content=message.content or "",
-        raw_tool_calls=raw_tool_calls,
-        usage=usage,
-        next_hint_modality=next_hint_modality,
-        next_hint_tier=next_hint_tier,
-    )
-
-
-async def call_model_streaming(client: AsyncOpenAI, conversation: list[dict], model: str, on_chunk) -> RealModelResult:
-    """Streaming counterpart to call_model — docs/components/gateway.md's
-    "Resolved: ModelCall Streaming — Shared Infra, Text-First Rollout".
-    Used only for a turn's first ModelCall call (model_call.py gates this
-    on context_seq == 0, the "single-shot turns only" scope decided
-    directly): whether a turn turns out to need tool calls is only known
-    once this finishes, but chunks have to be delivered live, during the
-    call, for streaming to have any latency benefit at all — the rare case
-    where a turn streams content and then calls a tool anyway is accepted
-    as a known, bounded edge case (two messages instead of one), not
-    something this function tries to detect or prevent.
-
-    Returns the exact same RealModelResult shape as call_model, so every
-    caller past this function (model_call.py's own downstream processing)
-    is unaffected by which path produced it.
-
-    on_chunk is an async callable, invoked once per completed sentence
-    boundary (sentence_segmenter.find_boundary) with the CUMULATIVE content
-    delivered so far, not just the new increment — Discord's edit API
-    replaces a message's whole content, so the delivery side needs the
-    running total, not a diff. Called once more at the very end with
-    whatever trailing text never hit a sentence boundary (e.g. a response
-    that doesn't end in .!?), so the final delivered text always exactly
-    matches the complete response, never cut short by segmentation.
-
-    2026-08-26: also used for Discord voice (model_call.py's own platform
-    gate), which needs each chunk's own NEW sentence(s) for TTS, not the
-    running total — deliberately left as this function's caller's problem
-    (turn_deliveries.content stays cumulative for every platform, and
-    deliver_voice_chunk.go computes the delta itself from consecutive rows)
-    rather than changing this function's contract, since Discord text is
-    still the only real consumer of the cumulative shape and there's no
-    reason to make it aware voice exists at all.
-    """
-    if not model:
-        raise RuntimeError(
-            "No model resolved for this step - model_registry.py's LANGUAGE_<TIER>_MODEL/"
-            "PIONEER_MODEL are both unset. Set at least PIONEER_MODEL."
-        )
-    max_tokens = int(os.environ.get("PIONEER_MAX_TOKENS", "4096"))
-
-    stream = await client.chat.completions.create(
-        model=model,
-        messages=conversation,
-        tools=TOOLS_SCHEMA,
-        max_tokens=max_tokens,
-        stream=True,
-        stream_options={"include_usage": True},
-    )
-
-    content_buffer = ""
-    unflushed = ""
-    # Tool calls accumulate by index — OpenAI's streaming shape sends each
-    # tool call's name/arguments as fragments across multiple chunks,
-    # matched by the delta's own index, never assumed to arrive whole.
-    tool_call_frags: dict[int, dict] = {}
-    usage = Usage()
-
-    async for chunk in stream:
-        if chunk.usage is not None:
-            usage = Usage(
-                input_tokens=chunk.usage.prompt_tokens or 0,
-                output_tokens=chunk.usage.completion_tokens or 0,
-            )
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
-        if delta.content:
-            content_buffer += delta.content
-            unflushed += delta.content
-            while True:
-                boundary = sentence_segmenter.find_boundary(unflushed)
-                if boundary is None:
-                    break
-                unflushed = unflushed[boundary:]
-                await on_chunk(content_buffer[: len(content_buffer) - len(unflushed)])
-        for tc in delta.tool_calls or []:
-            frag = tool_call_frags.setdefault(tc.index, {"name": "", "arguments": ""})
-            if tc.function and tc.function.name:
-                frag["name"] += tc.function.name
-            if tc.function and tc.function.arguments:
-                frag["arguments"] += tc.function.arguments
-
-    if unflushed:
-        # Final forced flush — see docstring: the last delivered chunk must
-        # always equal the complete response, regardless of whether it
-        # ends on a real sentence boundary.
-        await on_chunk(content_buffer)
-
-    raw_tool_calls = []
-    next_hint_modality, next_hint_tier = model_registry.default_hint()
-    for idx in sorted(tool_call_frags):
-        frag = tool_call_frags[idx]
-        if frag["name"] == _NEXT_STEP_HINT_TOOL_NAME:
-            try:
-                hint_args = json.loads(frag["arguments"])
-                next_hint_modality = hint_args.get("modality", next_hint_modality)
-                next_hint_tier = hint_args.get("tier", next_hint_tier)
-            except (json.JSONDecodeError, AttributeError):
-                logger.warning(
-                    "call_model_streaming: malformed %s arguments, using default hint", _NEXT_STEP_HINT_TOOL_NAME
-                )
-            continue
-        try:
-            arguments = json.loads(frag["arguments"]) if frag["arguments"] else {}
-        except json.JSONDecodeError:
-            logger.warning(
-                "call_model_streaming: malformed tool call arguments for %s, treating as empty", frag["name"]
-            )
-            arguments = {}
-        raw_tool_calls.append({"name": frag["name"], "arguments": arguments, "is_subagent": False})
-
-    return RealModelResult(
-        content=content_buffer,
-        raw_tool_calls=raw_tool_calls,
-        usage=usage,
-        next_hint_modality=next_hint_modality,
-        next_hint_tier=next_hint_tier,
-    )
+# call_model / call_model_streaming moved to
+# activities/activities/providers/openai_provider.py (2026-08-28, third
+# revision) — each provider owns its own request/response translation
+# now, dispatched via Provider ABC (providers/base.py) rather than
+# inlined here. Callers (model_call.py, compress_context, exploration_summary)
+# use provider.call_model / provider.call_model_streaming /
+# provider.summarize_text via the Provider they got from
+# llm_client.get_provider(config). This module now only owns the
+# provider-neutral pieces: TOOLS_SCHEMA, DEFAULT_SYSTEM_PROMPT,
+# build_conversation, RealModelResult.
