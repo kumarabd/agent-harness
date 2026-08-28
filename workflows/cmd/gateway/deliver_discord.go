@@ -58,10 +58,10 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 		return err
 	}
 
-	var channelID, content string
+	var channelID, sessionKey, content string
 	var streamedMessageRef *string
 	err := a.pool.QueryRow(ctx, `
-		SELECT s.channel_id, m.content, t.streamed_message_ref
+		SELECT s.channel_id, s.session_key, m.content, t.streamed_message_ref
 		FROM turns t
 		JOIN sessions s ON s.session_key = t.parent_id
 		JOIN LATERAL (
@@ -70,7 +70,7 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 			ORDER BY seq DESC LIMIT 1
 		) m ON true
 		WHERE t.turn_id = $1
-	`, turnID).Scan(&channelID, &content, &streamedMessageRef)
+	`, turnID).Scan(&channelID, &sessionKey, &content, &streamedMessageRef)
 	if err != nil {
 		return err
 	}
@@ -121,11 +121,44 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 		}
 	}
 
-	if _, err := a.session.ChannelMessageSend(channelID, content); err != nil {
+	msg, err := a.session.ChannelMessageSend(channelID, content)
+	if err != nil {
 		return err
 	}
+	a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, content)
 	log.Printf("discord: delivered turn %s to channel %s via connection %s", turnID, channelID, a.connectionID)
 	return markDelivered()
+}
+
+// recordAmbientBotMessage mirrors the bot's own sent/edited message into
+// discord_ambient_messages — gateway/discord.md's "Discord-side reply-chain
+// resolution past the bot's own messages" gap. Deliberately best-effort: the
+// real Discord send has already succeeded by the time this is called, so a
+// failure here must never turn into a retried (and therefore duplicated)
+// send — log and move on, same tolerance discord.go's own best-effort
+// logging elsewhere in this package uses, not the fail-the-whole-activity
+// treatment a pre-send failure would warrant.
+//
+// ON CONFLICT DO UPDATE (not discordMessageCreate's own DO NOTHING) is
+// deliberate: a human message's content is fixed the moment it's sent, but a
+// streamed bot message's content genuinely changes across DeliverChunk's own
+// edit-in-place calls — this keeps the ambient mirror's content current
+// through every edit, not just the first chunk, while a message's
+// reply_to_platform_message_id (derived once from its session's own root)
+// never actually changes across those re-writes.
+func (a *discordDeliverActivity) recordAmbientBotMessage(ctx context.Context, channelID, messageID, sessionKey, content string) {
+	var replyTo *string
+	if root := discordThreadRootFromSessionKey(sessionKey); root != "" {
+		replyTo = &root
+	}
+	if _, err := a.pool.Exec(ctx,
+		"INSERT INTO discord_ambient_messages (channel_id, platform_message_id, reply_to_platform_message_id, author, content) "+
+			"VALUES ($1, $2, $3, $4, $5) "+
+			"ON CONFLICT (channel_id, platform_message_id) DO UPDATE SET content = EXCLUDED.content",
+		channelID, messageID, replyTo, a.connectionID, content,
+	); err != nil {
+		log.Printf("discord: failed to record ambient bot message %s: %v", messageID, err)
+	}
 }
 
 // DiscordDeliverChunk delivers one streamed sentence-chunk (docs/components/
@@ -165,13 +198,13 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 		return err
 	}
 
-	var channelID string
+	var channelID, sessionKey string
 	var streamedMessageRef *string
 	err = a.pool.QueryRow(ctx, `
-		SELECT s.channel_id, t.streamed_message_ref
+		SELECT s.channel_id, s.session_key, t.streamed_message_ref
 		FROM turns t JOIN sessions s ON s.session_key = t.parent_id
 		WHERE t.turn_id = $1
-	`, turnID).Scan(&channelID, &streamedMessageRef)
+	`, turnID).Scan(&channelID, &sessionKey, &streamedMessageRef)
 	if err != nil {
 		return err
 	}
@@ -187,6 +220,7 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 		); err != nil {
 			return err
 		}
+		a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, content)
 		log.Printf("discord: turn %s streamed chunk %d created message %s", turnID, seq, msg.ID)
 		return markSent()
 	}
@@ -194,6 +228,14 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 	if _, err := a.session.ChannelMessageEdit(channelID, *streamedMessageRef, content); err != nil {
 		return err
 	}
+	// Same message id as the create branch above — this call keeps the
+	// ambient mirror's content current through the edit (ON CONFLICT DO
+	// UPDATE, recordAmbientBotMessage's own comment), so a reply arriving
+	// mid-stream still sees the latest text, not a stale first-chunk
+	// snapshot. reply_to_platform_message_id is recomputed identically from
+	// the same sessionKey each call — deterministic, so re-writing it here
+	// is a no-op in practice, not a risk of drifting to a different value.
+	a.recordAmbientBotMessage(ctx, channelID, *streamedMessageRef, sessionKey, content)
 	log.Printf("discord: turn %s streamed chunk %d edited message %s", turnID, seq, *streamedMessageRef)
 	return markSent()
 }

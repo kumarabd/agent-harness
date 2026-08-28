@@ -158,7 +158,59 @@ func (s *server) discordMessageCreate(session *discordgo.Session, m *discordgo.M
 	if m.Author == nil || m.Author.Bot {
 		return
 	}
+	// gateway/discord.md's "Non-content MessageCreate events aren't filtered
+	// by type" gap: MessageTypeDefault (a plain post) and MessageTypeReply
+	// are the only two types that represent genuine human conversational
+	// content. Everything else Discord delivers as a MessageCreate too — a
+	// channel-follow-add, a guild-boost announcement, an "app added, here's
+	// how to get started" card, a call-start notification, a thread-created
+	// system message — is Discord-generated, not a human saying something,
+	// and must never reach discord_ambient_messages or trigger a turn. Real
+	// and observed in a personal DM specifically, where every message is
+	// already an implicit trigger with no mention/reply gate to catch this
+	// the way a guild channel incidentally would. Checked first, before the
+	// ambient insert, so a filtered event leaves no trace at all.
+	if m.Type != discordgo.MessageTypeDefault && m.Type != discordgo.MessageTypeReply {
+		return
+	}
 	ctx := context.Background()
+
+	// gateway/discord.md's "Attachments/stickers/audio as real triggering
+	// content" plan, the voice-message third of it, built out: Discord's own
+	// voice-message feature always sends an empty m.Content — the real
+	// content only exists as the attached Ogg/Opus clip — so resolve it to a
+	// real transcript here, before anything downstream (ambient buffer,
+	// mention/reply gate, MessageEvent) ever looks at "content" at all. A
+	// transcription failure means there is no usable content to fall back
+	// to (unlike a plain attachment/sticker, there's no text placeholder
+	// that means anything for spoken audio), so this drops the message
+	// entirely rather than recording an empty/misleading ambient row.
+	content := m.Content
+	if m.Flags&discordgo.MessageFlagsIsVoiceMessage != 0 {
+		transcript, err := discordVoiceMessageContent(ctx, m)
+		if err != nil {
+			log.Printf("discord: failed to transcribe voice message: %v", err)
+			return
+		}
+		// Same downstream filtering discord_voice.go's own flush applies to a
+		// live utterance transcript, reused rather than skipped just because
+		// this path is a discrete upload, not a live stream: an empty
+		// transcript (silence, or nothing intelligible) or a pure vocal
+		// filler ("um"/"uh", voiceFillerWords) carries no real content, and
+		// letting it through would fire a turn (or even just an ambient row)
+		// for nothing a human actually said. isBackchannelOnly is
+		// deliberately NOT applied here — it's gated on the utterance having
+		// started while the bot was actively speaking in a live voice
+		// connection (speakerBuffer's startedDuringPlayback), a context that
+		// doesn't exist for a voice note dropped into a text channel.
+		if transcript == "" || isFillerOnly(transcript) {
+			if transcript != "" {
+				log.Printf("discord: filtered filler-only voice message transcript %q, no message recorded", transcript)
+			}
+			return
+		}
+		content = transcript
+	}
 
 	var replyTo *string
 	if m.MessageReference != nil && m.MessageReference.MessageID != "" {
@@ -169,7 +221,7 @@ func (s *server) discordMessageCreate(session *discordgo.Session, m *discordgo.M
 	if _, err := s.pool.Exec(ctx,
 		"INSERT INTO discord_ambient_messages (channel_id, platform_message_id, reply_to_platform_message_id, author, content) "+
 			"VALUES ($1, $2, $3, $4, $5) ON CONFLICT (channel_id, platform_message_id) DO NOTHING",
-		m.ChannelID, m.ID, replyTo, m.Author.ID, m.Content,
+		m.ChannelID, m.ID, replyTo, m.Author.ID, content,
 	); err != nil {
 		log.Printf("discord: failed to record ambient message: %v", err)
 		return
@@ -229,7 +281,7 @@ func (s *server) discordMessageCreate(session *discordgo.Session, m *discordgo.M
 		Platform:          "discord",
 		ChannelID:         m.ChannelID,
 		User:              m.Author.ID,
-		Content:           m.Content,
+		Content:           content,
 		PlatformMessageID: m.ID,
 		Discriminator:     discriminator,
 		ParentSessionKey:  parentSessionKey,

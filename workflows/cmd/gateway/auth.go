@@ -97,3 +97,30 @@ func sessionKeyFor(platform, channelID, discriminator string) string {
 		panic("sessionKeyFor: unsupported platform " + platform)
 	}
 }
+
+// discordThreadRootFromSessionKey is sessionKeyFor's own "discord" case run
+// backward: a reply-scoped session's key already durably encodes the reply
+// chain's root platform_message_id ("agent:main:discord:channel:{id}:thread:{rootID}"),
+// so recovering it needs no new column — the session_key IS the record
+// (gateway.md's "Resolved: Multi-Session Channels" — the graph lives in
+// Postgres, and this is exactly the Postgres data it lives as).
+//
+// deliver_discord.go's own use: recording the bot's own sent message into
+// discord_ambient_messages with the correct reply_to_platform_message_id, so
+// a later human reply to that message continues resolving to the same
+// thread root instead of resolveDiscordThreadRoot hitting a dead end on the
+// bot's message and falling back to the main channel session — the real gap
+// this closes (gateway/discord.md's "Discord-side reply-chain resolution
+// past the bot's own messages").
+//
+// Returns "" for the main channel session (no ":thread:" suffix) — a plain,
+// non-threaded answer isn't itself a reply to anything, matching how a
+// human's own first message in a chain has no reply_to_platform_message_id
+// either.
+func discordThreadRootFromSessionKey(sessionKey string) string {
+	_, root, ok := strings.Cut(sessionKey, ":thread:")
+	if !ok {
+		return ""
+	}
+	return root
+}

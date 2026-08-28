@@ -64,13 +64,28 @@ var (
 // delta" endpointing principle — VAD decides turn completion, not STT
 // segment boundaries).
 func transcribeAudio(ctx context.Context, wavBytes []byte) (string, error) {
+	return transcribeAudioFile(ctx, wavBytes, "audio.wav")
+}
+
+// transcribeAudioFile is transcribeAudio generalized to an explicit
+// filename — added for discord_voice_message.go's own use, transcribing
+// Discord's recorded-and-uploaded voice-message attachments (real Ogg/Opus
+// files, not the raw-PCM WAV shape discord_voice.go's own VAD-buffered
+// utterances always produce). whisper-svc (the `speaches` project) picks
+// its decode path from the uploaded filename's own extension, not just the
+// multipart part's content-type, so transcribeAudio's original hardcoded
+// "audio.wav" would have silently mis-decoded any non-WAV input — this is
+// the one thing that hardcoding couldn't express. Same OpenAI-compatible
+// /v1/audio/transcriptions contract and streaming-segment handling either
+// way.
+func transcribeAudioFile(ctx context.Context, audioBytes []byte, filename string) (string, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("file", "audio.wav")
+	part, err := writer.CreateFormFile("file", filename)
 	if err != nil {
 		return "", err
 	}
-	if _, err := part.Write(wavBytes); err != nil {
+	if _, err := part.Write(audioBytes); err != nil {
 		return "", err
 	}
 	if err := writer.WriteField("model", sttModel); err != nil {
@@ -99,7 +114,7 @@ func transcribeAudio(ctx context.Context, wavBytes []byte) (string, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("transcribeAudio: %s: %s", resp.Status, string(respBody))
+		return "", fmt.Errorf("transcribeAudioFile: %s: %s", resp.Status, string(respBody))
 	}
 
 	// Real SSE, verified directly: "data: {\"text\": \"...\"}\n\n" per
@@ -128,7 +143,7 @@ func transcribeAudio(ctx context.Context, wavBytes []byte) (string, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("transcribeAudio: error reading stream: %w", err)
+		return "", fmt.Errorf("transcribeAudioFile: error reading stream: %w", err)
 	}
 	return strings.Join(segments, " "), nil
 }
