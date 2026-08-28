@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 
 	"github.com/bwmarrin/discordgo"
@@ -159,6 +161,91 @@ func (a *discordDeliverActivity) recordAmbientBotMessage(ctx context.Context, ch
 	); err != nil {
 		log.Printf("discord: failed to record ambient bot message %s: %v", messageID, err)
 	}
+}
+
+// DeliverInterim pushes a pending user_input_requests row's prompt+options
+// out to the Discord channel — docs/components/user-input.md's "Mid-turn
+// interim delivery" (push half, A+B). Takes requestID, not turnID: unlike
+// Deliver/DeliverChunk (which read a turn's own content), everything this
+// needs — prompt, options, and (via one more join) the routing to a real
+// channel_id — already lives on the user_input_requests row itself by the
+// time UserInputRequestWorkflow dispatches this, right after RequestUserInput
+// wrote it (reference-passing contract: the workflow hands over an ID, this
+// activity reads the actual content).
+//
+// Deliberately plain text, not Discord message components (buttons) — that's
+// real, separate future scope (this doc's own Open Questions, "interactive
+// components for response routing"), not attempted here. This pass only
+// closes the PUSH half of the gap; a human answering still has to go through
+// whatever response-routing mechanism gets built next (a slash command, a
+// button, or — until then — nothing at all for Discord specifically, same
+// as before this activity existed).
+//
+// Idempotency via prompt_delivered_at (008_user_input_interim_delivery.sql),
+// deliberately separate from user_input_requests.status: "was the prompt
+// pushed" and "has the human answered" are different questions — a Temporal
+// retry of the dispatching ExecuteActivity call must not re-send the prompt
+// a second time even though status is still 'pending'. Same
+// check-before-send/mark-after-send-succeeds shape as Deliver's own fixed
+// idempotency bug above — never claim delivery before the real send
+// succeeds.
+func (a *discordDeliverActivity) DeliverInterim(ctx context.Context, requestID string) error {
+	var alreadyDelivered bool
+	if err := a.pool.QueryRow(ctx,
+		"SELECT prompt_delivered_at IS NOT NULL FROM user_input_requests WHERE request_id = $1", requestID,
+	).Scan(&alreadyDelivered); err != nil {
+		return err
+	}
+	if alreadyDelivered {
+		return nil
+	}
+
+	var channelID, sessionKey, prompt string
+	var optionsJSON []byte
+	err := a.pool.QueryRow(ctx, `
+		SELECT s.channel_id, s.session_key, r.prompt, r.options
+		FROM user_input_requests r
+		JOIN turns t ON t.turn_id = r.turn_id
+		JOIN sessions s ON s.session_key = t.parent_id
+		WHERE r.request_id = $1
+	`, requestID).Scan(&channelID, &sessionKey, &prompt, &optionsJSON)
+	if err != nil {
+		return err
+	}
+	var options []struct {
+		ID    string `json:"id"`
+		Label string `json:"label"`
+	}
+	if err := json.Unmarshal(optionsJSON, &options); err != nil {
+		return err
+	}
+
+	content := prompt
+	for i, opt := range options {
+		content += fmt.Sprintf("\n%d. %s", i+1, opt.Label)
+	}
+	if len(options) > 0 {
+		content += "\n\nReply with the option's number."
+	}
+
+	msg, err := a.session.ChannelMessageSend(channelID, content)
+	if err != nil {
+		return err
+	}
+	// Same reasoning as Deliver's own recordAmbientBotMessage call: without
+	// this, a later organic reply to this exact prompt message would hit
+	// resolveDiscordThreadRoot's "bot message has no ambient row" gap all
+	// over again (the fix built earlier this session), just for a different
+	// kind of bot-sent message.
+	a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, content)
+
+	if _, err := a.pool.Exec(ctx,
+		"UPDATE user_input_requests SET prompt_delivered_at = now() WHERE request_id = $1", requestID,
+	); err != nil {
+		return err
+	}
+	log.Printf("discord: pushed pending request %s prompt to channel %s via connection %s", requestID, channelID, a.connectionID)
+	return nil
 }
 
 // DiscordDeliverChunk delivers one streamed sentence-chunk (docs/components/

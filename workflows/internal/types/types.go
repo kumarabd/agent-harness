@@ -252,6 +252,23 @@ type ApprovalGatedCallSpec struct {
 type UserInputRequestWorkflowInput struct {
 	Request           UserInputRequest       `json:"request"`
 	ApprovalGatedCall *ApprovalGatedCallSpec `json:"approval_gated_call,omitempty"`
+	// SessionKey/ConnectionID — docs/components/user-input.md's "Mid-turn
+	// interim delivery" (push half). Workflow-dispatch-only routing
+	// metadata, same scoping rationale as ApprovalGatedCall above: kept off
+	// UserInputRequest itself (which RequestUserInputActivity persists
+	// verbatim to Postgres and has no use for these) rather than threaded
+	// through as a second, driftable copy. UserInputRequestWorkflow needs
+	// them BEFORE dispatching an interim-delivery activity, not just able to
+	// look them up inside one — Temporal requires the task queue
+	// (deliver:{platform}:{connection_id}) to be chosen at ExecuteActivity
+	// call time, the same reason turn.go's own deliverConnectionBased
+	// resolves platform/connection_id before dispatch rather than inside
+	// the activity. ConnectionID empty (Web, or any platform with no
+	// connection-lease concept) means no interim push at all — Web already
+	// closes this gap via polling (gateway/web.md's handlePoll reading
+	// pending_input directly), no push needed.
+	SessionKey   string `json:"session_key,omitempty"`
+	ConnectionID string `json:"connection_id,omitempty"`
 }
 
 type UserInputRequestWorkflowOutput struct {

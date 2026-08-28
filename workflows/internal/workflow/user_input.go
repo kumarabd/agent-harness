@@ -3,6 +3,7 @@ package workflow
 import (
 	"time"
 
+	"go.temporal.io/sdk/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
@@ -59,6 +60,7 @@ func UserInputRequestWorkflow(ctx workflow.Context, input types.UserInputRequest
 	if err := workflow.ExecuteActivity(actx, "RequestUserInput", req, workflowID).Get(actx, nil); err != nil {
 		return types.UserInputRequestWorkflowOutput{}, err
 	}
+	dispatchInterimDelivery(ctx, input, logger)
 
 	signalChan := workflow.GetSignalChannel(ctx, UserInputResponseSignalName)
 	timerCtx, cancelTimer := workflow.WithCancel(ctx)
@@ -147,6 +149,68 @@ func UserInputRequestWorkflow(ctx workflow.Context, input types.UserInputRequest
 	}
 	out.ToolCallOutput = &toolOut
 	return out, nil
+}
+
+// connectionInterimDeliveryActivity mirrors connectionDeliveryActivity/
+// connectionDeliveryChunkActivity (turn.go) — same literal-lookup-not-a-
+// registry reasoning (two platforms exist today, a third is a one-line
+// addition). A separate lookup, not folded into either existing one:
+// pushing a pending request's prompt is a different activity, with a
+// different signature (takes request_id, not turn_id — the interim-
+// delivery activity reads prompt/options/channel routing off
+// user_input_requests itself, since that row already exists by the time
+// this is ever called), from either a turn's final answer (Deliver) or a
+// streamed chunk of one (DeliverChunk).
+func connectionInterimDeliveryActivity(platform string) (activityName string, timeout time.Duration, ok bool) {
+	switch platform {
+	case "discord":
+		return "DiscordDeliverInterim", activityTimeoutTierA, true
+	case "discord-voice":
+		return "VoiceDeliverInterim", 5 * time.Minute, true
+	default:
+		return "", 0, false
+	}
+}
+
+// dispatchInterimDelivery — docs/components/user-input.md's "Mid-turn
+// interim delivery" (push half, A+B). Best-effort, fire-and-forget from
+// this workflow's own perspective: a failure to PUSH the prompt must never
+// fail the whole UserInputRequestWorkflow (the request is already durably
+// recorded in Postgres by RequestUserInput above, and Web's own poll-based
+// surfacing — gateway/web.md's handlePoll — doesn't depend on this push at
+// all) — logged and swallowed, same tolerance this codebase already gives
+// Persist/Deliver's own best-effort bookkeeping calls.
+//
+// No connectionID means either Web (no connection-lease concept, already
+// solved by polling) or a plain decision-request consumer that never set
+// these fields — either way, nothing to push, silently a no-op rather than
+// an error, matching turn.go's own deliverConnectionBased short-circuit for
+// the same empty-connectionID case.
+//
+// Deliberately NOT raced against the response wait the way
+// deliverConnectionBased races final delivery against an interrupt: an
+// interim push is a fire-and-forget side effect with its own idempotency
+// (prompt_delivered_at), not something that needs to be cancelled if a
+// response arrives first — by the time it would matter, the send has
+// either already gone out or the activity call itself is short-lived
+// (activityTimeoutTierA/near-instant for text, bounded for voice TTS).
+func dispatchInterimDelivery(ctx workflow.Context, input types.UserInputRequestWorkflowInput, logger log.Logger) {
+	if input.ConnectionID == "" {
+		return
+	}
+	platform := platformFromSessionKey(input.SessionKey)
+	activityName, timeout, ok := connectionInterimDeliveryActivity(platform)
+	if !ok {
+		return
+	}
+	ao := workflow.ActivityOptions{
+		StartToCloseTimeout: timeout,
+		TaskQueue:           "deliver:" + platform + ":" + input.ConnectionID,
+	}
+	actx := workflow.WithActivityOptions(ctx, ao)
+	if err := workflow.ExecuteActivity(actx, activityName, input.Request.RequestID).Get(actx, nil); err != nil {
+		logger.Warn("dispatchInterimDelivery: failed to push pending request prompt", "request_id", input.Request.RequestID, "error", err)
+	}
 }
 
 // markDenied is a small, best-effort helper — the tool_calls row was minted

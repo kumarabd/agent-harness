@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"time"
@@ -214,6 +216,106 @@ func (a *voiceDeliverActivity) Deliver(ctx context.Context, turnID string) error
 	}
 	log.Printf("discord-voice: delivered turn %s via connection %s", turnID, a.connectionID)
 	return markDelivered()
+}
+
+// DeliverInterim speaks a pending user_input_requests row's prompt+options
+// — docs/components/user-input.md's "Mid-turn interim delivery" (push half,
+// A+B). Takes requestID, not turnID: everything this needs (prompt, options,
+// and its own idempotency marker) lives on that row itself, written by
+// RequestUserInput right before UserInputRequestWorkflow dispatches this —
+// the same reference-passing shape Deliver's own turnID param has, just
+// pointed at a different table.
+//
+// Deliberately the simplest possible spoken rendering — prompt, then each
+// option's label read out with its number — not a real dialogue turn (no
+// attempt at natural phrasing/TTS-friendly restructuring the way
+// platform_prompts.go's system prompt shapes a real model response).
+// Response-routing (recognizing the next utterance as an answer to THIS
+// request rather than a new ordinary turn) is real, separate, harder future
+// scope — gateway/discord-voice.md doesn't have a button equivalent for
+// voice — not attempted here; this only closes the push half.
+//
+// Idempotency via prompt_delivered_at, independent of delivered_responses
+// (that ledger is turn-final-answer-only) and independent of
+// user_input_requests.status — same reasoning as DiscordDeliverInterim's
+// own comment (deliver_discord.go).
+func (a *voiceDeliverActivity) DeliverInterim(ctx context.Context, requestID string) error {
+	var alreadyDelivered bool
+	if err := a.pool.QueryRow(ctx,
+		"SELECT prompt_delivered_at IS NOT NULL FROM user_input_requests WHERE request_id = $1", requestID,
+	).Scan(&alreadyDelivered); err != nil {
+		return err
+	}
+	if alreadyDelivered {
+		return nil
+	}
+
+	var prompt string
+	var optionsJSON []byte
+	if err := a.pool.QueryRow(ctx,
+		"SELECT prompt, options FROM user_input_requests WHERE request_id = $1", requestID,
+	).Scan(&prompt, &optionsJSON); err != nil {
+		return err
+	}
+	var options []struct {
+		ID    string `json:"id"`
+		Label string `json:"label"`
+	}
+	if err := json.Unmarshal(optionsJSON, &options); err != nil {
+		return err
+	}
+
+	spoken := prompt
+	for i, opt := range options {
+		spoken += fmt.Sprintf(". Option %d: %s", i+1, opt.Label)
+	}
+	spoken = sanitizeForSpeech(spoken)
+	if spoken == "" {
+		// Nothing left to speak (an entirely-emoji prompt would be unusual,
+		// but same defensive posture as Deliver's own empty-content check) —
+		// still a resolved outcome, mark delivered rather than leave the
+		// idempotency check finding nothing forever.
+		_, err := a.pool.Exec(ctx, "UPDATE user_input_requests SET prompt_delivered_at = now() WHERE request_id = $1", requestID)
+		return err
+	}
+
+	stream, err := synthesizeSpeechPCM(ctx, spoken)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+
+	enc, err := newVoiceOpusEncoder()
+	if err != nil {
+		return err
+	}
+
+	stopChan := a.bargeIn.startPlayback()
+	defer a.bargeIn.endPlayback(stopChan)
+	a.lifecycle.transitionTo(voiceLifecyclePlaying)
+	defer a.lifecycle.transitionTo(voiceLifecycleListening)
+
+	interrupted, err := streamPCMToOpus(ctx, stream, a.vc, enc, stopChan, nil)
+	if err != nil {
+		return err
+	}
+	if interrupted {
+		// Same treatment as Deliver's own barge-in case: a human talking
+		// over a spoken prompt is a resolved outcome, not a failure — and
+		// not retryable, since the human already heard however much of it
+		// played before interrupting.
+		log.Printf("discord-voice: interim prompt playback interrupted by barge-in for request %s", requestID)
+	} else if err := a.vc.Speaking(false); err != nil {
+		log.Printf("discord-voice: failed to clear speaking state: %v", err)
+	}
+
+	if _, err := a.pool.Exec(ctx,
+		"UPDATE user_input_requests SET prompt_delivered_at = now() WHERE request_id = $1", requestID,
+	); err != nil {
+		return err
+	}
+	log.Printf("discord-voice: pushed pending request %s prompt via connection %s", requestID, a.connectionID)
+	return nil
 }
 
 // streamPCMToOpus reads Kokoro's raw 24kHz mono PCM off stream one Discord

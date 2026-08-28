@@ -697,6 +697,8 @@ loop:
 				fut := workflow.ExecuteChildWorkflow(cctx, UserInputRequestWorkflow, types.UserInputRequestWorkflowInput{
 					Request:           req,
 					ApprovalGatedCall: &types.ApprovalGatedCallSpec{ToolCallID: tc.ToolCallID, ToolName: tc.ToolName},
+					SessionKey:        input.SessionKey,
+					ConnectionID:      input.ConnectionID,
 				})
 				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isApprovalGated: true})
 			} else if tc.IsSubagent {

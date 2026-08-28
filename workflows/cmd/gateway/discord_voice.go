@@ -238,6 +238,9 @@ func (s *server) voiceJoin(ctx context.Context, dg *discordgo.Session, ic *disco
 	deliverWkr := worker.New(s.temporal, "deliver:discord-voice:"+connectionID, worker.Options{DisableWorkflowWorker: true})
 	deliverWkr.RegisterActivityWithOptions(deliverActivity.Deliver, activity.RegisterOptions{Name: "VoiceDeliver"})
 	deliverWkr.RegisterActivityWithOptions(deliverActivity.DeliverChunk, activity.RegisterOptions{Name: "VoiceDeliverChunk"})
+	// docs/components/user-input.md's "Mid-turn interim delivery" (push
+	// half, A+B) — same embedded worker, same live voice connection.
+	deliverWkr.RegisterActivityWithOptions(deliverActivity.DeliverInterim, activity.RegisterOptions{Name: "VoiceDeliverInterim"})
 	if err := deliverWkr.Start(); err != nil {
 		log.Printf("discord-voice: failed to start embedded delivery worker: %v", err)
 	}

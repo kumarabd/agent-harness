@@ -119,6 +119,10 @@ func (s *server) runDiscordConnection(ctx context.Context, dg *discordgo.Session
 	// same worker/connection, same live session, registered alongside
 	// DiscordDeliver rather than a separate embedded worker.
 	deliverWorker.RegisterActivityWithOptions(deliverActivity.DeliverChunk, activity.RegisterOptions{Name: "DiscordDeliverChunk"})
+	// docs/components/user-input.md's "Mid-turn interim delivery" (push
+	// half, A+B) — same embedded worker, same connection, since pushing a
+	// pending request's prompt needs the identical live session.
+	deliverWorker.RegisterActivityWithOptions(deliverActivity.DeliverInterim, activity.RegisterOptions{Name: "DiscordDeliverInterim"})
 	if err := deliverWorker.Start(); err != nil {
 		log.Printf("discord: failed to start embedded delivery worker: %v", err)
 		return
