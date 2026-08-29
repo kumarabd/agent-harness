@@ -51,12 +51,29 @@ func (s *server) discordUserInputInteractionCreate(
 	if !strings.HasPrefix(data.CustomID, "user_input:") {
 		return
 	}
-	parts := strings.SplitN(strings.TrimPrefix(data.CustomID, "user_input:"), ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	// Real, confirmed bug fixed here: request_id is NOT colon-free — it's
+	// tc.ToolCallID (turn.go), built as "{turn_id}:act:{n}" where turn_id
+	// is itself "{session_key}:turn:{n}" (ids.go/ids.py) — e.g.
+	// "agent:main:discord:channel:123:turn:89:act:1", loaded with colons.
+	// Splitting on the FIRST colon (the original version of this line)
+	// silently truncated request_id to just its first segment and folded
+	// the rest into optionID — every real button click failed Postgres
+	// lookup and showed "That request no longer exists," 100% of the time,
+	// for the only consumer that exists (permission gating). Fixed by
+	// splitting on the LAST colon instead: option_id (buildUserInputComponents'
+	// own callers today only ever use "approve"/"deny") is what's actually
+	// guaranteed colon-free, not request_id — so the split has to anchor on
+	// the colon-free side, not assume the first side is short. Verified with
+	// a real round-trip test against buildUserInputComponents' own output
+	// using a real, colon-heavy request_id shape before this fix, confirming
+	// the break; re-verified after, confirming the round-trip now holds.
+	rest := strings.TrimPrefix(data.CustomID, "user_input:")
+	idx := strings.LastIndex(rest, ":")
+	if idx <= 0 || idx == len(rest)-1 {
 		s.respondInteractionError(dg, ic.Interaction, "Malformed button — this shouldn't happen.")
 		return
 	}
-	requestID, optionID := parts[0], parts[1]
+	requestID, optionID := rest[:idx], rest[idx+1:]
 
 	// Defense against a forged custom_id: verify the request actually
 	// belongs to a session whose sessions.channel_id matches the channel
