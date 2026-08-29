@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/jackc/pgx/v5"
@@ -77,6 +78,35 @@ type discordDeliverActivity struct {
 	connectionID string
 }
 
+// discordEmptyContentPlaceholder / discordSendableContent — real, live bug
+// found 2026-08-29, revised the same day per direct feedback: Discord's own
+// API hard-rejects a message whose content is empty or pure whitespace
+// (HTTP 400, "Cannot send an empty message" — confirmed live, not assumed;
+// this is what wedged a real turn's streamed delivery in the first place,
+// since the resulting failure had no retry cap). The FIRST fix silently
+// skipped sending in that case (mark delivered/sent, no message) — reverted
+// after being asked directly whether that's actually correct: whitespace can
+// be a genuine, meaningful stream chunk, and other platforms may not share
+// Discord's own rejection at all, so treating "empty" as "nothing to do" is
+// the wrong generalization to bake into a shared path. This is Discord's own
+// platform constraint, so it's handled here, at the Discord-specific
+// outbound boundary, not upstream in turn.go or model_call.py — the model's
+// real content in messages/turn_deliveries is never touched by this, only
+// what actually gets handed to Discord's API. A visible placeholder, not a
+// silent no-op: the model's turn should never look like nothing happened.
+const discordEmptyContentPlaceholder = "(empty)"
+
+// discordSendableContent returns content unchanged unless it's empty or
+// pure whitespace, in which case it substitutes discordEmptyContentPlaceholder
+// — called only immediately before a real ChannelMessageSend/ChannelMessageEdit
+// call, never used to decide whether to skip one.
+func discordSendableContent(content string) string {
+	if strings.TrimSpace(content) == "" {
+		return discordEmptyContentPlaceholder
+	}
+	return content
+}
+
 // Deliver reads the turn's final assistant message, checks-then-inserts into
 // the delivered_responses idempotency ledger (components/
 // activities-outbound-delivery.md's "Resolved: Deliver Idempotency Key" —
@@ -128,13 +158,13 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 	if err != nil {
 		return err
 	}
-	if content == "" {
-		// docs/future-work.md §4 — a real, separately-tracked gap (the model
-		// sometimes ends a turn with no real content). Nothing to send;
-		// not this activity's job to paper over it. Still a genuine
-		// resolution, not a failure — mark delivered.
-		return markDelivered()
-	}
+	// docs/future-work.md §4 — a real, separately-tracked gap (the model
+	// sometimes ends a turn with no real content). This activity no longer
+	// papers over it by skipping the send entirely (see
+	// discordSendableContent's own comment for why that changed) — content
+	// stays the model's real raw value for every comparison/storage
+	// purpose below; only the actual ChannelMessageSend call downstream
+	// substitutes a visible placeholder if it's empty/whitespace.
 	if streamedMessageRef != nil {
 		// docs/components/gateway.md's "Resolved: ModelCall Streaming" —
 		// Real, live bug fixed 2026-08-27: streamedMessageRef only ever
@@ -175,11 +205,12 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 		}
 	}
 
-	msg, err := a.session.ChannelMessageSend(channelID, content)
+	sendContent := discordSendableContent(content)
+	msg, err := a.session.ChannelMessageSend(channelID, sendContent)
 	if err != nil {
 		return err
 	}
-	a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, content)
+	a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, sendContent)
 	log.Printf("discord: delivered turn %s to channel %s via connection %s", turnID, channelID, a.connectionID)
 	return markDelivered()
 }
@@ -344,6 +375,26 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 		return err
 	}
 
+	// Real, live bug found 2026-08-29: a streamed chunk's content can be
+	// non-empty at the Python string level (segmenter flushed something)
+	// while being pure whitespace once rendered — confirmed live, a real
+	// turn's seq-1 chunk was 3 bytes of newlines. Discord's own API hard-
+	// rejects that with a 400 ("Cannot send an empty message"), and since
+	// this activity's caller (turn.go's deliverChunk) had no retry cap, the
+	// failure retried forever, permanently wedging the whole turn workflow
+	// before it ever reached ModelCall's already-completed result — not a
+	// dropped preview, a genuinely stuck turn. VoiceDeliverChunk
+	// (deliver_voice_chunk.go) already has an analogous guard, but its own
+	// resolution (silently skip synthesis) is right for voice specifically
+	// (nothing meaningful to speak for pure silence) and was NOT copied here
+	// verbatim — revised same-day per direct feedback: a whitespace chunk
+	// can be genuinely meaningful stream content, other platforms may not
+	// even share this rejection, so silently skipping the send is the wrong
+	// generalization for text. content stays the model's real raw value for
+	// storage (turn_deliveries, the ambient mirror mostly cares about what's
+	// actually visible though — see below); only the real
+	// ChannelMessageSend/ChannelMessageEdit calls substitute a placeholder
+	// via discordSendableContent, never used to decide whether to send.
 	var channelID, sessionKey string
 	var streamedMessageRef *string
 	err = a.pool.QueryRow(ctx, `
@@ -355,8 +406,10 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 		return err
 	}
 
+	sendContent := discordSendableContent(content)
+
 	if streamedMessageRef == nil {
-		msg, err := a.session.ChannelMessageSend(channelID, content)
+		msg, err := a.session.ChannelMessageSend(channelID, sendContent)
 		if err != nil {
 			return err
 		}
@@ -366,12 +419,12 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 		); err != nil {
 			return err
 		}
-		a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, content)
+		a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, sendContent)
 		log.Printf("discord: turn %s streamed chunk %d created message %s", turnID, seq, msg.ID)
 		return markSent()
 	}
 
-	if _, err := a.session.ChannelMessageEdit(channelID, *streamedMessageRef, content); err != nil {
+	if _, err := a.session.ChannelMessageEdit(channelID, *streamedMessageRef, sendContent); err != nil {
 		return err
 	}
 	// Same message id as the create branch above — this call keeps the
@@ -381,7 +434,7 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 	// snapshot. reply_to_platform_message_id is recomputed identically from
 	// the same sessionKey each call — deterministic, so re-writing it here
 	// is a no-op in practice, not a risk of drifting to a different value.
-	a.recordAmbientBotMessage(ctx, channelID, *streamedMessageRef, sessionKey, content)
+	a.recordAmbientBotMessage(ctx, channelID, *streamedMessageRef, sessionKey, sendContent)
 	log.Printf("discord: turn %s streamed chunk %d edited message %s", turnID, seq, *streamedMessageRef)
 	return markSent()
 }

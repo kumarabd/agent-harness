@@ -390,6 +390,23 @@ func awaitModelCallWithStreaming(ctx workflow.Context, mcFuture workflow.Future,
 		cao := workflow.ActivityOptions{
 			StartToCloseTimeout: timeout,
 			TaskQueue:           "deliver:" + platform + ":" + connectionID,
+			// Real, live bug found 2026-08-29: no RetryPolicy here meant the
+			// SDK default applied — effectively unlimited attempts,
+			// exponential backoff capped at 100s. Both call sites below
+			// already treat a chunk-delivery failure as best-effort/non-
+			// fatal (their own comments: "a dropped streamed preview chunk
+			// isn't fatal"), but the retry policy never actually matched
+			// that stated intent — a genuinely permanent failure (confirmed
+			// live: DiscordDeliverChunk rejecting an all-whitespace chunk,
+			// HTTP 400 from Discord, a failure no amount of retrying would
+			// ever fix) retried forever instead of giving up, and since this
+			// call blocks the Selector callback that owns it, the entire
+			// TurnWorkflow was wedged before it ever processed ModelCall's
+			// already-completed result — not a dropped preview, a
+			// permanently stuck turn. MaximumAttempts: 3 matches this
+			// codebase's own convention for "bounded retry, then treat as
+			// failed" (e.g. user_input.go's ToolCall dispatch).
+			RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 3},
 		}
 		cactx := workflow.WithActivityOptions(ctx, cao)
 		if platform == "discord-voice" {
