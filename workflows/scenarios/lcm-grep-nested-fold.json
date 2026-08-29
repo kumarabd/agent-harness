@@ -1,0 +1,20 @@
+{
+  "message": {
+    "role": "user",
+    "content": "What did we decide about GQA?"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Let me search the earlier conversation for GQA.",
+      "tool_calls": [
+        { "name": "lcm_grep", "is_subagent": false, "arguments": { "pattern": "GQA", "mode": "pattern" } }
+      ],
+      "usage": { "input_tokens": 50, "output_tokens": 15 }
+    },
+    {
+      "content": "Found two mentions, in two different regions of the DAG. Confirmed we decided on GQA.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 80, "output_tokens": 20 }
+    }
+  ]
+}

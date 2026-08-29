@@ -95,6 +95,26 @@ if [ ! -x "$STARTER_BIN" ] || [ "$REPO_ROOT/workflows/cmd/starter/main.go" -nt "
   (cd "$REPO_ROOT/workflows" && go build -o "$STARTER_BIN" ./cmd/starter)
 fi
 
+# starter (a real Go binary, not kubectl exec) needs a direct TCP
+# connection to Postgres, unlike every other Postgres interaction in this
+# script — those all go through pg_query/pg_exec_file (kubectl exec, no
+# local port-forward, password never local). Reuse an already-running
+# port-forward on 15432 if one exists (e.g. run_all.sh's shared one across
+# a whole suite run); otherwise start one just for this call and tear it
+# down on exit — self-contained, no external setup required for a single
+# `run_scenario.sh <name>` call to just work.
+STARTED_PG_FORWARD=0
+if ! nc -z localhost 15432 2>/dev/null; then
+  kubectl port-forward -n "$NAMESPACE" svc/abishekk-postgresql 15432:5432 >/dev/null 2>&1 &
+  PG_FORWARD_PID=$!
+  STARTED_PG_FORWARD=1
+  for _ in $(seq 1 20); do
+    nc -z localhost 15432 2>/dev/null && break
+    sleep 0.5
+  done
+  trap '[ "$STARTED_PG_FORWARD" = "1" ] && kill "$PG_FORWARD_PID" 2>/dev/null' EXIT
+fi
+
 echo "--- submitting scenario ---"
 POSTGRES_PASSWORD="$(kubectl exec -n "$NAMESPACE" "$PG_POD" -- cat /opt/bitnami/postgresql/secrets/password)"
 TEMPORAL_ADDRESS=localhost:17233 \
@@ -109,7 +129,13 @@ POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
 
 echo "--- waiting for root turn ($ROOT_TURN_ID) to reach a terminal status ---"
 STATUS=""
-for _ in $(seq 1 60); do
+# 180 iterations, not 60 — found live 2026-08-29: max-iterations.json alone
+# needs ~80s of real activity time (20 iterations x ~4s each), before this
+# loop's own per-poll kubectl-exec overhead (~1-2s/iteration) is even
+# added — a 60s budget genuinely wasn't enough for a real multi-step
+# scenario, not a hung workflow. 180 iterations gives real headroom without
+# hiding an actually-hung workflow forever (still bounded, just generous).
+for _ in $(seq 1 180); do
   STATUS="$(pg_query "SELECT status FROM turns WHERE turn_id = '$ROOT_TURN_ID'" || true)"
   case "$STATUS" in
     completed|failed|cancelled) break ;;
@@ -122,7 +148,7 @@ if [ -z "$STATUS" ]; then
   exit 1
 fi
 if [ "$STATUS" != "completed" ] && [ "$STATUS" != "failed" ] && [ "$STATUS" != "cancelled" ]; then
-  echo "FAIL: $SCENARIO_NAME — root turn still '$STATUS' after 60s timeout (session=$SESSION_KEY)" >&2
+  echo "FAIL: $SCENARIO_NAME — root turn still '$STATUS' after the poll timeout (session=$SESSION_KEY)" >&2
   exit 1
 fi
 echo "root turn status: $STATUS"

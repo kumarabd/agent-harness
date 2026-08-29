@@ -59,15 +59,17 @@ async def grep(conn, session_key: str, pattern: str, mode: str = "pattern", limi
     the source paper gives for pagination) without the model ever having
     decided that's what it wanted.
 
-    Results are grouped by which summary (if any) CURRENTLY covers each
-    matched message — not just "was this ever folded into a leaf," but the
-    live DAG frontier: a message covered by a leaf that's since itself been
-    folded into a condensed summary reports the condensed summary's id, the
-    thing lcm_expand would actually need to be called on right now to
-    recover it. A message not (yet) covered by anything is still sitting in
-    assemble()'s own raw verbatim window or the not-yet-compacted tail
-    beyond it — reports covered_by_summary_id: null, meaning "already
-    visible in context as-is, nothing to expand."
+    Results report which summary node (if any) NEAREST covers each matched
+    message — the leaf that directly covers it, or, if that leaf has since
+    been folded, the leaf's immediate parent (never chased further up even
+    if that parent has itself since been folded again — see
+    _active_covering_summary_ids's own docstring for why walking to the
+    topmost surviving ancestor was tried first and found to throw away
+    exactly the region-level specificity this tool exists to surface). A
+    message not (yet) covered by anything is still sitting in assemble()'s
+    own raw verbatim window or the not-yet-compacted tail beyond it —
+    reports covered_by_summary_id: null, meaning "already visible in
+    context as-is, nothing to expand."
     """
     if mode not in ("pattern", "fulltext"):
         raise ValueError(f"lcm_grep: mode must be 'pattern' or 'fulltext', got {mode!r}")
@@ -238,13 +240,32 @@ async def _resolve_to_message_ids(conn, summary_row, _seen: set | None = None) -
 
 async def _active_covering_summary_ids(conn, session_key: str, message_ids: list) -> dict:
     """For each id in message_ids, resolves which CURRENTLY-ACTIVE
-    (folded_into IS NULL) summary node covers it — the thing lcm_expand
-    would need to be called on right now to recover that message. A leaf
-    that directly covers the message but has itself since been folded into
-    a condensed summary reports the condensed summary's id instead (follows
-    folded_into upward until reaching an unfolded row); a message not
-    covered by anything yet (still in the raw verbatim window / the
-    not-yet-compacted tail beyond it) is absent from the returned dict.
+    (or, if that leaf has since been folded, its immediate parent) covers
+    it — the NEAREST summary node whose direct span includes the message,
+    not the topmost surviving ancestor.
+
+    Real bug found and fixed 2026-08-29, after building this exact walk to
+    go all the way to the topmost `folded_into IS NULL` ancestor: once a
+    session has folded deep enough that a message's leaf has itself been
+    folded into a condensed node, and THAT condensed node has itself been
+    folded again (leaf -> S3 -> S7, say), walking to the top reports S7 for
+    every message under it — collapsing "GQA came up in region S3" and "GQA
+    came up in region S4" into "GQA came up somewhere under S7," which
+    could mean anywhere in the whole session once the DAG is tall enough.
+    That's the opposite of useful: it discards exactly the region-level
+    specificity grep exists to surface, and gets worse the more folding has
+    happened, i.e. exactly when it matters most. Fixed to stop one hop up
+    from the message's own leaf — report the leaf's direct `folded_into`
+    target (S3), never chase further even if S3 has itself since been
+    folded into S7. Still fully actionable even though S3 itself may no
+    longer be part of the live `assemble()`-shown frontier: lcm_describe/
+    lcm_expand don't check folded_into at all, they just read `covers`,
+    so a "stale" nearest node is still a real, directly usable id.
+
+    A leaf that hasn't been folded at all yet reports itself (there's
+    nothing to hop to). A message not covered by anything yet (still in
+    the raw verbatim window / the not-yet-compacted tail) is absent from
+    the returned dict.
 
     Two bulk queries, not one per message_id — this is called from grep()
     (up to GREP_DEFAULT_LIMIT+1 messages per call) and describe() (a single
@@ -260,27 +281,17 @@ async def _active_covering_summary_ids(conn, session_key: str, message_ids: list
         session_key,
     )
     message_to_leaf: dict = {}
+    leaf_folded_into: dict = {}
     for row in leaf_rows:
+        leaf_folded_into[row["summary_id"]] = row["folded_into"]
         for mid in row["covers"]:
             message_to_leaf[mid] = row["summary_id"]
 
-    # folded_into chain, built once for the whole session rather than
-    # walked with a query per hop — a session's own summary count is small
-    # enough that fetching all of them is cheap, and this turns an
-    # unbounded-depth recursive-query problem into a single in-memory dict
-    # walk.
-    all_rows = await conn.fetch(
-        "SELECT summary_id, folded_into FROM context_summaries WHERE session_key = $1",
-        session_key,
-    )
-    folded_into_map = {row["summary_id"]: row["folded_into"] for row in all_rows}
-
     result = {}
     for mid in message_ids:
-        current = message_to_leaf.get(mid)
-        if current is None:
+        leaf_id = message_to_leaf.get(mid)
+        if leaf_id is None:
             continue
-        while folded_into_map.get(current) is not None:
-            current = folded_into_map[current]
-        result[mid] = str(current)
+        parent = leaf_folded_into.get(leaf_id)
+        result[mid] = str(parent) if parent is not None else str(leaf_id)
     return result

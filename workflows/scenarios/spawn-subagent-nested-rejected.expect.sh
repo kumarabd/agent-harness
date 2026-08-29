@@ -41,7 +41,13 @@ ok "no child workflow was ever started for the rejected delegation (0 turns rows
 # is_subagent=false (never became a real subagent), status='error', and a
 # real error result containing the rejection reason.
 reject_row="$(pg_query "SELECT tool_call_id || '|' || is_subagent || '|' || status FROM tool_calls WHERE parent_id = '$SUBAGENT_TURN_ID' AND tool_name = 'spawn_subagent'")"
-echo "$reject_row" | grep -qE '\|f\|error$' || fail "rejected spawn_subagent tool_calls row not is_subagent=false/status=error: '$reject_row'"
+# Postgres's `||` text-concat casts a boolean via its own text
+# representation, "false"/"true" — NOT the "f"/"t" abbreviation psql's
+# tabular output uses for a bare boolean column. Found live 2026-08-29:
+# the real system correctly recorded is_subagent=false/status=error the
+# whole time; this regex just didn't match "false" against a pattern
+# looking for a lone "f".
+echo "$reject_row" | grep -qE '\|false\|error$' || fail "rejected spawn_subagent tool_calls row not is_subagent=false/status=error: '$reject_row'"
 ok "rejected spawn_subagent recorded as is_subagent=false, status=error ($reject_row)"
 
 result_text="$(pg_query "SELECT result::text FROM tool_calls WHERE parent_id = '$SUBAGENT_TURN_ID' AND tool_name = 'spawn_subagent'")"

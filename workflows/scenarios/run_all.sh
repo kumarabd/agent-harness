@@ -21,6 +21,21 @@
 #     runner yet — a real, named gap, not silently dropped. Run manually
 #     (two `run_scenario.sh <name> <same-session-key>` calls back to
 #     back) until a chained-pair mode is added here.
+#   - shell-exec-basic.json, shell-exec-parallel.json, multi-step-task.json,
+#     subagent-merge-happy.json, subagent-merge-conflict.json — each
+#     scripts a shell_exec call against a command (`echo`) that
+#     permissions.py's real gating rules require approval for. That
+#     dispatches a real UserInputRequestWorkflow which blocks for
+#     `UserInputRequestTimeout` (1 hour) waiting for a response — and
+#     nothing in this runner answers it (no gateway exists in this slice
+#     to send one). Confirmed live 2026-08-29, not assumed: running the
+#     full list once left four of these genuinely stuck for 10+ minutes
+#     before being found and manually `temporal workflow terminate`-d — a
+#     real, named gap in this runner's scope, not silently dropped from
+#     the suite. Run manually and answer the approval yourself (`temporal
+#     workflow signal --workflow-id <request_id> --name UserInputResponse
+#     --input '{"request_id":"<request_id>","selected_option_id":"approve"}'`)
+#     until auto-approval support is added here.
 #
 # Add a new scenario to this suite by: (1) dropping <name>.json (and,
 # ideally, <name>.expect.sh — see run_scenario.sh's own header) into this
@@ -28,25 +43,45 @@
 # process — no other registration needed.
 set -uo pipefail
 
+NAMESPACE=agents
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# One shared port-forward pair for the whole suite run, rather than each
+# run_scenario.sh call starting/tearing down its own 17 times — each
+# individual call still self-manages if run standalone (see its own
+# header), this just avoids the churn when running the full suite.
+cleanup_forwards() {
+  [ -n "${TEMPORAL_FWD_PID:-}" ] && kill "$TEMPORAL_FWD_PID" 2>/dev/null
+  [ -n "${PG_FWD_PID:-}" ] && kill "$PG_FWD_PID" 2>/dev/null
+}
+trap cleanup_forwards EXIT
+
+if ! nc -z localhost 17233 2>/dev/null; then
+  kubectl port-forward -n core svc/temporal-frontend 17233:7233 >/dev/null 2>&1 &
+  TEMPORAL_FWD_PID=$!
+fi
+if ! nc -z localhost 15432 2>/dev/null; then
+  kubectl port-forward -n "$NAMESPACE" svc/abishekk-postgresql 15432:5432 >/dev/null 2>&1 &
+  PG_FWD_PID=$!
+fi
+for _ in $(seq 1 20); do
+  nc -z localhost 17233 2>/dev/null && nc -z localhost 15432 2>/dev/null && break
+  sleep 0.5
+done
 
 SCENARIOS=(
   happy-path
-  shell-exec-basic
-  shell-exec-parallel
   shell-exec-slow
   max-iterations
-  multi-step-task
   claim-check-large-output
   exploration-summary-json
   exploration-summary-csv
   exploration-summary-text
   subagent-spawn
-  subagent-merge-happy
-  subagent-merge-conflict
   spawn-subagent-nested-valid
   spawn-subagent-nested-rejected
   lcm-retrieval
+  lcm-grep-nested-fold
   anthropic-basic
 )
 

@@ -69,6 +69,19 @@ That's the whole process — no other registration needed.
   and runs local worker binaries against a real model. Different purpose
   (full-stack validation with real cost) from this directory's free
   regression suite — see its own `README.md`.
+- **`shell-exec-basic.json`, `shell-exec-parallel.json`,
+  `multi-step-task.json`, `subagent-merge-happy.json`,
+  `subagent-merge-conflict.json`** — each scripts a `shell_exec` call
+  against `echo`, which `permissions.py`'s real gating rules require
+  approval for. That dispatches a real `UserInputRequestWorkflow` that
+  blocks for an hour waiting for a response nothing in this runner sends
+  (no gateway exists in this slice to answer it). **Confirmed live, not
+  assumed** — running the full list once left four of these genuinely
+  stuck for 10+ minutes before being found and manually
+  `temporal workflow terminate`-d. Run manually and answer the approval
+  yourself until auto-approval support is added to this runner (see
+  `run_all.sh`'s own comment for the exact `temporal workflow signal`
+  invocation).
 
 ## Coverage added 2026-08-29
 
