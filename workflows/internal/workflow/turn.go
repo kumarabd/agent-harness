@@ -49,10 +49,11 @@ const modelCallChunkSignalName = "ModelCallChunk"
 // Takes sessionKey, not turnID — docs/components/memory-slot.md's "Resolved:
 // Write-Path Construction" correction (2026-08-29): agent-brain's own
 // mining-pipeline-redesign contract asks for writes at session-completion
-// and context-compaction boundaries, batching whatever accumulated since
-// the last write, not once per turn. WriteMemoryActivity itself now reads
-// by session_key + a Postgres watermark (sessions.memory_write_watermark_turn_seq)
-// rather than one turn's own messages. Dispatched from exactly two places:
+// and context-compaction boundaries, not once per turn. WriteMemoryActivity
+// itself is fully stateless (second revision, same day) — every dispatch
+// sends the session's current active-context merge (every active summary +
+// every never-covered raw message), not a delta against a watermark; no
+// Postgres state of its own. Dispatched from exactly two places:
 // coordinator.go's idle-timeout exit (session completion) and turn.go's
 // hard-compression path below (context compaction) — no longer from every
 // turn's own end-of-turn block.

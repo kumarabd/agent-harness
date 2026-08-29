@@ -1,54 +1,62 @@
 """WriteMemory activity — docs/components/memory-slot.md's "Resolved:
 Write-Path Construction". Dispatched fire-and-forget from exactly two
-places (2026-08-29 correction — see below): coordinator.go's idle-timeout
-exit (session completion) and turn.go's hard-compression branch (context
-compaction). No longer dispatched per top-level turn.
+places: coordinator.go's idle-timeout exit (session completion) and
+turn.go's hard-compression branch (context compaction).
 
-Deliberately simpler than memory-slot.md originally specified, in three
-concrete ways — each found by checking agent-brain's actual, current MCP
-tool contract directly (internal/mcp/tools_events.go), not assumed from the
-design doc:
+**Rewritten 2026-08-29 (second revision, same day) — fully stateless, no
+watermark.** The original watermark design (`sessions.memory_write_
+watermark_turn_seq`, migration 009) shipped only ever-raw message text,
+batched as a delta since the last write — meaning it never leveraged LCM's
+own compaction at all: if the session had already condensed m1-m25 into a
+leaf summary by the time WriteMemory ran, this activity re-read and
+re-shipped m1-m25 as raw text anyway, completely blind to the DAG.
 
-  1. No separate LLM extraction step, no staging table. memory_write's own
-     description is explicit: "This does not extract structured knowledge...
-     Do not try to pre-structure or pre-interpret the content; write the
-     complete raw trigger text, since it's the only input the mining
-     pipeline sees." Agent-brain's own downstream mining pipeline does
-     extraction; a caller-side extraction model would be redundant work
-     fighting the actual contract. This also removes the retry-safety
-     problem the staging table existed to solve — memory_write's event_id
-     is already a caller-supplied idempotency key ("Re-submitting the same
-     event_id is a no-op"), so a deterministic event_id (see below) makes a
-     Temporal-driven retry of this whole activity safe by construction, no
-     two-phase write needed.
+The real fix, per direct design discussion: **the event this activity
+writes IS the session's current active context** — not a delta computed
+against a watermark, and not required to avoid all overlap with a prior
+call. Concretely, on every dispatch:
+  1. Every currently-active summary for the session (`context_summaries
+     WHERE folded_into IS NULL`) — already the cheapest, most-current
+     representation of whatever span it covers, by construction; no
+     "is this summary wholly new" analysis needed, since an active summary
+     is always correct to include as-is.
+  2. Every raw message never covered by any leaf summary at all (`covers`
+     is immutable once a leaf is created, so this is exactly "content
+     compaction hasn't touched yet" — not window-limited the way
+     `lcm.assemble()` is, since mining wants everything uncovered, not
+     just what fits in a live model call's verbatim window).
+  3. Merged, oldest-to-newest, into one transcript: summaries first
+     (ordered by `created_at` — compaction always processes the oldest
+     uncovered content first, so creation order among currently-active
+     nodes tracks their underlying chronological position even after
+     folding), then the uncovered raw tail (ordered by `turn_seq`, `seq`).
 
-  2. No participants sent by default. memory_write's own description:
-     "Participants are third parties the event is about — never yourself,
-     and never the user." memory-slot.md's originally-proposed v1 mapping
-     (session_key as a "self" participant, an agent-name as an "agent"
-     participant) is exactly the opposite of that — agent-brain resolves
-     both the authenticated user and the writing agent's own identity
-     automatically, not from a participants entry. A real third-party
-     detection mechanism (e.g. "this turn was about someone else") doesn't
-     exist yet — out of scope here, same as the already-deferred
-     cross-session-linking/entity-resolution open question.
+No watermark, no Postgres write of any kind from this activity — reading
+`sessions` for a watermark and writing it back is simply gone. Accepted
+cost, explicitly: a session with more than one hard-compaction event will
+re-send a merge that substantially overlaps a prior call's merge (whatever
+summaries didn't change between the two calls get sent again). Relies on
+agent-brain's own extraction pipeline to be dedup-safe against seeing
+overlapping/restated content more than once — a property any real memory-
+consolidation pipeline needs anyway (a person re-stating something already
+said within one real conversation is not a new problem this design
+introduces). `event_id` is a hash of the merged content itself, not a
+turn_seq range — genuinely idempotent (identical content across two calls,
+whether a real Temporal retry or two triggers landing back to back with
+nothing new in between, produces the identical event_id, so agent-brain's
+own "re-submitting the same event_id is a no-op" contract absorbs it for
+free) without needing any session-side state to compute.
 
-  3. **2026-08-29 correction**: not one event per top-level turn anymore
-     either. Agent-brain's own mining-pipeline-redesign contract is
-     explicit — "Don't call it per-turn or per-tool-call the way the old
-     model did... it fires at natural harness-lifecycle boundaries —
-     session completion, context compaction." This activity now reads by
-     session_key + a Postgres watermark (sessions.memory_write_watermark_turn_seq,
-     migrations/009_memory_write_watermark.sql) rather than one turn's own
-     messages, batching everything accumulated since the last successful
-     write into a single memory_write call, and only advances the
-     watermark after a confirmed-successful call — a retry (or a call that
-     found agent-brain unconfigured) naturally re-reads the same range next
-     time, no separate staging table needed for that either.
+Deliberately still simpler than memory-slot.md originally specified, in
+the same two ways established earlier (see git history for the original
+three-way list) — no separate LLM extraction step client-side, no
+participants sent by default. Both still apply unchanged; see agent-brain's
+own memory_write tool contract (internal/mcp/tools_events.go) for why.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from temporalio import activity
@@ -58,98 +66,81 @@ from . import agent_brain
 logger = logging.getLogger(__name__)
 
 
-def _render_transcript(rows) -> str:
-    """The complete raw trigger text memory_write's own description asks
-    for — conversational content only (user/assistant message text), not
-    tool-call mechanics (raw arguments/results), which aren't the
-    conversational substance a memory-mining pipeline needs."""
-    lines = [f"{row['role']}: {row['content']}" for row in rows if row["content"]]
-    return "\n".join(lines)
-
-
 class WriteMemoryActivity:
     def __init__(self, pool):
         self._pool = pool
 
     @activity.defn(name="WriteMemory")
     async def __call__(self, session_key: str) -> None:
-        watermark = await self._pool.fetchval(
-            "SELECT memory_write_watermark_turn_seq FROM sessions WHERE session_key = $1", session_key
+        # Every currently-active summary — already the cheapest, most-
+        # current representation of whatever it covers. created_at ASC
+        # tracks chronological position among active nodes even after
+        # folding (see module docstring).
+        summary_rows = await self._pool.fetch(
+            "SELECT content FROM context_summaries "
+            "WHERE session_key = $1 AND folded_into IS NULL ORDER BY created_at",
+            session_key,
         )
-        watermark = watermark or 0
 
-        # turn_seq is only meaningful for a top-level turn (parent_type =
-        # 'session') — state-layer.md's own schema note. Ordered by
-        # (turn_seq, seq) so a multi-turn batch's transcript reads in real
-        # chronological order, not just insertion order.
-        rows = await self._pool.fetch(
+        # A message counts as "covered" the moment ANY leaf's covers ever
+        # included it — covers is immutable once a leaf is created, so this
+        # doesn't care whether that leaf has since been folded further; a
+        # message covered by a folded leaf is still represented (at
+        # whatever level) by one of the active summaries above, not by its
+        # own raw text.
+        covered_rows = await self._pool.fetch(
+            "SELECT unnest(covers) AS message_id FROM context_summaries "
+            "WHERE session_key = $1 AND kind = 'leaf'",
+            session_key,
+        )
+        covered_ids = {row["message_id"] for row in covered_rows}
+
+        message_rows = await self._pool.fetch(
             """
-            SELECT m.role, m.content, t.turn_id, t.turn_seq
+            SELECT m.message_id, m.role, m.content, m.seq, t.turn_id, t.turn_seq
             FROM turns t
             JOIN messages m ON m.parent_id = t.turn_id
-            WHERE t.parent_id = $1 AND t.parent_type = 'session' AND t.turn_seq > $2
+            WHERE t.parent_id = $1 AND t.parent_type = 'session'
             ORDER BY t.turn_seq, m.seq
             """,
             session_key,
-            watermark,
         )
-        if not rows:
-            logger.info("WriteMemory[%s]: nothing new since watermark %s, skipping", session_key, watermark)
-            return
+        uncovered_rows = [row for row in message_rows if row["message_id"] not in covered_ids]
 
-        max_turn_seq = max(row["turn_seq"] for row in rows)
-        # The last turn in the batch — a real, valid, addressable id for the
-        # trigger's own turn_id field, more meaningful than reusing
-        # session_key in a field literally named turn_id. Purely
-        # informational on agent-brain's side (trigger.content is the only
-        # thing the mining pipeline actually reads); doesn't need to
-        # identify every turn in the batch.
-        last_turn_id = next(row["turn_id"] for row in rows if row["turn_seq"] == max_turn_seq)
-
-        content = _render_transcript(rows)
+        lines = [f"[summary] {row['content']}" for row in summary_rows if row["content"]]
+        lines += [f"{row['role']}: {row['content']}" for row in uncovered_rows if row["content"]]
+        content = "\n".join(lines)
         if not content:
-            # Real content exists at the row level (tool-only turns, no
-            # user/assistant text) but nothing worth mining. Still advance
-            # the watermark — otherwise a session that's all tool calls for
-            # a while keeps re-scanning (and re-finding nothing) forever
-            # instead of moving past it.
-            await self._pool.execute(
-                "UPDATE sessions SET memory_write_watermark_turn_seq = $2 WHERE session_key = $1",
-                session_key,
-                max_turn_seq,
-            )
-            logger.info("WriteMemory[%s]: no message content through turn_seq %s, watermark advanced, nothing sent", session_key, max_turn_seq)
+            logger.info("WriteMemory[%s]: nothing to write (no active summaries, no uncovered message content)", session_key)
             return
+
+        # Purely informational on agent-brain's side (trigger.content is
+        # the only thing the mining pipeline actually reads) — the most
+        # recent real turn in the session, more meaningful than session_key
+        # in a field literally named turn_id. Falls back to session_key
+        # only in the practically-impossible case of summaries existing
+        # with zero messages ever recorded.
+        turn_id = message_rows[-1]["turn_id"] if message_rows else session_key
+
+        # Content hash, not a turn_seq range — see module docstring. Same
+        # content in, same event_id out, with no session-side state needed
+        # to compute it.
+        content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
         try:
             await agent_brain.call_tool(
                 "memory_write",
                 {
-                    # Deterministic per batch, not per call attempt — a
-                    # Temporal-driven retry of this whole activity
-                    # recomputes the identical event_id for the identical
-                    # range (same watermark in, same max_turn_seq out),
-                    # so memory_write's own "re-submitting the same
-                    # event_id is a no-op" contract makes the retry safe
-                    # without needing a separate idempotency mechanism here.
-                    "event_id": f"{session_key}:memory-write:{max_turn_seq}",
+                    "event_id": f"{session_key}:memory-write:{content_hash}",
                     "type": "conversation_turn",
-                    "trigger": {"type": "input", "turn_id": last_turn_id, "content": content},
+                    "trigger": {"type": "input", "turn_id": turn_id, "content": content},
                 },
             )
         except agent_brain.AgentBrainNotConfiguredError:
-            # Deliberately do NOT advance the watermark here — nothing was
-            # actually written. If agent-brain gets configured later, the
-            # next trigger sends the full accumulated range in one write,
-            # which is correct, not a bug (matches this project's existing
-            # "degrade gracefully, don't silently lose the work" posture
-            # for every other optional dependency).
-            logger.info("WriteMemory[%s]: agent-brain not configured, skipping (watermark not advanced)", session_key)
+            logger.info("WriteMemory[%s]: agent-brain not configured, skipping", session_key)
             return
 
-        await self._pool.execute(
-            "UPDATE sessions SET memory_write_watermark_turn_seq = $2 WHERE session_key = $1",
-            session_key,
-            max_turn_seq,
+        logger.info(
+            "WriteMemory[%s]: wrote event (%d active summaries, %d uncovered messages, hash=%s)",
+            session_key, len(summary_rows), len(uncovered_rows), content_hash,
         )
-        logger.info("WriteMemory[%s]: wrote event covering turn_seq %s..%s", session_key, watermark, max_turn_seq)
