@@ -1,0 +1,23 @@
+-- activities/activities/lcm/compaction.py's real, live bug fix (2026-08-29),
+-- found while building lcm_expand: _fold_kind_if_due used to DELETE a
+-- leaf/condensed row once it was folded into a new condensed row, even
+-- though the new row's own `covers` array still points at that now-deleted
+-- summary_id. That breaks "lossless" for real — any attempt to walk back
+-- down the DAG (exactly what lcm_expand does: condensed -> its covers ->
+-- those children's own covers -> ... -> raw message_ids) hits a dangling
+-- reference and silently recovers nothing for that folded span. Any session
+-- that's already crossed LEAF_FOLD_THRESHOLD (5 leaf summaries) before this
+-- migration already has this gap in its history — this column only stops
+-- it from recurring going forward, it can't retroactively undelete rows a
+-- prior DELETE already removed.
+--
+-- NULL (the default for every existing row) means "not folded — this is
+-- still part of the current DAG frontier," matching assemble()'s and
+-- _fold_kind_if_due's own `AND folded_into IS NULL` filters (see
+-- compaction.py). A folded row's own content/covers/created_at are kept
+-- exactly as they were — only this one column changes — so it stays
+-- available for lcm_expand to walk through, just excluded from being
+-- counted a second time by anything that assembles "the current summary
+-- set."
+ALTER TABLE context_summaries ADD COLUMN folded_into uuid REFERENCES context_summaries(summary_id);
+CREATE INDEX IF NOT EXISTS context_summaries_folded_into_idx ON context_summaries (folded_into) WHERE folded_into IS NOT NULL;

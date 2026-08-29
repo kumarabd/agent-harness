@@ -79,45 +79,46 @@ _NEXT_STEP_HINT_TOOL_NAME = "declare_next_step_hint"
 
 # Rewritten 2026-08-29 — the original ("autonomous coding assistant... use
 # shell_exec") was a scaffolding-era placeholder from before search_tools/
-# call_tool/memory_search/memory_expand/search_skills/get_skill existed at
-# all, and it actively misdescribed what this deployment actually is: a
-# general-purpose personal assistant discoverable-tool surface (real,
-# per-tenant third-party APIs via mcp-hub — maps, notes, health, finance,
-# code hosting, and whatever else a given tenant has registered — not just a
-# shell), not a coding-only tool. gateway/discord-voice.md's own Notes Log
-# already flagged this exact framing as wrong when building the voice-
-# specific prompt override — "that default's 'coding assistant' framing
-# doesn't fit a spoken conversation regardless of formatting" — but only
-# worked around it for voice at the time (a genuinely separate prompt, not a
-# patch on this one), rather than fixing the shared default itself. This
-# closes that the rest of the way, for every platform without its own
-# override (Web, Discord text).
+# call_tool/memory_search/memory_expand existed at all, and it actively
+# misdescribed what this deployment actually is: a general-purpose personal
+# assistant with a discoverable-tool surface (real, per-tenant third-party
+# APIs via mcp-hub — maps, notes, health, finance, code hosting, and
+# whatever else a given tenant has registered — not just a shell), not a
+# coding-only tool. gateway/discord-voice.md's own Notes Log already
+# flagged this exact framing as wrong when building the voice-specific
+# prompt override — "that default's 'coding assistant' framing doesn't fit
+# a spoken conversation regardless of formatting" — but only worked around
+# it for voice at the time (a genuinely separate prompt, not a patch on
+# this one), rather than fixing the shared default itself. This closes that
+# the rest of the way, for every platform without its own override (Web,
+# Discord text).
 # Deliberately does NOT hardcode any tenant-specific backend name (no
 # "maps-engine"/"notion"/"github" mentioned) — this constant is shared
 # across every tenant regardless of which backends they've registered;
 # search_tools' own real-time discovery is what surfaces the actual
 # available set, per tool-registry.md's already-resolved design.
-# search_skills gets a light, non-imperative nudge (skills.md's own
-# "Resolved: Prompt-Level Nudge" — a nudge, not a structural gate, same
-# treatment search_tools deliberately does NOT get an imperative rule for
-# either, per tool-registry.md's "Considered and reverted"). The final
-# sentence is unchanged in substance from the original — declare_next_step_hint
-# being called every response is a real, functionally-required mechanism
-# (model_registry's escalate-on-retry / tier hinting depends on it), and
-# platform_prompts.go's own voiceSystemPromptText copies this exact
-# sentence verbatim, so it has to keep matching byte-for-byte.
+# (2026-08-29, same day: an earlier version of this rewrite also added
+# search_skills/get_skill tools + a matching prompt sentence — components/
+# skills.md's mcp-hub-document-store design. Reverted the same day, at the
+# user's direction: skills are being reconsidered as a memory-layer concept
+# (components/memory-slot.md) rather than a separate mcp-hub-backed
+# document store — see skills.md's own "Superseded" section. This constant
+# no longer mentions either tool.)
+# The final sentence is unchanged in substance from the original —
+# declare_next_step_hint being called every response is a real,
+# functionally-required mechanism (model_registry's escalate-on-retry /
+# tier hinting depends on it), and platform_prompts.go's own
+# voiceSystemPromptText copies this exact sentence verbatim, so it has to
+# keep matching byte-for-byte.
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful, general-purpose personal assistant with real tools — not limited to "
     "coding tasks. You have direct shell access (shell_exec) for local/system tasks, and "
     "search_tools/call_tool to discover and invoke whatever broader real capabilities this "
     "deployment has registered — third-party APIs and services beyond the shell, specific to "
     "this environment. Use memory_search (and memory_expand for full detail) to recall relevant "
-    "context from past conversations when it's genuinely useful, not on every turn. If a "
-    "request looks like a known, repeatable procedure (a release process, a deployment "
-    "sequence, a troubleshooting runbook, a project-specific convention) rather than a one-off "
-    "question, check search_skills first before improvising — use get_skill to read a matching "
-    "result's full guidance, then decide what to actually invoke to carry it out. After using a "
-    "tool, summarize the result in plain text for the user rather than leaving it as raw output. "
+    "context from past conversations when it's genuinely useful, not on every turn. After using "
+    "a tool, summarize the result in plain text for the user rather than leaving it as raw "
+    "output. "
     f"Every response, also call {_NEXT_STEP_HINT_TOOL_NAME} alongside anything "
     "else you call, declaring what the next step needs."
 )
@@ -281,47 +282,73 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "search_skills",
-            # docs/components/skills.md — mirrors mcp-hub's own real
-            # search_skills description (server.py, verified directly), plus
-            # the doc's own prompt-level nudge on when to reach for this: a
-            # repeatable procedure, not every request.
+            "name": "lcm_grep",
+            # docs/components/context-slot.md's Memory-Access Tools —
+            # named and scoped to match the tool's real behavior: acts only
+            # on this session's own conversation history and context-DAG
+            # summaries (lcm/ package), never on shell_exec's claim-check
+            # files (those already have their own recovery route — cat/
+            # head/tail/grep via shell_exec directly).
             "description": (
-                "Semantically search a curated catalog of skills — documented procedures for "
-                "how to do a specific, repeatable task in this environment (e.g. a release "
-                "process, a deployment sequence, a troubleshooting runbook, a project-specific "
-                "convention). Check this before improvising when a request looks like a known, "
-                "repeatable procedure rather than a one-off question. Returns candidates with a "
-                "name, description, and tags. Use get_skill on a result's name to read the full "
-                "procedure."
+                "Search this session's own conversation history for a pattern. "
+                "mode=\"pattern\" (default) is literal regex matching; mode=\"fulltext\" is "
+                "stemmed English keyword search (tolerant of word forms, ranked by relevance) "
+                "— neither is semantic/embedding search. Results are grouped by which context "
+                "summary, if any, currently covers each match: covered_by_summary_id is null "
+                "when the message is already visible in context as-is (nothing to expand), or "
+                "a summary_id to pass to lcm_expand when it's been compressed out of view."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Natural language description of the task."},
-                    "top_k": {"type": "number", "description": "Max results to return (default 5)."},
+                    "pattern": {"type": "string", "description": "Regex (mode=pattern) or query text (mode=fulltext)."},
+                    "mode": {"type": "string", "enum": ["pattern", "fulltext"], "description": "Default \"pattern\"."},
+                    "limit": {
+                        "type": "number",
+                        "description": "Max results to return (default 20). No hard ceiling — raise it if you have real reason to want more.",
+                    },
                 },
-                "required": ["query"],
+                "required": ["pattern"],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "get_skill",
+            "name": "lcm_describe",
             "description": (
-                "Fetch the full content of a skill discovered via search_skills — a document "
-                "describing how to do a specific task in this environment. Read it, then decide "
-                "what to actually invoke (shell_exec, call_tool, a subagent, ...) to carry out "
-                "what it describes; this only returns guidance text, it doesn't execute anything "
-                "itself."
+                "Look up a single message or context-summary node by id (auto-detects which "
+                "kind it is) and return its full detail — role/content/turn info for a "
+                "message, or kind/covers/content/token_count/folded_into for a summary. Use "
+                "this to inspect what an id from lcm_grep actually is before deciding whether "
+                "to call lcm_expand on it."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "The name field from a search_skills result."},
+                    "id": {"type": "string", "description": "A message_id or summary_id."},
                 },
-                "required": ["name"],
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lcm_expand",
+            "description": (
+                "Recover the full original messages a context-summary node represents, "
+                "walking down through the compression DAG (condensed summaries fold earlier "
+                "leaf/condensed summaries) as needed. Reserved for deep investigation into "
+                "history that's been compressed out of view — freely re-expanding every "
+                "summary back to full text would fight against the reason compaction exists."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary_id": {"type": "string", "description": "A summary_id (from lcm_grep or lcm_describe)."},
+                },
+                "required": ["summary_id"],
             },
         },
     },
@@ -351,6 +378,25 @@ TOOLS_SCHEMA = [
         },
     },
 ]
+
+# docs/components/context-slot.md's Memory-Access Tools — lcm_expand is
+# subagent-only at the schema level: excluded from the list entirely for a
+# main-agent (top-level) turn rather than listed and rejected at runtime if
+# called anyway, per the explicit design decision behind this. lcm_grep/
+# lcm_describe carry no such restriction — same "unrestricted" treatment as
+# memory_search/memory_expand above.
+_SUBAGENT_ONLY_TOOL_NAMES = {"lcm_expand"}
+
+
+def tools_schema_for(is_subagent: bool) -> list[dict]:
+    """model_call.py's one call site for what used to be the flat
+    TOOLS_SCHEMA constant — every ModelCall now goes through this so the
+    subagent-only exclusion above is enforced uniformly on both the
+    streaming and non-streaming call paths, not duplicated at each site."""
+    if is_subagent:
+        return TOOLS_SCHEMA
+    return [tool for tool in TOOLS_SCHEMA if tool["function"]["name"] not in _SUBAGENT_ONLY_TOOL_NAMES]
+
 
 _MEMORY_SEARCH_RETRY_ATTEMPTS = 3  # matches ToolCall's MaximumAttempts (docs/components/temporal-workflow.md)
 

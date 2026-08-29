@@ -41,15 +41,25 @@ const modelCallChunkSignalName = "ModelCallChunk"
 // real "Activity not found on completion... workflow execution already
 // completed" warning while testing docs/components/memory-slot.md's
 // write-path, even though the real memory_write call had genuinely
-// succeeded. TurnWorkflow starts THIS workflow as a detached child
-// (ParentClosePolicy: ABANDON) and does not await its result — the child
-// keeps running independently after the parent closes, so the activity's
-// completion gets recorded against the child's own still-open history
-// instead.
-func WriteMemoryWorkflow(ctx workflow.Context, turnID string) error {
+// succeeded. Started as a detached child (ParentClosePolicy: ABANDON)
+// without awaiting its result — the child keeps running independently
+// after the caller closes, so the activity's completion gets recorded
+// against the child's own still-open history instead.
+//
+// Takes sessionKey, not turnID — docs/components/memory-slot.md's "Resolved:
+// Write-Path Construction" correction (2026-08-29): agent-brain's own
+// mining-pipeline-redesign contract asks for writes at session-completion
+// and context-compaction boundaries, batching whatever accumulated since
+// the last write, not once per turn. WriteMemoryActivity itself now reads
+// by session_key + a Postgres watermark (sessions.memory_write_watermark_turn_seq)
+// rather than one turn's own messages. Dispatched from exactly two places:
+// coordinator.go's idle-timeout exit (session completion) and turn.go's
+// hard-compression path below (context compaction) — no longer from every
+// turn's own end-of-turn block.
+func WriteMemoryWorkflow(ctx workflow.Context, sessionKey string) error {
 	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 	actx := workflow.WithActivityOptions(ctx, ao)
-	return workflow.ExecuteActivity(actx, "WriteMemory", turnID).Get(actx, nil)
+	return workflow.ExecuteActivity(actx, "WriteMemory", sessionKey).Get(actx, nil)
 }
 
 // CompressContextWorkflow is WriteMemoryWorkflow's counterpart for the soft
@@ -654,6 +664,27 @@ loop:
 			// this same turn assembles a smaller context.
 			cctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
 			_ = workflow.ExecuteActivity(cctx, "CompressContext", input.TurnID).Get(cctx, nil)
+
+			// docs/components/memory-slot.md's "Resolved: Write-Path
+			// Construction" correction — a real, threshold-crossing hard
+			// compaction is one of the two boundaries agent-brain's own
+			// write contract asks for (the other is session completion,
+			// coordinator.go's idle-timeout exit). Deliberately NOT the
+			// soft path above/below (it fires every iteration, usually a
+			// cheap no-op — dispatching WriteMemory there would just
+			// reintroduce near-per-turn granularity through a different
+			// door). Detached child, same ABANDON reasoning as
+			// WriteMemoryWorkflow's own doc comment — this turn keeps
+			// running after dispatching it, doesn't wait for it.
+			if input.ParentType == "session" {
+				wcwo := workflow.ChildWorkflowOptions{
+					WorkflowID:        input.TurnID + ":write-memory:" + strconv.Itoa(iterations),
+					ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
+				}
+				wcctx := workflow.WithChildOptions(ctx, wcwo)
+				wmFuture := workflow.ExecuteChildWorkflow(wcctx, WriteMemoryWorkflow, input.SessionKey)
+				_ = wmFuture.GetChildWorkflowExecution().Get(wcctx, nil)
+			}
 		} else {
 			// Fire-and-forget — detached child workflow, same reasoning as
 			// the WriteMemory dispatch below. Per-iteration unique
@@ -847,30 +878,13 @@ loop:
 		actx := workflow.WithActivityOptions(ctx, ao)
 		_ = workflow.ExecuteActivity(actx, "Persist", input.TurnID, "completed").Get(actx, nil)
 	}
-	if input.ParentType == "session" {
-		// docs/components/memory-slot.md, "Resolved: Write-Path Construction"
-		// + "Resolved: Subagent-Turn Write Scope" — top-level turns only,
-		// genuinely fire-and-forget. Started as a DETACHED CHILD WORKFLOW
-		// (ParentClosePolicy: ABANDON), not a bare ExecuteActivity — a bare
-		// unawaited activity is NOT reliably fire-and-forget when the
-		// calling workflow (this one) closes moments later: the activity's
-		// completion gets reported against an already-closed workflow and is
-		// silently discarded, leaving it stuck showing as pending forever
-		// even though the real work succeeded (confirmed via a live test —
-		// see WriteMemoryWorkflow's own doc comment). The child keeps
-		// running independently after this workflow closes, so its
-		// completion is recorded against its own still-open history
-		// instead. Only waits for the child to have STARTED
-		// (GetChildWorkflowExecution — a real, documented two-phase future,
-		// not this workflow's own invention), not for it to finish.
-		cwo := workflow.ChildWorkflowOptions{
-			WorkflowID:        input.TurnID + ":write-memory",
-			ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
-		}
-		cctx := workflow.WithChildOptions(ctx, cwo)
-		childFuture := workflow.ExecuteChildWorkflow(cctx, WriteMemoryWorkflow, input.TurnID)
-		_ = childFuture.GetChildWorkflowExecution().Get(cctx, nil)
-	}
+	// docs/components/memory-slot.md's "Resolved: Write-Path Construction"
+	// correction (2026-08-29): WriteMemory no longer dispatches here, once
+	// per top-level turn — agent-brain's own write contract asks for
+	// session-completion and context-compaction boundaries instead
+	// (coordinator.go's idle-timeout exit, and the hard-compression branch
+	// above), not per turn. Removing this per-turn dispatch is the actual
+	// fix for the gap that correction named; nothing replaces it here.
 	var interruptedPayload *types.SignalPayload
 	if input.ParentType == "session" {
 		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}

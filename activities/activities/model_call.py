@@ -98,6 +98,19 @@ class ModelCallActivity:
                 platform = session_row["platform"] if session_row else None
                 conversation, context_tokens = await llm.build_conversation(conn, input.turn_id, system_prompt)
 
+                # docs/components/context-slot.md's Memory-Access Tools —
+                # lcm_expand's schema-level subagent-only restriction
+                # (llm.tools_schema_for) needs to know which kind of turn
+                # this is. A direct, separate lookup rather than threading
+                # it out of llm.build_conversation's own internal turn_row
+                # query — that function's job is context assembly, not
+                # subagent detection, and this is the same cheap
+                # indexed-PK lookup pattern already used for offset_row/
+                # next_seq_row below.
+                turn_row = await conn.fetchrow("SELECT parent_type FROM turns WHERE turn_id = $1", input.turn_id)
+                is_subagent = bool(turn_row and turn_row["parent_type"] == "turn")
+                tools_schema = llm.tools_schema_for(is_subagent)
+
                 # docs/components/model-registry.md, "Resolved: Selection
                 # Mechanism" + "Resolved: Escalate-on-Retry" — the previous
                 # step's hint picks the tier (bootstrap default if this is
@@ -148,10 +161,11 @@ class ModelCallActivity:
                 if input.context_seq == 0 and platform in ("discord", "discord-voice"):
                     real = await self._call_model_streaming_with_delivery(
                         input.turn_id, conversation, provider, model_config.model, model_config.max_tokens,
+                        tools_schema,
                     )
                 else:
                     real = await provider.call_model(
-                        conversation, model_config.model, model_config.max_tokens, llm.TOOLS_SCHEMA,
+                        conversation, model_config.model, model_config.max_tokens, tools_schema,
                     )
                 histogram.record(time.monotonic() - started)
                 content, raw_tool_calls, usage = real.content, real.raw_tool_calls, real.usage
@@ -254,7 +268,7 @@ class ModelCallActivity:
                 next_hint_tier=next_hint_tier,
             )
 
-    async def _call_model_streaming_with_delivery(self, turn_id: str, conversation: list[dict], provider, model: str, max_tokens: int):
+    async def _call_model_streaming_with_delivery(self, turn_id: str, conversation: list[dict], provider, model: str, max_tokens: int, tools_schema: list[dict]):
         """Wraps llm.call_model_streaming with this feature's two other real
         pieces (docs/components/gateway.md's "Resolved: ModelCall
         Streaming"): writing each chunk to turn_deliveries and signaling
@@ -302,7 +316,7 @@ class ModelCallActivity:
             # exactly what makes the retry-safety check above correct.
             activity.heartbeat(seq)
 
-        return await provider.call_model_streaming(conversation, model, max_tokens, llm.TOOLS_SCHEMA, on_chunk)
+        return await provider.call_model_streaming(conversation, model, max_tokens, tools_schema, on_chunk)
 
 def _resolve_gating(tool_name: str, arguments: dict) -> tuple[bool, str, str]:
     """docs/components/user-input.md — the {server, tool} identity being

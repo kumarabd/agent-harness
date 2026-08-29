@@ -53,7 +53,7 @@ import asyncpg
 from temporalio import activity
 from temporalio.exceptions import CancelledError
 
-from . import agent_brain, claim_check, ids, leases, mcp_hub, shell_hub
+from . import agent_brain, claim_check, ids, lcm, leases, mcp_hub, shell_hub
 
 _SESSION_ROOT_ENV = "SESSION_ROOT"
 # Local-dev fallback; real deployments set SESSION_ROOT to match the Helm
@@ -444,43 +444,53 @@ async def call_tool(arguments: dict, ctx: ToolContext) -> dict:
     return await mcp_hub.call_tool("call_tool", arguments)
 
 
-async def search_skills(arguments: dict, ctx: ToolContext) -> dict:
-    """docs/components/skills.md — straight proxy to mcp-hub's own
-    search_skills. Same unwrap treatment search_tools already needs
-    (FastMCP wraps a tool's bare-list return in {"result": [...]}, verified
-    directly against mcp-hub's own server.py for both tools — search_skills
-    returns list[dict] just like search_tools does) and the same
-    graceful-degradation posture: no mcp-hub configured means no skills
-    discoverable, not an error — a deployment without mcp-hub (or without
-    any skills registered on it) still works, just with nothing to find
-    here."""
-    query = arguments.get("query", "")
-    top_k = arguments.get("top_k", 5)
-    try:
-        raw = await mcp_hub.call_tool("search_skills", {"query": query, "top_k": top_k})
-    except mcp_hub.McpHubNotConfiguredError:
-        return {"results": []}
-    results = raw["result"] if isinstance(raw, dict) and "result" in raw else raw
-    return {"results": results}
+async def lcm_grep(arguments: dict, ctx: ToolContext) -> dict:
+    """docs/components/context-slot.md's Memory-Access Tools — `lcm_grep`.
+    Session-scoped from ctx.session_key directly, same as every other
+    session-scoped tool here — the model never supplies a session_key
+    itself. mode/limit passed straight through with lcm.retrieval's own
+    defaults (mode="pattern", limit=GREP_DEFAULT_LIMIT) when omitted."""
+    pattern = arguments.get("pattern")
+    if not isinstance(pattern, str) or not pattern:
+        raise ValueError("lcm_grep requires a non-empty string 'pattern' argument")
+    async with ctx.pool.acquire() as conn:
+        return await lcm.grep(
+            conn,
+            ctx.session_key,
+            pattern,
+            mode=arguments.get("mode", "pattern"),
+            limit=arguments.get("limit"),
+        )
 
 
-async def get_skill(arguments: dict, ctx: ToolContext) -> dict:
-    """docs/components/skills.md — fetches one skill's full content by name
-    (from a prior search_skills result). Deliberately NOT caught/degraded
-    the way search_skills is above: mcp-hub's own real get_skill (server.py)
-    raises a real error for both "mcp-hub not configured" and "unknown skill
-    name" — letting that propagate up through tool_call.py's existing
-    exception-to-status='error' handling already gives the model a clear,
-    honest failure message either way, matching this component's own stated
-    design ("get_skill returns a clear 'not configured' error, exactly the
-    way search_tools already degrades") without needing special-case code
-    here. mcp-hub's real return is a plain string (verbatim skill content),
-    not a JSON object — wrapped under "content" to keep this registry's
-    dict-return contract (ToolSpec.handler) consistent with every other
-    entry, not because the content itself is structured."""
-    name = arguments.get("name", "")
-    content = await mcp_hub.call_tool("get_skill", {"name": name})
-    return {"content": content}
+async def lcm_describe(arguments: dict, ctx: ToolContext) -> dict:
+    """docs/components/context-slot.md's Memory-Access Tools — `lcm_describe`.
+    Not session-scoped at the query level (a message_id/summary_id is
+    already globally unique) — but every id a model could plausibly supply
+    came from either lcm_grep's own output or a summary block lcm.assemble
+    rendered into THIS session's context, so in practice it never crosses a
+    session boundary; no explicit ctx.session_key check added on top of
+    that, matching memory_search/memory_expand's own "unrestricted" stance
+    just above."""
+    id_arg = arguments.get("id")
+    if not isinstance(id_arg, str) or not id_arg:
+        raise ValueError("lcm_describe requires a non-empty string 'id' argument")
+    async with ctx.pool.acquire() as conn:
+        return await lcm.describe(conn, id_arg)
+
+
+async def lcm_expand(arguments: dict, ctx: ToolContext) -> dict:
+    """docs/components/context-slot.md's Memory-Access Tools — `lcm_expand`.
+    Schema-level restriction to subagent turns only lives in llm.py
+    (tools_schema_for) — this handler itself has no access-control check,
+    same "enforced at the schema boundary, not re-checked in the handler"
+    pattern shell_exec's own module docstring already documents for a
+    different concern."""
+    summary_id = arguments.get("summary_id")
+    if not isinstance(summary_id, str) or not summary_id:
+        raise ValueError("lcm_expand requires a non-empty string 'summary_id' argument")
+    async with ctx.pool.acquire() as conn:
+        return await lcm.expand(conn, summary_id)
 
 
 async def _demo_echo_stub(arguments: dict, ctx: ToolContext) -> dict:
@@ -548,18 +558,29 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         heartbeat_timeout_seconds=15.0,
         start_to_close_timeout_seconds=30.0,
     ),
-    # docs/components/skills.md — same Tier B timing as search_tools/call_tool
-    # above: a network round-trip to mcp-hub, no cancellable subprocess.
-    "search_skills": ToolSpec(
-        handler=search_skills,
+    # lcm_grep/lcm_describe/lcm_expand (docs/components/context-slot.md's
+    # Memory-Access Tools) — same no-cancellable-subprocess shape as
+    # memory_search/memory_expand above (quick request/response, no lease),
+    # but a local Postgres read against this tenant's own database, not a
+    # network call to agent-brain — start_to_close is tightened to 15s
+    # (vs. those tools' 30s) to reflect that real difference in expected
+    # latency, not copied blindly from the network-tier tools next to it.
+    "lcm_grep": ToolSpec(
+        handler=lcm_grep,
         heartbeat_interval_seconds=5.0,
         heartbeat_timeout_seconds=15.0,
-        start_to_close_timeout_seconds=30.0,
+        start_to_close_timeout_seconds=15.0,
     ),
-    "get_skill": ToolSpec(
-        handler=get_skill,
+    "lcm_describe": ToolSpec(
+        handler=lcm_describe,
         heartbeat_interval_seconds=5.0,
         heartbeat_timeout_seconds=15.0,
-        start_to_close_timeout_seconds=30.0,
+        start_to_close_timeout_seconds=15.0,
+    ),
+    "lcm_expand": ToolSpec(
+        handler=lcm_expand,
+        heartbeat_interval_seconds=5.0,
+        heartbeat_timeout_seconds=15.0,
+        start_to_close_timeout_seconds=15.0,
     ),
 }

@@ -138,6 +138,24 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			// design (components/session-coordinator.md). A fresh
 			// SignalWithStart recreates this workflow on demand.
 			logger.Info("coordinator idle timeout, exiting", "session_key", input.SessionKey)
+
+			// docs/components/memory-slot.md's "Resolved: Write-Path
+			// Construction" correction — session completion (this idle
+			// timeout) is one of the two boundaries agent-brain's own
+			// mining-pipeline-redesign contract asks for (the other is a
+			// real hard context compaction, turn.go's own compressionState
+			// branch). Detached child, same ABANDON reasoning turn.go's
+			// WriteMemoryWorkflow doc comment already gives — this
+			// workflow returns right after, doesn't wait for the write to
+			// finish, only for the child to have started.
+			wcwo := workflow.ChildWorkflowOptions{
+				WorkflowID:        input.SessionKey + ":write-memory:" + workflow.GetInfo(ctx).WorkflowExecution.RunID,
+				ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
+			}
+			wcctx := workflow.WithChildOptions(ctx, wcwo)
+			wmFuture := workflow.ExecuteChildWorkflow(wcctx, WriteMemoryWorkflow, input.SessionKey)
+			_ = wmFuture.GetChildWorkflowExecution().Get(wcctx, nil)
+
 			return nil
 		}
 

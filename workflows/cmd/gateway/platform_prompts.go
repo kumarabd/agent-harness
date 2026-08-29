@@ -34,16 +34,6 @@ var platformSystemPrompts = map[string]string{
 // regardless of which system prompt is active, so this only changes
 // framing/register, never what the model can actually call.
 //
-// search_skills nudge added 2026-08-29, same day DEFAULT_SYSTEM_PROMPT
-// itself got the equivalent sentence (llm.py) — a spoken request for a
-// known, repeatable procedure ("walk me through the deploy process") is
-// just as real a case here as it is in text, and this prompt shouldn't
-// silently lag the shared default's own tool-routing guidance just because
-// its formatting rules are platform-specific. Kept as a single short
-// sentence, consistent with this prompt's own "keep responses reasonably
-// brief" instruction to the model applying equally to the model's own
-// instructions here.
-//
 // The final line is copied verbatim from DEFAULT_SYSTEM_PROMPT's own last
 // sentence, not reworded — declare_next_step_hint being called every
 // response is a real, functionally-required mechanism (model_registry's
@@ -60,7 +50,5 @@ const voiceSystemPromptText = `You are a helpful, friendly voice assistant. The 
 - Write numbers, times, dates, and abbreviations the way you would actually say them out loud (for example, "three thirty," not "3:30").
 - Keep responses conversational and reasonably brief — this is a spoken conversation, not a document. If you have several points to make, say them as connected sentences rather than a list.
 - Sound natural and warm, the way a person would speak, not like a formal written answer.
-
-If a request looks like a known, repeatable procedure rather than a one-off question, check search_skills first before improvising, and use get_skill to read a matching result's full guidance.
 
 Every response, also call declare_next_step_hint alongside anything else you call, declaring what the next step needs.`

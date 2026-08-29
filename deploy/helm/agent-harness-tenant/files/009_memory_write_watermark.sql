@@ -1,0 +1,13 @@
+-- docs/components/memory-slot.md's "Resolved: Write-Path Construction"
+-- correction (2026-08-29): WriteMemory no longer dispatches once per
+-- top-level turn — agent-brain's own mining-pipeline-redesign contract
+-- asks for writes at session-completion and context-compaction boundaries,
+-- batching whatever accumulated since the LAST write. This watermark is
+-- what makes "since the last write" a real query instead of always
+-- resending the whole session: the highest turns.turn_seq already sent via
+-- memory_write for this session. NULL means nothing has been sent yet
+-- (same "no rows written" meaning components/dreaming.md's own superseded
+-- last_consolidated_turn_seq watermark used) — mirrors that column's exact
+-- shape, reused here for a genuinely different job (real-time write
+-- batching, not a daily consolidation batch job).
+ALTER TABLE sessions ADD COLUMN memory_write_watermark_turn_seq int;
