@@ -77,10 +77,47 @@ logger = logging.getLogger(__name__)
 # information was already available another way.
 _NEXT_STEP_HINT_TOOL_NAME = "declare_next_step_hint"
 
+# Rewritten 2026-08-29 — the original ("autonomous coding assistant... use
+# shell_exec") was a scaffolding-era placeholder from before search_tools/
+# call_tool/memory_search/memory_expand/search_skills/get_skill existed at
+# all, and it actively misdescribed what this deployment actually is: a
+# general-purpose personal assistant discoverable-tool surface (real,
+# per-tenant third-party APIs via mcp-hub — maps, notes, health, finance,
+# code hosting, and whatever else a given tenant has registered — not just a
+# shell), not a coding-only tool. gateway/discord-voice.md's own Notes Log
+# already flagged this exact framing as wrong when building the voice-
+# specific prompt override — "that default's 'coding assistant' framing
+# doesn't fit a spoken conversation regardless of formatting" — but only
+# worked around it for voice at the time (a genuinely separate prompt, not a
+# patch on this one), rather than fixing the shared default itself. This
+# closes that the rest of the way, for every platform without its own
+# override (Web, Discord text).
+# Deliberately does NOT hardcode any tenant-specific backend name (no
+# "maps-engine"/"notion"/"github" mentioned) — this constant is shared
+# across every tenant regardless of which backends they've registered;
+# search_tools' own real-time discovery is what surfaces the actual
+# available set, per tool-registry.md's already-resolved design.
+# search_skills gets a light, non-imperative nudge (skills.md's own
+# "Resolved: Prompt-Level Nudge" — a nudge, not a structural gate, same
+# treatment search_tools deliberately does NOT get an imperative rule for
+# either, per tool-registry.md's "Considered and reverted"). The final
+# sentence is unchanged in substance from the original — declare_next_step_hint
+# being called every response is a real, functionally-required mechanism
+# (model_registry's escalate-on-retry / tier hinting depends on it), and
+# platform_prompts.go's own voiceSystemPromptText copies this exact
+# sentence verbatim, so it has to keep matching byte-for-byte.
 DEFAULT_SYSTEM_PROMPT = (
-    "You are an autonomous coding assistant. You have access to a shell_exec "
-    "tool to run shell commands in your working directory. Use it when needed "
-    "to complete the user's request, then summarize the result in plain text. "
+    "You are a helpful, general-purpose personal assistant with real tools — not limited to "
+    "coding tasks. You have direct shell access (shell_exec) for local/system tasks, and "
+    "search_tools/call_tool to discover and invoke whatever broader real capabilities this "
+    "deployment has registered — third-party APIs and services beyond the shell, specific to "
+    "this environment. Use memory_search (and memory_expand for full detail) to recall relevant "
+    "context from past conversations when it's genuinely useful, not on every turn. If a "
+    "request looks like a known, repeatable procedure (a release process, a deployment "
+    "sequence, a troubleshooting runbook, a project-specific convention) rather than a one-off "
+    "question, check search_skills first before improvising — use get_skill to read a matching "
+    "result's full guidance, then decide what to actually invoke to carry it out. After using a "
+    "tool, summarize the result in plain text for the user rather than leaving it as raw output. "
     f"Every response, also call {_NEXT_STEP_HINT_TOOL_NAME} alongside anything "
     "else you call, declaring what the next step needs."
 )
@@ -238,6 +275,53 @@ TOOLS_SCHEMA = [
                     },
                 },
                 "required": ["server", "tool", "arguments"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_skills",
+            # docs/components/skills.md — mirrors mcp-hub's own real
+            # search_skills description (server.py, verified directly), plus
+            # the doc's own prompt-level nudge on when to reach for this: a
+            # repeatable procedure, not every request.
+            "description": (
+                "Semantically search a curated catalog of skills — documented procedures for "
+                "how to do a specific, repeatable task in this environment (e.g. a release "
+                "process, a deployment sequence, a troubleshooting runbook, a project-specific "
+                "convention). Check this before improvising when a request looks like a known, "
+                "repeatable procedure rather than a one-off question. Returns candidates with a "
+                "name, description, and tags. Use get_skill on a result's name to read the full "
+                "procedure."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural language description of the task."},
+                    "top_k": {"type": "number", "description": "Max results to return (default 5)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_skill",
+            "description": (
+                "Fetch the full content of a skill discovered via search_skills — a document "
+                "describing how to do a specific task in this environment. Read it, then decide "
+                "what to actually invoke (shell_exec, call_tool, a subagent, ...) to carry out "
+                "what it describes; this only returns guidance text, it doesn't execute anything "
+                "itself."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The name field from a search_skills result."},
+                },
+                "required": ["name"],
             },
         },
     },

@@ -444,6 +444,45 @@ async def call_tool(arguments: dict, ctx: ToolContext) -> dict:
     return await mcp_hub.call_tool("call_tool", arguments)
 
 
+async def search_skills(arguments: dict, ctx: ToolContext) -> dict:
+    """docs/components/skills.md — straight proxy to mcp-hub's own
+    search_skills. Same unwrap treatment search_tools already needs
+    (FastMCP wraps a tool's bare-list return in {"result": [...]}, verified
+    directly against mcp-hub's own server.py for both tools — search_skills
+    returns list[dict] just like search_tools does) and the same
+    graceful-degradation posture: no mcp-hub configured means no skills
+    discoverable, not an error — a deployment without mcp-hub (or without
+    any skills registered on it) still works, just with nothing to find
+    here."""
+    query = arguments.get("query", "")
+    top_k = arguments.get("top_k", 5)
+    try:
+        raw = await mcp_hub.call_tool("search_skills", {"query": query, "top_k": top_k})
+    except mcp_hub.McpHubNotConfiguredError:
+        return {"results": []}
+    results = raw["result"] if isinstance(raw, dict) and "result" in raw else raw
+    return {"results": results}
+
+
+async def get_skill(arguments: dict, ctx: ToolContext) -> dict:
+    """docs/components/skills.md — fetches one skill's full content by name
+    (from a prior search_skills result). Deliberately NOT caught/degraded
+    the way search_skills is above: mcp-hub's own real get_skill (server.py)
+    raises a real error for both "mcp-hub not configured" and "unknown skill
+    name" — letting that propagate up through tool_call.py's existing
+    exception-to-status='error' handling already gives the model a clear,
+    honest failure message either way, matching this component's own stated
+    design ("get_skill returns a clear 'not configured' error, exactly the
+    way search_tools already degrades") without needing special-case code
+    here. mcp-hub's real return is a plain string (verbatim skill content),
+    not a JSON object — wrapped under "content" to keep this registry's
+    dict-return contract (ToolSpec.handler) consistent with every other
+    entry, not because the content itself is structured."""
+    name = arguments.get("name", "")
+    content = await mcp_hub.call_tool("get_skill", {"name": name})
+    return {"content": content}
+
+
 async def _demo_echo_stub(arguments: dict, ctx: ToolContext) -> dict:
     """Reproduces the pre-real-tool-registry stub's exact behavior: a fixed
     ~4s simulated delay with heartbeats (real cancellation demonstrable), no
@@ -505,6 +544,20 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "call_tool": ToolSpec(
         handler=call_tool,
+        heartbeat_interval_seconds=5.0,
+        heartbeat_timeout_seconds=15.0,
+        start_to_close_timeout_seconds=30.0,
+    ),
+    # docs/components/skills.md — same Tier B timing as search_tools/call_tool
+    # above: a network round-trip to mcp-hub, no cancellable subprocess.
+    "search_skills": ToolSpec(
+        handler=search_skills,
+        heartbeat_interval_seconds=5.0,
+        heartbeat_timeout_seconds=15.0,
+        start_to_close_timeout_seconds=30.0,
+    ),
+    "get_skill": ToolSpec(
+        handler=get_skill,
         heartbeat_interval_seconds=5.0,
         heartbeat_timeout_seconds=15.0,
         start_to_close_timeout_seconds=30.0,
