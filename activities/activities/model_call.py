@@ -108,8 +108,14 @@ class ModelCallActivity:
                 # indexed-PK lookup pattern already used for offset_row/
                 # next_seq_row below.
                 turn_row = await conn.fetchrow("SELECT parent_type FROM turns WHERE turn_id = $1", input.turn_id)
-                is_subagent = bool(turn_row and turn_row["parent_type"] == "turn")
-                tools_schema = llm.tools_schema_for(is_subagent)
+                # Named caller_is_subagent, not is_subagent — the tool_calls
+                # minting loop below has its own per-call is_subagent
+                # meaning ("does THIS tool call request spawning a
+                # subagent"), a genuinely different question from "is the
+                # turn making the call itself a subagent." Reusing the same
+                # name would silently shadow this one inside the loop.
+                caller_is_subagent = bool(turn_row and turn_row["parent_type"] == "turn")
+                tools_schema = llm.tools_schema_for(caller_is_subagent)
 
                 # docs/components/model-registry.md, "Resolved: Selection
                 # Mechanism" + "Resolved: Escalate-on-Retry" — the previous
@@ -223,6 +229,46 @@ class ModelCallActivity:
                     is_subagent = bool(tc.get("is_subagent", False))
                     arguments = tc.get("arguments", {})
 
+                    # docs/components/temporal-workflow.md's recursion-
+                    # termination guard — only applies to nested delegation
+                    # (a subagent spawning a further subagent), never to
+                    # root's own spawns (root's tools_schema_for variant
+                    # doesn't even offer delegated_scope/kept_work — see
+                    # llm.py). Checked here, at mint time, because a
+                    # subagent dispatch is a child workflow, not a ToolCall
+                    # activity: turn.go decides Activity-vs-child-workflow
+                    # purely from ToolCallRef.IsSubagent with no validation
+                    # step of its own, so this is the only place in the
+                    # whole call chain that ever sees both the raw
+                    # arguments and the caller's own subagent-ness at once.
+                    if is_subagent and caller_is_subagent:
+                        rejection = _validate_subagent_delegation(arguments)
+                        if rejection is not None:
+                            tool_call_id = ids.activity_id(input.turn_id, n)
+                            await conn.execute(
+                                "INSERT INTO tool_calls "
+                                "(tool_call_id, parent_id, message_id, tool_name, arguments, "
+                                "is_subagent, status, result, side_effect, completed_at) "
+                                "VALUES ($1, $2, $3, $4, $5, false, 'error', $6, 'none', now())",
+                                tool_call_id,
+                                input.turn_id,
+                                message_id,
+                                tool_name,
+                                json.dumps(arguments),
+                                json.dumps({"error": rejection}),
+                            )
+                            # Deliberately NOT appended to refs — already
+                            # durably resolved (status='error') at mint
+                            # time, so the workflow never dispatches
+                            # anything for it (neither an activity nor a
+                            # child workflow); the next ModelCall's
+                            # build_conversation naturally picks the error
+                            # back up via the normal tool_calls join, same
+                            # path an ordinary failed tool call already
+                            # takes (lcm/assembly.py's status != 'ok'
+                            # branch).
+                            continue
+
                     tool_call_id = (
                         ids.subagent_turn_id(input.turn_id, n)
                         if is_subagent
@@ -317,6 +363,42 @@ class ModelCallActivity:
             activity.heartbeat(seq)
 
         return await provider.call_model_streaming(conversation, model, max_tokens, tools_schema, on_chunk)
+
+
+def _validate_subagent_delegation(arguments: dict) -> str | None:
+    """docs/components/temporal-workflow.md's recursion-termination guard
+    (LCM/Volt's Task tool, Ehrlich & Blackman 2026): a subagent spawning a
+    further subagent must show genuine narrowing of responsibility —
+    'delegated_scope' (what's being handed off) and 'kept_work' (what the
+    caller itself keeps) both present and non-blank. Root-issued spawns
+    never reach this function at all (schema-excluded, see
+    llm.tools_schema_for) — this only runs for a subagent-issued call, i.e.
+    actual nested delegation, not root's own sibling fan-out (calling
+    spawn_subagent multiple times in one response for parallel siblings —
+    LCM's "Tasks" shape — is unaffected either way, since none of those
+    calls are subagent-issued).
+
+    Deliberately a presence/non-blank check only, not a semantic "did you
+    really keep enough work" judgment — the paper's own description
+    ("cannot articulate what it is keeping") names the failure mode as an
+    inability to state anything at all, not a quality bar on what's
+    stated, and doesn't specify an algorithm for the latter; building one
+    would mean a second LLM call to judge the first's output, real new
+    cost/complexity this project's own standing anti-over-engineering
+    discipline (see shell_exec's own per-command classifier rejection)
+    argues against building speculatively. Returns an error message if
+    rejected, None if the call may proceed."""
+    delegated_scope = str(arguments.get("delegated_scope") or "").strip()
+    kept_work = str(arguments.get("kept_work") or "").strip()
+    if delegated_scope and kept_work:
+        return None
+    return (
+        "spawn_subagent rejected: a subagent delegating to a further subagent must provide both "
+        "'delegated_scope' (the specific slice of work being handed off) and 'kept_work' (the work "
+        "you are keeping) — both non-empty. Perform this work directly instead of delegating it "
+        "further."
+    )
+
 
 def _resolve_gating(tool_name: str, arguments: dict) -> tuple[bool, str, str]:
     """docs/components/user-input.md — the {server, tool} identity being

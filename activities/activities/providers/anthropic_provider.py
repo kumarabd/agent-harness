@@ -45,6 +45,10 @@ from .base import Provider, SimpleTextResult
 logger = logging.getLogger(__name__)
 
 _NEXT_STEP_HINT_TOOL_NAME = "declare_next_step_hint"
+# docs/components/temporal-workflow.md's recursion-termination guard —
+# is_subagent has to be derived from which tool the model actually called,
+# not hardcoded False.
+_SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"
 
 
 def _openai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
@@ -182,7 +186,11 @@ class AnthropicProvider(Provider):
                 # Internal shape stores arguments as an already-parsed dict
                 # (json.loads-ed on the OpenAI side); match that shape.
                 raw_tool_calls.append(
-                    {"name": block.name, "arguments": block.input or {}, "is_subagent": False}
+                    {
+                        "name": block.name,
+                        "arguments": block.input or {},
+                        "is_subagent": block.name == _SPAWN_SUBAGENT_TOOL_NAME,
+                    }
                 )
 
         usage_obj = response.usage
@@ -291,7 +299,9 @@ class AnthropicProvider(Provider):
                     next_hint_modality = input_obj.get("modality", next_hint_modality)
                     next_hint_tier = input_obj.get("tier", next_hint_tier)
                 continue
-            raw_tool_calls.append({"name": tb["name"], "arguments": input_obj, "is_subagent": False})
+            raw_tool_calls.append(
+                {"name": tb["name"], "arguments": input_obj, "is_subagent": tb["name"] == _SPAWN_SUBAGENT_TOOL_NAME}
+            )
 
         return _llm.RealModelResult(
             content=content_buffer,

@@ -77,6 +77,19 @@ logger = logging.getLogger(__name__)
 # information was already available another way.
 _NEXT_STEP_HINT_TOOL_NAME = "declare_next_step_hint"
 
+# docs/components/temporal-workflow.md's recursion-termination guard (LCM/
+# Volt's Task tool, Ehrlich & Blackman 2026) — real, model-facing subagent
+# spawning, added 2026-08-29. Previously is_subagent was hardcoded False on
+# every real parsed tool call in both providers (openai_provider.py/
+# anthropic_provider.py) — a real model had no way to spawn a subagent at
+# all; only test fixtures (workflows/scenarios/subagent-spawn.json) ever
+# set is_subagent=true. Named to match that fixture's own existing
+# convention (tool name "spawn_subagent", arguments.prompt), not the
+# paper's literal "Task" — consistent with this codebase's own vocabulary
+# (is_subagent, subagent_turn_id, merge_subagent_output already use
+# "subagent" throughout).
+_SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"
+
 # Rewritten 2026-08-29 — the original ("autonomous coding assistant... use
 # shell_exec") was a scaffolding-era placeholder from before search_tools/
 # call_tool/memory_search/memory_expand existed at all, and it actively
@@ -282,6 +295,36 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": _SPAWN_SUBAGENT_TOOL_NAME,
+            # docs/components/temporal-workflow.md — turn.go's own
+            # tool-call fan-out already dispatches multiple sibling
+            # subagent child workflows concurrently within one reasoning
+            # step (LCM/Volt's "Tasks" parallel shape), so no separate
+            # array-taking tool is needed here: calling this once per
+            # desired subagent in the same response already gets that for
+            # free. This is the ROOT-turn variant (no delegated_scope/
+            # kept_work — see tools_schema_for's substitution for the
+            # subagent-issued variant, which requires them).
+            "description": (
+                "Delegate a self-contained slice of work to a subagent — a fresh turn with its own "
+                "isolated working directory (see merge_subagent_output to bring its file changes "
+                "back), reasoning independently and returning a summary when done. Use for work "
+                "substantial enough to warrant its own focused context, especially when it can run "
+                "in parallel with other work — call this multiple times in one response to spawn "
+                "several subagents concurrently."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "The self-contained task for the subagent to perform."},
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "lcm_grep",
             # docs/components/context-slot.md's Memory-Access Tools —
             # named and scoped to match the tool's real behavior: acts only
@@ -387,14 +430,60 @@ TOOLS_SCHEMA = [
 # memory_search/memory_expand above.
 _SUBAGENT_ONLY_TOOL_NAMES = {"lcm_expand"}
 
+# docs/components/temporal-workflow.md's recursion-termination guard — the
+# variant of spawn_subagent offered to a subagent (as opposed to the root
+# turn's TOOLS_SCHEMA entry above), requiring delegated_scope/kept_work.
+# Schema-level substitution, not a runtime-only check: a subagent-issued
+# call literally cannot omit these fields and still validate against its
+# own tool schema, matching the paper's own framing ("when a sub-agent, as
+# opposed to the root agent, invokes Task, it must provide..."). The actual
+# non-empty/genuine-narrowing check still happens in model_call.py at mint
+# time (a rejection has to short-circuit dispatch before it becomes a real
+# child workflow, which schema validation alone can't guarantee a
+# real-world model actually honors) — this substitution is the first line
+# of defense, not the only one.
+_SPAWN_SUBAGENT_NESTED_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": _SPAWN_SUBAGENT_TOOL_NAME,
+        "description": (
+            "Delegate a self-contained slice of YOUR OWN work to a further subagent. Since you "
+            "are already a subagent, you must show genuine narrowing of responsibility: "
+            "'delegated_scope' names the specific slice being handed off, 'kept_work' names what "
+            "you are keeping for yourself. A call that can't articulate real kept_work — i.e. one "
+            "that would hand off your entire responsibility — is rejected; perform the work "
+            "directly instead of delegating it further."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "The self-contained task for the subagent to perform."},
+                "delegated_scope": {
+                    "type": "string",
+                    "description": "The specific slice of your own work being handed off.",
+                },
+                "kept_work": {
+                    "type": "string",
+                    "description": "The work you are keeping for yourself, not delegating.",
+                },
+            },
+            "required": ["prompt", "delegated_scope", "kept_work"],
+        },
+    },
+}
+
 
 def tools_schema_for(is_subagent: bool) -> list[dict]:
     """model_call.py's one call site for what used to be the flat
-    TOOLS_SCHEMA constant — every ModelCall now goes through this so the
-    subagent-only exclusion above is enforced uniformly on both the
-    streaming and non-streaming call paths, not duplicated at each site."""
+    TOOLS_SCHEMA constant — every ModelCall now goes through this so both
+    the lcm_expand exclusion and the spawn_subagent variant substitution
+    above are enforced uniformly on both the streaming and non-streaming
+    call paths, not duplicated at each site."""
     if is_subagent:
-        return TOOLS_SCHEMA
+        return [
+            _SPAWN_SUBAGENT_NESTED_SCHEMA if tool["function"]["name"] == _SPAWN_SUBAGENT_TOOL_NAME else tool
+            for tool in TOOLS_SCHEMA
+        ]
     return [tool for tool in TOOLS_SCHEMA if tool["function"]["name"] not in _SUBAGENT_ONLY_TOOL_NAMES]
 
 

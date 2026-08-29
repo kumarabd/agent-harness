@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 # from it would circular. Kept in sync by convention.
 _NEXT_STEP_HINT_TOOL_NAME = "declare_next_step_hint"
 
+# docs/components/temporal-workflow.md's recursion-termination guard —
+# is_subagent has to be derived from which tool the model actually called,
+# not hardcoded False. Same duplication reasoning as above.
+_SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"
+
 
 class OpenAIProvider(Provider):
     def __init__(self, base_url: str, api_key: str):
@@ -64,7 +69,11 @@ class OpenAIProvider(Provider):
                     )
                 continue
             raw_tool_calls.append(
-                {"name": tc.function.name, "arguments": json.loads(tc.function.arguments), "is_subagent": False}
+                {
+                    "name": tc.function.name,
+                    "arguments": json.loads(tc.function.arguments),
+                    "is_subagent": tc.function.name == _SPAWN_SUBAGENT_TOOL_NAME,
+                }
             )
 
         usage = Usage(
@@ -154,7 +163,9 @@ class OpenAIProvider(Provider):
                     frag["name"],
                 )
                 arguments = {}
-            raw_tool_calls.append({"name": frag["name"], "arguments": arguments, "is_subagent": False})
+            raw_tool_calls.append(
+                {"name": frag["name"], "arguments": arguments, "is_subagent": frag["name"] == _SPAWN_SUBAGENT_TOOL_NAME}
+            )
 
         return _llm.RealModelResult(
             content=content_buffer,
