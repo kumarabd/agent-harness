@@ -7,6 +7,10 @@ activities/agent_harness_activities.egg-info/
 # Go
 workflows/cmd/_*/
 
+# Local build output (deep-conversation/run.sh and workflows/scenarios/
+# run_scenario.sh both compile local binaries here — e.g. .build/starter)
+.build/
+
 # macOS
 .DS_Store
 

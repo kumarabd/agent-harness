@@ -74,6 +74,24 @@ class ModelCallActivity:
                 input.turn_id,
                 input.context_seq,
             )
+
+            # docs/components/temporal-workflow.md's recursion-termination
+            # guard needs to know whether the CALLER (this turn) is itself a
+            # subagent, regardless of whether this call is fixture-driven or
+            # real — the tool_calls minting loop below (shared by both
+            # paths) checks this for every tool call the response contains.
+            # Computed once, up front, rather than duplicated inside each
+            # branch — same cheap indexed-PK lookup pattern already used for
+            # offset_row/next_seq_row below.
+            turn_row = await conn.fetchrow("SELECT parent_type FROM turns WHERE turn_id = $1", input.turn_id)
+            # Named caller_is_subagent, not is_subagent — the tool_calls
+            # minting loop below has its own per-call is_subagent meaning
+            # ("does THIS tool call request spawning a subagent"), a
+            # genuinely different question from "is the turn making the
+            # call itself a subagent." Reusing the same name would silently
+            # shadow this one inside the loop.
+            caller_is_subagent = bool(turn_row and turn_row["parent_type"] == "turn")
+
             if fixture is not None:
                 content: str = fixture["content"]
                 raw_tool_calls: list[dict] = json.loads(fixture["tool_calls"])
@@ -99,22 +117,10 @@ class ModelCallActivity:
                 conversation, context_tokens = await llm.build_conversation(conn, input.turn_id, system_prompt)
 
                 # docs/components/context-slot.md's Memory-Access Tools —
-                # lcm_expand's schema-level subagent-only restriction
-                # (llm.tools_schema_for) needs to know which kind of turn
-                # this is. A direct, separate lookup rather than threading
-                # it out of llm.build_conversation's own internal turn_row
-                # query — that function's job is context assembly, not
-                # subagent detection, and this is the same cheap
-                # indexed-PK lookup pattern already used for offset_row/
-                # next_seq_row below.
-                turn_row = await conn.fetchrow("SELECT parent_type FROM turns WHERE turn_id = $1", input.turn_id)
-                # Named caller_is_subagent, not is_subagent — the tool_calls
-                # minting loop below has its own per-call is_subagent
-                # meaning ("does THIS tool call request spawning a
-                # subagent"), a genuinely different question from "is the
-                # turn making the call itself a subagent." Reusing the same
-                # name would silently shadow this one inside the loop.
-                caller_is_subagent = bool(turn_row and turn_row["parent_type"] == "turn")
+                # lcm_expand's schema-level subagent-only restriction needs
+                # to know which kind of turn this is; caller_is_subagent
+                # (computed once, above, shared with the fixture path and
+                # the recursion-termination guard) already answers that.
                 tools_schema = llm.tools_schema_for(caller_is_subagent)
 
                 # docs/components/model-registry.md, "Resolved: Selection
@@ -305,7 +311,22 @@ class ModelCallActivity:
                     )
 
             return ModelCallOutput(
-                has_tool_calls=len(refs) > 0,
+                # Deliberately len(raw_tool_calls), not len(refs) — turn.go's
+                # only consumer of this field stops the whole turn/subagent
+                # the moment it's False ("no_tool_calls" stop reason). A
+                # recursion-guard rejection (this file's own
+                # _validate_subagent_delegation branch above) removes a call
+                # from refs without the model ever attempting anything else,
+                # so len(refs) alone would have silently ended the turn right
+                # there — the model would never get to see the rejection
+                # message and react to it (e.g. "perform the work directly
+                # instead," the paper's own stated intent), even though the
+                # rejection is durably recorded in tool_calls either way. Any
+                # tool call the model attempted this step, dispatched or not,
+                # should keep the loop going for one more reasoning step;
+                # "no_tool_calls" should mean literally none were attempted,
+                # not "none survived validation."
+                has_tool_calls=len(raw_tool_calls) > 0,
                 tool_calls=refs,
                 usage=usage,
                 context_tokens=context_tokens,

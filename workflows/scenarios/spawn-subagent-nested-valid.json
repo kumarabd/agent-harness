@@ -1,0 +1,55 @@
+{
+  "message": {
+    "role": "user",
+    "content": "Please research this topic thoroughly and delegate as needed."
+  },
+  "scripted_model_responses": [
+    {
+      "content": "I'll delegate this to a subagent.",
+      "tool_calls": [
+        {
+          "name": "spawn_subagent",
+          "is_subagent": true,
+          "arguments": {
+            "prompt": "Handle the outer research task. Delegate the literature-review portion to your own subagent, keeping synthesis for yourself.",
+            "scripted_model_responses": [
+              {
+                "content": "I'll delegate the literature review to a further subagent, keeping the synthesis for myself.",
+                "tool_calls": [
+                  {
+                    "name": "spawn_subagent",
+                    "is_subagent": true,
+                    "arguments": {
+                      "prompt": "Do the literature review for the outer research task.",
+                      "delegated_scope": "the literature-review portion of the research task",
+                      "kept_work": "synthesizing the literature review into a final answer",
+                      "scripted_model_responses": [
+                        {
+                          "content": "Literature review complete: found 3 relevant papers.",
+                          "tool_calls": [],
+                          "usage": { "input_tokens": 60, "output_tokens": 20 }
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "usage": { "input_tokens": 90, "output_tokens": 35 }
+              },
+              {
+                "content": "Synthesis complete using the further subagent's literature review.",
+                "tool_calls": [],
+                "usage": { "input_tokens": 100, "output_tokens": 25 }
+              }
+            ]
+          }
+        }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 40 }
+    },
+    {
+      "content": "Delegation chain complete, work is done.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 120, "output_tokens": 30 }
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "message": {
+    "role": "user",
+    "content": "Please research this topic thoroughly and delegate as needed."
+  },
+  "scripted_model_responses": [
+    {
+      "content": "I'll delegate this to a subagent.",
+      "tool_calls": [
+        {
+          "name": "spawn_subagent",
+          "is_subagent": true,
+          "arguments": {
+            "prompt": "Handle the outer research task.",
+            "scripted_model_responses": [
+              {
+                "content": "I'll hand this whole thing off to a further subagent.",
+                "tool_calls": [
+                  {
+                    "name": "spawn_subagent",
+                    "is_subagent": true,
+                    "arguments": {
+                      "prompt": "Do the entire research task for me."
+                    }
+                  }
+                ],
+                "usage": { "input_tokens": 90, "output_tokens": 35 }
+              },
+              {
+                "content": "Understood — that delegation was rejected since I wasn't keeping any work for myself. Performing the task directly instead.",
+                "tool_calls": [],
+                "usage": { "input_tokens": 110, "output_tokens": 30 }
+              }
+            ]
+          }
+        }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 40 }
+    },
+    {
+      "content": "Delegation chain complete, work is done.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 120, "output_tokens": 30 }
+    }
+  ]
+}
