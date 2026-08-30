@@ -122,6 +122,25 @@ func (s *server) registerVoiceCommands(dg *discordgo.Session, appID string) {
 	commands := []*discordgo.ApplicationCommand{
 		{Name: "join", Description: "Join the voice channel you're currently in"},
 		{Name: "leave", Description: "Leave the voice channel this bot is in"},
+		// docs/components/gateway/discord.md's "Resolved: Per-Channel Reply
+		// Mode" — not voice-channel-specific (it governs text-channel/DM
+		// replies), just registered here alongside the other slash commands.
+		{
+			Name:        "mode",
+			Description: "Choose whether I reply with text or a voice message in this channel",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "reply",
+					Description: "voice or text",
+					Required:    true,
+					Choices: []*discordgo.ApplicationCommandOptionChoice{
+						{Name: "voice", Value: replyModeVoice},
+						{Name: "text", Value: replyModeText},
+					},
+				},
+			},
+		},
 	}
 	for _, cmd := range commands {
 		if _, err := dg.ApplicationCommandCreate(appID, "", cmd); err != nil {

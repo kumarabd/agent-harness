@@ -19,7 +19,12 @@ import (
 // indefinitely — discordgo dispatches MessageCreate handlers synchronously
 // off its own event loop, so a hang here would delay every later event on
 // this connection, not just this one message.
-const discordVoiceMessageFetchTimeout = 30 * time.Second
+// 2026-08-30: raised from 30s to 60s. The download is fast; the transcribe
+// leg goes through litellm to whisper-svc on a GPU that is currently also
+// serving live-voice STT and TTS (and, as of late Aug, an unrelated
+// non-Kubernetes workload — see discord-voice.md's 2026-08-29 Notes Log), so
+// a real Ogg/Opus voice note can queue well past 30s under contention.
+const discordVoiceMessageFetchTimeout = 60 * time.Second
 
 // discordVoiceMessageMaxBytes caps the downloaded attachment size before it
 // reaches transcribeAudioFile — mirrors activities/activities/tools.py's own
@@ -61,13 +66,16 @@ func discordVoiceMessageContent(ctx context.Context, m *discordgo.MessageCreate)
 	if err != nil {
 		return "", fmt.Errorf("discordVoiceMessageContent: building download request: %w", err)
 	}
+	// Discord's CDN can 403 a request with no User-Agent.
+	req.Header.Set("User-Agent", "DiscordBot (agent-harness, 1.0)")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("discordVoiceMessageContent: downloading attachment: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("discordVoiceMessageContent: attachment download: %s", resp.Status)
+		return "", fmt.Errorf("discordVoiceMessageContent: attachment download %s from %q (content-type %q, %d bytes)",
+			resp.Status, att.URL, att.ContentType, att.Size)
 	}
 
 	audioBytes, err := io.ReadAll(io.LimitReader(resp.Body, discordVoiceMessageMaxBytes+1))

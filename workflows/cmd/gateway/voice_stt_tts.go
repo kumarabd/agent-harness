@@ -203,3 +203,48 @@ func synthesizeSpeechPCM(ctx context.Context, text string) (io.ReadCloser, error
 	}
 	return resp.Body, nil
 }
+
+// synthesizeSpeechOgg requests a COMPLETE Ogg/Opus file from
+// {SPEECH_BASE_URL}/audio/speech (`response_format: "opus"` — the
+// OpenAI-audio-API option that returns Ogg-contained Opus, which is exactly
+// the container Discord's own voice messages use). Unlike synthesizeSpeechPCM
+// (which streams raw PCM frames for the live RTP voice path), this buffers
+// the whole response: a Discord voice-message attachment is uploaded as one
+// finished file (deliver_discord.go's voice-mode reply,
+// docs/components/gateway/discord.md's "Resolved: Per-Channel Reply Mode"),
+// there is nothing to stream it into.
+func synthesizeSpeechOgg(ctx context.Context, text string) ([]byte, error) {
+	payload := map[string]any{
+		"model":           ttsModel,
+		"input":           text,
+		"response_format": "opus",
+	}
+	if ttsVoice != "" {
+		payload["voice"] = ttsVoice
+	}
+	reqBody, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", speechBaseURL+"/audio/speech", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/octet-stream")
+	if speechAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+speechAPIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("synthesizeSpeechOgg: %s: %s", resp.Status, string(respBody))
+	}
+	return io.ReadAll(resp.Body)
+}

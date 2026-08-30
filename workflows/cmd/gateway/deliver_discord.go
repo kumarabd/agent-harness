@@ -205,6 +205,21 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 		}
 	}
 
+	// gateway/discord.md's "Resolved: Per-Channel Reply Mode": if this
+	// channel is set to voice, speak the answer as a native Discord voice
+	// message. Any failure along the way (TTS, the raw multipart upload)
+	// falls through to the normal text send below — the answer still gets
+	// delivered, just written instead of spoken.
+	if discordReplyMode(ctx, a.pool, channelID) == replyModeVoice {
+		if msg, verr := a.deliverVoiceReply(ctx, channelID, content); verr == nil {
+			a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, content)
+			log.Printf("discord: delivered turn %s to channel %s as a voice message (%s)", turnID, channelID, msg.ID)
+			return markDelivered()
+		} else {
+			log.Printf("discord: voice reply failed for turn %s, falling back to text: %v", turnID, verr)
+		}
+	}
+
 	sendContent := discordSendableContent(content)
 	msg, err := a.session.ChannelMessageSend(channelID, sendContent)
 	if err != nil {
@@ -213,6 +228,25 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 	a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, sendContent)
 	log.Printf("discord: delivered turn %s to channel %s via connection %s", turnID, channelID, a.connectionID)
 	return markDelivered()
+}
+
+// deliverVoiceReply synthesizes a turn's answer to Ogg/Opus and posts it as
+// a native Discord voice message. sanitizeForSpeech (voice_text_sanitize.go)
+// strips emoji/markdown that a TTS engine would otherwise read out by name —
+// the same backstop deliver_voice.go's live-voice path applies.
+func (a *discordDeliverActivity) deliverVoiceReply(ctx context.Context, channelID, content string) (*discordgo.Message, error) {
+	spoken := sanitizeForSpeech(content)
+	if spoken == "" {
+		return nil, errors.New("deliverVoiceReply: nothing to speak after sanitizing")
+	}
+	ogg, err := synthesizeSpeechOgg(ctx, spoken)
+	if err != nil {
+		return nil, err
+	}
+	if len(ogg) == 0 {
+		return nil, errors.New("deliverVoiceReply: TTS returned no audio")
+	}
+	return sendDiscordVoiceMessage(a.session, channelID, ogg)
 }
 
 // recordAmbientBotMessage mirrors the bot's own sent/edited message into
@@ -404,6 +438,16 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 	`, turnID).Scan(&channelID, &sessionKey, &streamedMessageRef)
 	if err != nil {
 		return err
+	}
+
+	// gateway/discord.md's "Resolved: Per-Channel Reply Mode": a voice-mode
+	// channel gets ONE whole-turn voice message from Deliver, not a stream
+	// of per-sentence text edits. Mark this chunk sent (so turn.go's
+	// deliverChunk doesn't retry it) and leave streamed_message_ref unset,
+	// so Deliver takes its normal non-streamed path and speaks the complete
+	// final answer.
+	if discordReplyMode(ctx, a.pool, channelID) == replyModeVoice {
+		return markSent()
 	}
 
 	sendContent := discordSendableContent(content)

@@ -75,7 +75,13 @@ func (s *server) startDiscordPlatform(ctx context.Context, botToken, holderID st
 		// filter.
 		switch ic.Type {
 		case discordgo.InteractionApplicationCommand:
-			s.discordVoiceInteractionCreate(ctx, session, ic, connectionID)
+			// /join and /leave are voice-connection commands; /mode is the
+			// text-channel/DM reply-mode toggle (discord_reply_mode.go).
+			if ic.ApplicationCommandData().Name == "mode" {
+				s.handleModeCommand(ctx, session, ic)
+			} else {
+				s.discordVoiceInteractionCreate(ctx, session, ic, connectionID)
+			}
 		case discordgo.InteractionMessageComponent:
 			s.discordUserInputInteractionCreate(ctx, session, ic, connectionID)
 		}
@@ -193,47 +199,71 @@ func (s *server) discordMessageCreate(session *discordgo.Session, m *discordgo.M
 	}
 	ctx := context.Background()
 
-	// gateway/discord.md's "Attachments/stickers/audio as real triggering
-	// content" plan, the voice-message third of it, built out: Discord's own
-	// voice-message feature always sends an empty m.Content — the real
-	// content only exists as the attached Ogg/Opus clip — so resolve it to a
-	// real transcript here, before anything downstream (ambient buffer,
-	// mention/reply gate, MessageEvent) ever looks at "content" at all. A
-	// transcription failure means there is no usable content to fall back
-	// to (unlike a plain attachment/sticker, there's no text placeholder
-	// that means anything for spoken audio), so this drops the message
-	// entirely rather than recording an empty/misleading ambient row.
-	content := m.Content
-	if m.Flags&discordgo.MessageFlagsIsVoiceMessage != 0 {
-		transcript, err := discordVoiceMessageContent(ctx, m)
-		if err != nil {
-			log.Printf("discord: failed to transcribe voice message: %v", err)
-			return
-		}
-		// Same downstream filtering discord_voice.go's own flush applies to a
-		// live utterance transcript, reused rather than skipped just because
-		// this path is a discrete upload, not a live stream: an empty
-		// transcript (silence, or nothing intelligible) or a pure vocal
-		// filler ("um"/"uh", voiceFillerWords) carries no real content, and
-		// letting it through would fire a turn (or even just an ambient row)
-		// for nothing a human actually said. isBackchannelOnly is
-		// deliberately NOT applied here — it's gated on the utterance having
-		// started while the bot was actively speaking in a live voice
-		// connection (speakerBuffer's startedDuringPlayback), a context that
-		// doesn't exist for a voice note dropped into a text channel.
-		if transcript == "" || isFillerOnly(transcript) {
-			if transcript != "" {
-				log.Printf("discord: filtered filler-only voice message transcript %q, no message recorded", transcript)
-			}
-			return
-		}
-		content = transcript
-	}
-
 	var replyTo *string
 	if m.MessageReference != nil && m.MessageReference.MessageID != "" {
 		id := m.MessageReference.MessageID
 		replyTo = &id
+	}
+
+	// Whether this message is addressed to the bot — computed BEFORE the
+	// voice-message transcription below (2026-08-30) so that a transcription
+	// failure on a message that WAS a real trigger can be reported back to
+	// the user instead of vanishing with only a server-side log.
+	// gateway/discord.md's "Resolved: DMs" — a personal (1:1) DM has no
+	// "other people talking" ambiguity for the mention/reply gate to resolve
+	// (the whole reason that gate exists — see "Resolved: Response Scope"),
+	// so every message there is an implicit trigger. A GROUP DM still
+	// requires an explicit mention/reply, same as a guild channel.
+	// m.GuildID alone can't distinguish a personal DM from a group DM (both
+	// are empty), hence the extra isPersonalDM check.
+	botUser := session.State.User
+	mentioned := botUser != nil && discordMentionsUser(m.Mentions, botUser.ID)
+	repliesToBot := botUser != nil && replyTo != nil &&
+		m.ReferencedMessage != nil && m.ReferencedMessage.Author != nil &&
+		m.ReferencedMessage.Author.ID == botUser.ID
+	personalDM := m.GuildID == "" && isPersonalDM(session, m.ChannelID)
+	isTrigger := mentioned || repliesToBot || personalDM
+
+	// gateway/discord.md's "Attachments/stickers/audio as real triggering
+	// content" plan, the voice-message third of it: Discord's own
+	// voice-message feature always sends an empty m.Content — the real
+	// content only exists as the attached Ogg/Opus clip — so resolve it to a
+	// real transcript here, before anything downstream (ambient buffer,
+	// MessageEvent) looks at "content".
+	content := m.Content
+	if m.Flags&discordgo.MessageFlagsIsVoiceMessage != 0 {
+		transcript, err := discordVoiceMessageContent(ctx, m)
+		if err != nil {
+			// No usable content to fall back to (unlike a plain
+			// attachment/sticker, spoken audio that failed to transcribe has
+			// no meaningful placeholder). Previously a silent drop — now, if
+			// the message was actually addressed to the bot, say so, so the
+			// user isn't left waiting on a reply that will never come.
+			log.Printf("discord: failed to transcribe voice message %s (channel %s): %v", m.ID, m.ChannelID, err)
+			if isTrigger {
+				s.sendPlainDiscordReply(session, m.ChannelID, "Sorry — I couldn't make out that voice message. Mind trying again or typing it?")
+			}
+			return
+		}
+		// Same downstream filtering discord_voice.go's own flush applies to a
+		// live utterance transcript: an empty transcript (silence, nothing
+		// intelligible) or a pure vocal filler ("um"/"uh", voiceFillerWords)
+		// carries no real content. isBackchannelOnly is deliberately NOT
+		// applied here — it's gated on the utterance having started while the
+		// bot was speaking on a live voice connection, a context that doesn't
+		// exist for a voice note dropped into a text channel.
+		if transcript == "" {
+			log.Printf("discord: voice message %s transcribed to empty text", m.ID)
+			if isTrigger {
+				s.sendPlainDiscordReply(session, m.ChannelID, "I didn't catch anything in that voice message — try again?")
+			}
+			return
+		}
+		if isFillerOnly(transcript) {
+			log.Printf("discord: filtered filler-only voice message transcript %q, no message recorded", transcript)
+			return
+		}
+		content = transcript
 	}
 
 	if _, err := s.pool.Exec(ctx,
@@ -245,22 +275,7 @@ func (s *server) discordMessageCreate(session *discordgo.Session, m *discordgo.M
 		return
 	}
 
-	botUser := session.State.User
-	mentioned := botUser != nil && discordMentionsUser(m.Mentions, botUser.ID)
-	repliesToBot := botUser != nil && replyTo != nil &&
-		m.ReferencedMessage != nil && m.ReferencedMessage.Author != nil &&
-		m.ReferencedMessage.Author.ID == botUser.ID
-	// gateway/discord.md's "Resolved: DMs" — a personal (1:1) DM has no
-	// "other people talking" ambiguity for the mention/reply gate above to
-	// resolve in the first place (the whole reason that gate exists — see
-	// "Resolved: Response Scope"), so every message there is an implicit
-	// trigger. A GROUP DM still requires an explicit mention/reply, same as
-	// a guild channel — more than one human means the same ambiguity a
-	// guild channel has. m.GuildID alone can't distinguish a personal DM
-	// from a group DM (both are empty), hence the extra isPersonalDM check.
-	personalDM := m.GuildID == "" && isPersonalDM(session, m.ChannelID)
-
-	if !mentioned && !repliesToBot && !personalDM {
+	if !isTrigger {
 		return
 	}
 
