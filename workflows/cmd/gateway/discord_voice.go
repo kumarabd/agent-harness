@@ -399,6 +399,40 @@ type speakerBuffer struct {
 	// speakers. energyVAD has no state to protect, but gets its own
 	// instance too rather than special-casing one VAD kind over another.
 	vad voiceActivityDetector
+	// stt is this speaker's own WhisperLive streaming session
+	// (voice_stt_realtime.go) — nil when WHISPERLIVE_URL isn't configured,
+	// in which case utterances go entirely through the batch transcribeAudio
+	// path (voice_stt_tts.go). One session per speaker: WhisperLive's own
+	// recognizer state is real per-connection state that must not mix
+	// between speakers, same reasoning as vad above.
+	//
+	// The session is opened when this buffer is created (so its WebSocket
+	// handshake overlaps with the pre-utterance silence and no audio is
+	// lost), but it is only FED audio while an utterance is active — see
+	// feedSTT. Feeding it continuously (the pre-2026-08-29 design) made it
+	// run large-v3 inference on ambient room tone 24/7 for the whole time
+	// the bot was joined, pinning the shared GPU; docs/components/gateway/
+	// discord-voice.md's "Resolved: Gated Streaming STT Feed".
+	stt *whisperLiveSession
+}
+
+// feedSTT streams one Discord frame (48kHz stereo int16) to this speaker's
+// WhisperLive session, downmixed/resampled to the 16kHz mono float32 the
+// session expects (reusing voice_vad_silero.go's downmixResample). A no-op
+// when no session is configured, and a no-op inside sendAudio itself until
+// the handshake completes.
+//
+// MUST only be called while an utterance is active — a confirmed-speech
+// frame, the promoted lead-in, or a trailing-silence frame during the
+// countdown to flush. Never on the dead air between utterances: that is
+// exactly the feed that pinned the GPU. The trailing-silence frames ARE
+// fed on purpose — WhisperLive's own server-side VAD needs to see the gap
+// in the audio to finalize the segment, and ~1.4s of it (the silence
+// ceiling) is plenty.
+func (b *speakerBuffer) feedSTT(frame []int16) {
+	if b.stt != nil {
+		b.stt.sendAudio(downmixResample(frame))
+	}
 }
 
 // voiceCaptureLoop reads decoded PCM per speaker off vc.OpusRecv, uses the
@@ -425,6 +459,16 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 		vadFactory = func() voiceActivityDetector { return newSileroVAD(sileroClient) }
 	}
 
+	// sttFactory is nil (not a func returning nil) when WHISPERLIVE_URL isn't
+	// configured — checked at each speakerBuffer's creation so "not
+	// configured" and "configured" stay unambiguous. The session it builds
+	// is fed audio only while an utterance is active (speakerBuffer.feedSTT),
+	// not continuously.
+	var sttFactory func() *whisperLiveSession
+	if url := whisperLiveURL(); url != "" {
+		sttFactory = func() *whisperLiveSession { return newWhisperLiveSession(url) }
+	}
+
 	// eot — one shared client for the whole connection, not one per speaker:
 	// voice_eot.go's own comment has the reasoning (every call is a fresh,
 	// independent classification, no per-speaker state to protect, unlike
@@ -444,6 +488,19 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 	ssrcToUser := make(map[uint32]string)
 	buffers := make(map[uint32]*speakerBuffer)
 
+	// On loop exit (ctx cancelled, OpusRecv closed, or a VAD-failure
+	// teardown) close every speaker's WhisperLive session so its WebSocket
+	// and readLoop goroutine don't leak until the server's own 1h timeout.
+	defer func() {
+		mu.Lock()
+		for _, b := range buffers {
+			if b.stt != nil {
+				b.stt.close()
+			}
+		}
+		mu.Unlock()
+	}()
+
 	vc.AddHandler(func(_ *discordgo.VoiceConnection, vs *discordgo.VoiceSpeakingUpdate) {
 		mu.Lock()
 		ssrcToUser[uint32(vs.SSRC)] = vs.UserID
@@ -460,6 +517,7 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 		}
 		userID := ssrcToUser[ssrc]
 		pcm := buf.pcm
+		stt := buf.stt
 		startedDuringPlayback := buf.startedDuringPlayback
 		buf.pcm = nil
 		buf.silenceFrames = 0
@@ -468,23 +526,35 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 		lifecycle.transitionTo(voiceLifecycleProcessing)
 
 		go func() {
-			// Gateway's own VAD/silence timeout (above) decides an utterance
-			// is over; only then — never on silence — is one batch
-			// transcription issued for the buffered PCM (transcribeAudio,
-			// voice_stt_tts.go, the standard /v1/audio/transcriptions
-			// contract). This is deliberately the ONLY transcription path
-			// (docs/components/gateway/discord-voice.md's "Resolved: Batch
-			// STT Only" — the streaming WhisperLive path was removed 2026-08-29
-			// after it pinned the shared GPU continuously for the whole time
-			// the bot was joined, degrading Kokoro/Whisper and OOM-ing the
-			// node; batch is event-driven on real utterances, so the GPU is
-			// idle between them).
-			wav := pcmToWAV(pcm, voiceSampleRate, voiceChannels)
-			text, err := transcribeAudio(context.Background(), wav)
-			if err != nil {
-				log.Printf("discord-voice: transcription failed: %v", err)
-				lifecycle.transitionTo(voiceLifecycleListening)
-				return
+			// Gateway's own VAD/EOT (above) decides the utterance is over.
+			// When a WhisperLive session exists, it has been fed this
+			// utterance's audio in real time (speakerBuffer.feedSTT, gated on
+			// utterance-active — never on the silence between utterances,
+			// which is what used to pin the shared GPU), so its segments are
+			// already the transcript — read them, don't issue a fresh
+			// request. Batch transcribeAudio (voice_stt_tts.go) is the
+			// fallback: no session configured, a session error, or the
+			// session had nothing for this utterance. The two never run
+			// together on the success path.
+			var text string
+			if stt != nil {
+				text = stt.consumeNewText()
+				if sttErr := stt.Err(); sttErr != nil {
+					log.Printf("discord-voice: whisperlive session error, falling back to batch STT: %v", sttErr)
+				}
+			}
+			if text == "" {
+				if stt != nil {
+					log.Printf("discord-voice: whisperlive returned no text for this utterance, falling back to batch STT")
+				}
+				wav := pcmToWAV(pcm, voiceSampleRate, voiceChannels)
+				batchText, err := transcribeAudio(context.Background(), wav)
+				if err != nil {
+					log.Printf("discord-voice: transcription failed: %v", err)
+					lifecycle.transitionTo(voiceLifecycleListening)
+					return
+				}
+				text = batchText
 			}
 			if text == "" {
 				lifecycle.transitionTo(voiceLifecycleListening)
@@ -572,6 +642,13 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 			buf, ok := buffers[pkt.SSRC]
 			if !ok {
 				buf = &speakerBuffer{vad: vadFactory()}
+				if sttFactory != nil {
+					// Opened now, while this speaker is (probably) still
+					// silent, so the WebSocket handshake is done by the time
+					// they actually start talking. NOT fed here — feedSTT is
+					// called only from the utterance-active branches below.
+					buf.stt = sttFactory()
+				}
 				buffers[pkt.SSRC] = buf
 			}
 			speech := buf.vad.isSpeech(pcm)
@@ -598,6 +675,7 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 				bargeIn.signalSpeech()
 				lifecycle.transitionTo(voiceLifecycleSpeaking)
 				buf.pcm = append(buf.pcm, pcm...)
+				buf.feedSTT(pcm)
 				buf.silenceFrames = 0
 
 			case speech:
@@ -622,6 +700,11 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 					bargeIn.signalSpeech()
 					lifecycle.transitionTo(voiceLifecycleSpeaking)
 					buf.pcm = append(buf.pcm, buf.pendingSpeechPCM...)
+					// Feed the whole confirmed lead-in as one chunk — this is
+					// the first audio WhisperLive gets for this utterance, and
+					// it includes the current frame (already appended to
+					// pendingSpeechPCM at the top of this case).
+					buf.feedSTT(buf.pendingSpeechPCM)
 					buf.pendingSpeechPCM = nil
 					buf.speechFrames = 0
 					buf.silenceFrames = 0
@@ -638,6 +721,12 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 				// connection (contrast the VAD sidecar's own fail-loud
 				// teardown above: misclassifying real speech as silence is a
 				// much costlier mistake than getting FLUSH TIMING wrong).
+				//
+				// Keep feeding these trailing-silence frames to WhisperLive
+				// (but NOT beyond flush) — its server-side VAD needs to see
+				// the silence in the audio stream to close off the segment,
+				// and the feed genuinely stops once the utterance flushes.
+				buf.feedSTT(pcm)
 				buf.silenceFrames++
 				ended := buf.silenceFrames >= voiceUtteranceSilenceFrames
 				if !ended && eot != nil &&

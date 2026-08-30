@@ -17,7 +17,9 @@ import (
 // (server.py's own doc comment). Reuses the exact same target string as
 // vadSidecarURL() — one sidecar, two services, one dial target — but keeps
 // its own separate *grpc.ClientConn rather than sharing sileroVADClient's,
-// matching this codebase's existing one-client-type-per-service pattern.
+// matching this codebase's existing one-client-type-per-service pattern
+// (voice_stt_realtime.go's whisperLiveSession is likewise its own
+// connection, not shared with anything else).
 //
 // eotThreshold — the probability at or above which the EOT model's verdict
 // alone is enough to end an utterance before voiceUtteranceSilenceFrames'
@@ -57,8 +59,8 @@ const eotMaxSamples = 19200
 // A long utterance made every later EOT poll progressively more expensive,
 // live evidence being a 30-second-long `processing` lifecycle hold that
 // reset to `listening` with no transcript at all — consistent with audio
-// getting delayed badly enough during that stretch that batch STT had
-// nothing usable left to transcribe. predict() itself already
+// getting delayed badly enough during that stretch that WhisperLive/batch
+// STT had nothing usable left to transcribe. predict() itself already
 // zero-pads the front when handed fewer samples than eotMaxSamples, so
 // slicing here changes nothing about correctness, only cost.
 const eotTrailingRawSamples = eotMaxSamples * sileroResampleRatio * voiceChannels

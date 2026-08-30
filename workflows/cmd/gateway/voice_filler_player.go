@@ -64,7 +64,7 @@ var voiceProgressPhrases = []voiceProgressPhrase{
 	{Text: "Still working on that.", MinWait: 14 * time.Second},
 }
 
-// fillerEnabled — opt-in, same convention as vadSidecarURL:
+// fillerEnabled — opt-in, same convention as vadSidecarURL/whisperLiveURL:
 // empty/unset means this deployment doesn't want it, and
 // synthesizeVoiceFillerCache is never even attempted, so a tenant that
 // hasn't opted in takes on no new startup dependency on kokoro-svc at all.

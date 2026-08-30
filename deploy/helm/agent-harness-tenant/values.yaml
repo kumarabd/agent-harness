@@ -150,9 +150,9 @@ gateway:
   # Log, "filler injection" (ChatGPT-voice-mode-style acknowledgment
   # phrases, e.g. "Let me check that.", played instantly on utterance-end
   # to mask response latency rather than reduce it). false by default, same
-  # convention as vadSidecar below — a tenant that hasn't opted in takes on
-  # no new startup dependency on kokoro-svc for pre-synthesizing the filler
-  # phrase cache at all.
+  # convention as vadSidecar/realtimeStt below — a tenant that hasn't opted
+  # in takes on no new startup dependency on kokoro-svc for pre-synthesizing
+  # the filler phrase cache at all.
   voiceFillerEnabled: false
   # -- Optional — docs/components/gateway/discord-voice.md's "Resolved:
   # Silero VAD". Runs as a SECOND CONTAINER in this same pod, not a shared
@@ -174,15 +174,23 @@ gateway:
       pullPolicy: IfNotPresent
     port: 8500
     resources: {}
-  # -- Streaming STT (WhisperLive) was REMOVED 2026-08-29
-  # (docs/components/gateway/discord-voice.md's "Resolved: Batch STT Only").
-  # It fed WhisperLive continuous audio for the whole time the bot was
-  # joined, pinning the shared GPU at ~100% (Kokoro/Whisper starved, node
-  # OOM kills), and its empty-return-under-load fell back to batch on nearly
-  # every utterance anyway — running both transcribers at once. Voice STT is
-  # now batch-only (transcribeAudio, voice_stt_tts.go), issued once per
-  # completed utterance, so the GPU is idle between utterances. No config
-  # here anymore; the whisperlive cluster service can be torn down.
+  # -- Streaming STT (WhisperLive) — docs/components/gateway/discord-voice.md's
+  # "Resolved: Gated Streaming STT Feed". A SEPARATE standalone cluster
+  # service (infra/model/whisperlive/), GPU, specific to this deployment's
+  # own cluster (nighthawk-pc) — an explicit opt-in URL, not an
+  # assumed-present shared dependency. Disabled by default: voiceCaptureLoop
+  # falls back entirely to the batch transcribeAudio path (voice_stt_tts.go).
+  #
+  # The gateway feeds this session audio ONLY while an utterance is in
+  # progress (speakerBuffer.feedSTT), never on the dead air between
+  # utterances — the earlier unconditional feed made it run large-v3 on
+  # ambient room tone 24/7 and pinned the shared GPU (2026-08-29 Notes Log).
+  realtimeStt:
+    enabled: false
+    # ws:// (or wss://), not http(s):// — a plain WebSocket protocol
+    # (verified directly against the real deployed service), not an HTTP API
+    # like whisper-svc/kokoro-svc.
+    url: "ws://whisperlive-svc.core.svc:9090"
   resources: {}
   nodeSelector: {}
   tolerations: []

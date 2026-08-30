@@ -6,7 +6,7 @@ import "strings"
 // the downstream follow-up to the debounce fix (2026-08-27): that fix stops
 // a stray noise burst from ever producing a transcript in most cases, but a
 // genuinely, clearly vocalized "um" can still get transcribed correctly by
-// Whisper — this catches that case specifically.
+// WhisperLive/Whisper — this catches that case specifically.
 //
 // Deliberately a CONSERVATIVE, closed set of pure vocal fillers/backchannel
 // sounds that carry no semantic content on their own. Never includes a real
