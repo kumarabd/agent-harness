@@ -23,11 +23,20 @@ import (
 const voiceConnectionLeaseTTL = 30 * time.Second
 
 // voiceUtteranceSilenceFrames bounds how many consecutive silent 20ms
-// frames end an utterance (700ms) — a real starting value, deferred numeric
-// tuning per the design doc's own "VAD threshold tuning" open item; the VAD
-// *algorithm* (energyVAD today, Silero later per the design doc) is what's
-// resolved, not this number.
-const voiceUtteranceSilenceFrames = 35
+// frames end an utterance — the fail-OPEN ceiling on how long the pipeline
+// will wait for a person to keep talking, reached whenever the EOT model
+// (below) doesn't confidently say "done" first, OR isn't configured at all.
+//
+// 70 frames / 1400ms, raised 2026-08-29 from 35 / 700ms (docs/components/
+// gateway/discord-voice.md's Notes Log — first real tuning pass on the
+// "VAD threshold tuning" open item, against real conversation reports of
+// the bot talking over the user). 700ms is shorter than a natural
+// mid-thought pause — people routinely stop for a second or more while
+// composing the rest of a sentence — and since the EOT model as wired can
+// only end an utterance EARLIER than this ceiling, never later, this number
+// IS the whole patience budget. Deliberately generous as a starting point;
+// tune down against real usage if turns feel laggy.
+const voiceUtteranceSilenceFrames = 70
 
 // voiceUtteranceMinSpeechFrames — real, live bug fixed 2026-08-27: barge-in
 // and utterance accumulation used to fire on the very FIRST VAD-classified-
@@ -43,31 +52,32 @@ const voiceUtteranceSilenceFrames = 35
 // deciding it ENDED needs the long tail to tolerate a natural mid-sentence
 // pause.
 //
-// 13 frames (260ms), not the original 120ms guess — revised 2026-08-27 to
-// match Silero VAD's own reference implementation (the same upstream
-// project our sidecar's model is from): its `VADIterator`/
-// `get_speech_timestamps` utilities default `min_speech_duration_ms` to
-// ~250ms, the exact same debounce concept applied here. Not the same thing
-// as that reference's own `min_silence_duration_ms` (~100ms) — that one
-// governs merging adjacent speech blips within general-purpose
-// segmentation, a different question than "the human is done talking, it's
-// the bot's turn" — voiceUtteranceSilenceFrames' own 700ms is deliberately
-// unrelated to it and stays as-is. Not wired to the reference
-// implementation's code directly (a stateful Python iterator, awkward for
-// this sidecar's deliberately stateless per-call gRPC design — see
-// vad_sidecar/model.py's own reason for bypassing silero_vad's OnnxWrapper
-// the same way), just its published tuning value.
-const voiceUtteranceMinSpeechFrames = 13
+// 18 frames (360ms), raised 2026-08-29 from 13 / 260ms (same tuning pass as
+// voiceUtteranceSilenceFrames above). 260ms came from matching Silero VAD's
+// own reference `min_speech_duration_ms` (~250ms) — a good floor for "is
+// this speech at all," but this constant also gates BARGE-IN (the bot
+// yielding the floor mid-response), and 260ms of any sound was enough to
+// cut the bot off. 360ms asks for a bit more sustained speech before the
+// bot stops talking, without being anywhere near long enough to clip a real
+// interruption. Still far shorter than voiceUtteranceSilenceFrames'
+// 1400ms — confirming speech STARTED should be quick; only deciding it
+// ENDED needs the long tail to tolerate a natural mid-sentence pause. Not
+// the same thing as Silero's own `min_silence_duration_ms` (~100ms), which
+// governs merging adjacent speech blips within general-purpose segmentation.
+const voiceUtteranceMinSpeechFrames = 18
 
 // voiceUtteranceEOTGraceFrames — docs/components/gateway/discord-voice.md's
-// "In Progress: Turn-Taking Model": the shortest silence worth even asking
-// the EOT sidecar about. 10 frames (200ms), matching LiveKit's own real
-// `MIN_SILENCE_DURATION_MS` reference constant (base.py) — "the minimum VAD
-// silence the audio EOT detector needs before it sends an inference
-// request" for the exact same reason here: a natural mid-sentence breath is
-// itself well under this, so asking any sooner would mostly just be asking
-// the model to classify silence it hasn't actually decided is a pause yet.
-const voiceUtteranceEOTGraceFrames = 10
+// "Resolved: Turn-Taking Model": the shortest silence worth even asking the
+// EOT sidecar about. 25 frames (500ms), raised 2026-08-29 from 10 / 200ms
+// (same tuning pass as voiceUtteranceSilenceFrames above). LiveKit's own
+// `MIN_SILENCE_DURATION_MS` reference is 200ms, but a confident-sounding
+// clause followed by a 200ms breath ("what's the weather" <breath> "in San
+// Francisco") was scoring over eotThreshold and flushing before the person
+// finished — so the model never got a chance to see the rest of the
+// sentence. 500ms is past a normal inter-word breath but still well under a
+// deliberate mid-thought pause, so a genuinely finished sentence still gets
+// a response about half a second after the person stops.
+const voiceUtteranceEOTGraceFrames = 25
 
 // voiceUtteranceEOTCheckIntervalFrames throttles how often predict() is
 // actually called once past the grace period — every silent frame would be

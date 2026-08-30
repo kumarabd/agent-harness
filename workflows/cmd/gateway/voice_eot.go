@@ -21,17 +21,25 @@ import (
 // (voice_stt_realtime.go's whisperLiveSession is likewise its own
 // connection, not shared with anything else).
 //
-// eotThreshold — LiveKit's own real, calibrated English default (0.36,
-// from the actual `languages.py` source in `livekit-agents`, not invented
-// here). Verified directly against real audio (this doc's own Notes Log):
-// a complete sentence scored 0.392 (above threshold, correctly "done"), a
-// deliberately trailed-off sentence scored 0.274 (below, correctly "not
-// done"), a lone backchannel "Yeah" scored 0.119, and a lone filler "Um"
-// scored 0.047 — both comfortably below, meaning the model alone would
-// correctly keep waiting rather than treat either as a finished turn. Not
-// re-tuned for this project's own real usage yet — same "real starting
-// value, not tuned" category as every other threshold in this file.
-const eotThreshold = 0.36
+// eotThreshold — the probability at or above which the EOT model's verdict
+// alone is enough to end an utterance before voiceUtteranceSilenceFrames'
+// ceiling. LiveKit's own calibrated English default is 0.36 (`languages.py`
+// in `livekit-agents`). Verified directly against real audio (this doc's
+// own Notes Log): a complete sentence scored 0.392, a deliberately
+// trailed-off sentence 0.274, a lone backchannel "Yeah" 0.119, a lone
+// filler "Um" 0.047.
+//
+// Nudged to 0.40 on 2026-08-29 (same tuning pass as
+// voiceUtteranceSilenceFrames) — a small margin above the calibrated
+// default so a crisp-sounding but not-yet-finished clause (the 0.392 case
+// is uncomfortably close to 0.36) doesn't flush early. Deliberately NOT
+// raised much further: the "complete sentence" real-audio score is 0.392,
+// so anything past ~0.42 would make the model essentially never fire and
+// force every turn to the full voiceUtteranceSilenceFrames ceiling, trading
+// one latency problem for another. If overlap persists, prefer raising the
+// grace period / ceiling over pushing this past the model's own measured
+// range.
+const eotThreshold = 0.40
 
 // eotMaxSamples mirrors the model's own fixed rolling window
 // (livekit.local_inference.EOT_MAX_SAMPLES, 19200 samples = 1.2s @ 16kHz) —

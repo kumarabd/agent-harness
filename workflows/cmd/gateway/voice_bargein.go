@@ -121,3 +121,26 @@ func (b *voiceBargeIn) isPlaying() bool {
 	defer b.mu.Unlock()
 	return b.stopChan != nil
 }
+
+// tryStartPlayback is startPlayback for a caller that must NEVER preempt an
+// existing holder — the tiered filler (voice_filler_player.go). startPlayback
+// itself deliberately preempts (a ready real response displacing a
+// still-playing filler), but the filler needs the opposite guarantee: if the
+// real response (or a prior turn's still-finishing audio) already holds
+// playback, the filler has nothing useful to say and must not cut it off.
+// Returns ok=false with no channel and no state change in that case;
+// combining the check and the claim under one lock closes the check-then-act
+// race the separate isPlaying()+startPlayback() pair had (narrow, but its
+// failure mode was the filler preempting the real answer). On ok=true the
+// caller owns playback exactly as a startPlayback caller does and must pair
+// it with endPlayback(ch).
+func (b *voiceBargeIn) tryStartPlayback() (_ <-chan struct{}, ok bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopChan != nil {
+		return nil, false
+	}
+	ch := make(chan struct{}, 1)
+	b.stopChan = ch
+	return ch, true
+}

@@ -132,11 +132,12 @@ type server struct {
 	// bookkeeping of which ones it's currently serving.
 	voice *voiceState
 	// voiceFillerCache — docs/components/gateway/discord-voice.md's Notes
-	// Log, filler injection. Built once at startup (synthesizeVoiceFillerCache),
-	// shared read-only across every connection this replica serves — never
-	// nil (an empty cache when FILLER_ENABLED isn't set, or pre-synthesis
-	// failed), so callers never need a separate nil check beyond what
-	// voiceFillerCache.randomPhrase already does internally.
+	// Log, tiered filler injection. Built once at startup
+	// (synthesizeVoiceFillerCache), shared read-only across every connection
+	// this replica serves — never nil (an empty cache when FILLER_ENABLED
+	// isn't set, or pre-synthesis failed), so callers never need a separate
+	// nil check beyond what voiceFillerCache.hasAny/phraseAt already do
+	// internally.
 	voiceFillerCache *voiceFillerCache
 }
 

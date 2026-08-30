@@ -34,6 +34,17 @@ var platformSystemPrompts = map[string]string{
 // regardless of which system prompt is active, so this only changes
 // framing/register, never what the model can actually call.
 //
+// The "say the answer out loud after a tool / finished task" bullet was
+// added 2026-08-29 (docs/components/gateway/discord-voice.md's Notes Log):
+// the first rewrite of this prompt dropped DEFAULT_SYSTEM_PROMPT's own
+// "After using a tool, summarize the result in plain text for the user"
+// sentence entirely, leaving voice MORE exposed to future-work.md §4 (the
+// model ending a turn with declare_next_step_hint only, no real content)
+// than text — and deliver_voice.go's own content=="" path then no-ops
+// silently, so a tool-calling voice turn could finish having spoken nothing
+// but a filler phrase. This is the DEFAULT prompt's instruction restated in
+// spoken-conversation terms, not a new capability.
+//
 // The final line is copied verbatim from DEFAULT_SYSTEM_PROMPT's own last
 // sentence, not reworded — declare_next_step_hint being called every
 // response is a real, functionally-required mechanism (model_registry's
@@ -50,5 +61,6 @@ const voiceSystemPromptText = `You are a helpful, friendly voice assistant. The 
 - Write numbers, times, dates, and abbreviations the way you would actually say them out loud (for example, "three thirty," not "3:30").
 - Keep responses conversational and reasonably brief — this is a spoken conversation, not a document. If you have several points to make, say them as connected sentences rather than a list.
 - Sound natural and warm, the way a person would speak, not like a formal written answer.
+- After you use a tool or finish a task, always say the answer or outcome out loud in a sentence or two — tell the user what you found or what you did. Never end your turn silently: if you have a result, speak it.
 
 Every response, also call declare_next_step_hint alongside anything else you call, declaring what the next step needs.`
