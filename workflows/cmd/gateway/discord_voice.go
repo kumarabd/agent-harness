@@ -399,17 +399,6 @@ type speakerBuffer struct {
 	// speakers. energyVAD has no state to protect, but gets its own
 	// instance too rather than special-casing one VAD kind over another.
 	vad voiceActivityDetector
-	// stt is this speaker's own WhisperLive session (voice_stt_realtime.go)
-	// — docs/components/gateway/discord-voice.md's "Resolved: True
-	// bidirectional realtime STT". nil when WHISPERLIVE_URL isn't
-	// configured, in which case this speaker's utterances fall back
-	// entirely to the batch transcribeAudio path (voice_stt_tts.go), same
-	// as before this existed. One session per speaker for the same reason
-	// as vad above — real per-connection recognizer state server-side that
-	// must not mix between speakers, verified directly against the live
-	// service (a two-utterance test showed WhisperLive's own segments
-	// correctly starting fresh after a real silence gap).
-	stt *whisperLiveSession
 }
 
 // voiceCaptureLoop reads decoded PCM per speaker off vc.OpusRecv, uses the
@@ -436,15 +425,6 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 		vadFactory = func() voiceActivityDetector { return newSileroVAD(sileroClient) }
 	}
 
-	// sttFactory is nil (not a func returning nil) when WHISPERLIVE_URL
-	// isn't configured — checked directly at each speakerBuffer's creation
-	// below, rather than a factory returning a nil-but-typed session, so
-	// "not configured" and "configured" stay unambiguous.
-	var sttFactory func() *whisperLiveSession
-	if url := whisperLiveURL(); url != "" {
-		sttFactory = func() *whisperLiveSession { return newWhisperLiveSession(url) }
-	}
-
 	// eot — one shared client for the whole connection, not one per speaker:
 	// voice_eot.go's own comment has the reasoning (every call is a fresh,
 	// independent classification, no per-speaker state to protect, unlike
@@ -452,10 +432,9 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 	// separate env var/Helm value — the EOT service is colocated on the same
 	// sidecar process/port as Silero VAD (server.py's own doc comment), so
 	// there's only one real target to configure. nil (not a client that
-	// always errors) when unconfigured, checked directly below the same way
-	// sttFactory is — the fixed voiceUtteranceSilenceFrames timeout is
-	// exactly what already runs when this is nil, so "unconfigured" needs no
-	// separate code path of its own.
+	// always errors) when unconfigured — the fixed voiceUtteranceSilenceFrames
+	// timeout is exactly what already runs when this is nil, so "unconfigured"
+	// needs no separate code path of its own.
 	var eot *eotClient
 	if url := vadSidecarURL(); url != "" {
 		eot = newEOTClient(url)
@@ -481,7 +460,6 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 		}
 		userID := ssrcToUser[ssrc]
 		pcm := buf.pcm
-		stt := buf.stt
 		startedDuringPlayback := buf.startedDuringPlayback
 		buf.pcm = nil
 		buf.silenceFrames = 0
@@ -490,34 +468,23 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 		lifecycle.transitionTo(voiceLifecycleProcessing)
 
 		go func() {
-			// docs/components/gateway/discord-voice.md's "Resolved: True
-			// bidirectional realtime STT" — Gateway's own VAD/silence
-			// timeout (unchanged, above) still decides an utterance is
-			// over; when a WhisperLive session exists, its already-
-			// accumulated segments ARE the transcript (real partial text
-			// while the user was still speaking, not a fresh transcription
-			// request now that they've stopped). Batch transcribeAudio
-			// (voice_stt_tts.go) is the fallback — used whenever WhisperLive
-			// isn't configured, or produced nothing for this utterance
-			// (session error, or the person said nothing intelligible) —
-			// never run alongside it: that would just add batch's own
-			// upload latency back for no benefit.
-			var text string
-			var err error
-			if stt != nil {
-				text = stt.consumeNewText()
-				if sttErr := stt.Err(); sttErr != nil {
-					log.Printf("discord-voice: whisperlive session error, falling back to batch STT: %v", sttErr)
-				}
-			}
-			if text == "" {
-				wav := pcmToWAV(pcm, voiceSampleRate, voiceChannels)
-				text, err = transcribeAudio(context.Background(), wav)
-				if err != nil {
-					log.Printf("discord-voice: transcription failed: %v", err)
-					lifecycle.transitionTo(voiceLifecycleListening)
-					return
-				}
+			// Gateway's own VAD/silence timeout (above) decides an utterance
+			// is over; only then — never on silence — is one batch
+			// transcription issued for the buffered PCM (transcribeAudio,
+			// voice_stt_tts.go, the standard /v1/audio/transcriptions
+			// contract). This is deliberately the ONLY transcription path
+			// (docs/components/gateway/discord-voice.md's "Resolved: Batch
+			// STT Only" — the streaming WhisperLive path was removed 2026-08-29
+			// after it pinned the shared GPU continuously for the whole time
+			// the bot was joined, degrading Kokoro/Whisper and OOM-ing the
+			// node; batch is event-driven on real utterances, so the GPU is
+			// idle between them).
+			wav := pcmToWAV(pcm, voiceSampleRate, voiceChannels)
+			text, err := transcribeAudio(context.Background(), wav)
+			if err != nil {
+				log.Printf("discord-voice: transcription failed: %v", err)
+				lifecycle.transitionTo(voiceLifecycleListening)
+				return
 			}
 			if text == "" {
 				lifecycle.transitionTo(voiceLifecycleListening)
@@ -605,18 +572,7 @@ func (s *server) voiceCaptureLoop(ctx context.Context, vc *discordgo.VoiceConnec
 			buf, ok := buffers[pkt.SSRC]
 			if !ok {
 				buf = &speakerBuffer{vad: vadFactory()}
-				if sttFactory != nil {
-					buf.stt = sttFactory()
-				}
 				buffers[pkt.SSRC] = buf
-			}
-			if buf.stt != nil {
-				// Unconditional, not gated on this frame's own VAD verdict —
-				// WhisperLive runs its own internal VAD/segmentation and
-				// needs continuous audio to do that correctly; Gateway's own
-				// VAD below is a separate, independent classifier used for
-				// buffering/barge-in, not a gate on what reaches WhisperLive.
-				buf.stt.sendAudio(downmixResample(pcm))
 			}
 			speech := buf.vad.isSpeech(pcm)
 			if err := buf.vad.Err(); err != nil {

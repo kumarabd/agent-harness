@@ -17,9 +17,7 @@ import (
 // (server.py's own doc comment). Reuses the exact same target string as
 // vadSidecarURL() — one sidecar, two services, one dial target — but keeps
 // its own separate *grpc.ClientConn rather than sharing sileroVADClient's,
-// matching this codebase's existing one-client-type-per-service pattern
-// (voice_stt_realtime.go's whisperLiveSession is likewise its own
-// connection, not shared with anything else).
+// matching this codebase's existing one-client-type-per-service pattern.
 //
 // eotThreshold — the probability at or above which the EOT model's verdict
 // alone is enough to end an utterance before voiceUtteranceSilenceFrames'
@@ -29,17 +27,16 @@ import (
 // trailed-off sentence 0.274, a lone backchannel "Yeah" 0.119, a lone
 // filler "Um" 0.047.
 //
-// Nudged to 0.40 on 2026-08-29 (same tuning pass as
-// voiceUtteranceSilenceFrames) — a small margin above the calibrated
-// default so a crisp-sounding but not-yet-finished clause (the 0.392 case
-// is uncomfortably close to 0.36) doesn't flush early. Deliberately NOT
-// raised much further: the "complete sentence" real-audio score is 0.392,
-// so anything past ~0.42 would make the model essentially never fire and
-// force every turn to the full voiceUtteranceSilenceFrames ceiling, trading
-// one latency problem for another. If overlap persists, prefer raising the
-// grace period / ceiling over pushing this past the model's own measured
-// range.
-const eotThreshold = 0.40
+// Kept at LiveKit's calibrated 0.36. A 2026-08-29 tuning pass briefly set
+// this to 0.40 — a mistake: the model's own measured "complete sentence"
+// score is 0.392, so 0.40 is ABOVE it, meaning EOT would never fire on a
+// normal finished sentence and every turn would fall through to the full
+// voiceUtteranceSilenceFrames ceiling (a latency regression on every turn).
+// This threshold must stay at or below the measured "done" score to be
+// useful at all. To buy more patience without breaking EOT, raise the grace
+// period / ceiling (voiceUtteranceEOTGraceFrames / voiceUtteranceSilenceFrames),
+// not this.
+const eotThreshold = 0.36
 
 // eotMaxSamples mirrors the model's own fixed rolling window
 // (livekit.local_inference.EOT_MAX_SAMPLES, 19200 samples = 1.2s @ 16kHz) —
@@ -60,8 +57,8 @@ const eotMaxSamples = 19200
 // A long utterance made every later EOT poll progressively more expensive,
 // live evidence being a 30-second-long `processing` lifecycle hold that
 // reset to `listening` with no transcript at all — consistent with audio
-// getting delayed badly enough during that stretch that WhisperLive/batch
-// STT had nothing usable left to transcribe. predict() itself already
+// getting delayed badly enough during that stretch that batch STT had
+// nothing usable left to transcribe. predict() itself already
 // zero-pads the front when handed fewer samples than eotMaxSamples, so
 // slicing here changes nothing about correctness, only cost.
 const eotTrailingRawSamples = eotMaxSamples * sileroResampleRatio * voiceChannels

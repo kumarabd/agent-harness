@@ -132,14 +132,9 @@ spec:
             - name: VAD_SIDECAR_URL
               value: {{ printf "localhost:%d" (int .Values.gateway.vadSidecar.port) | quote }}
             {{- end }}
-            # docs/components/gateway/discord-voice.md's "Resolved: True
-            # bidirectional realtime STT" — a real Service DNS name (not
-            # localhost), since WhisperLive is a standalone cluster
-            # service, not a container in this pod.
-            {{- if .Values.gateway.realtimeStt.enabled }}
-            - name: WHISPERLIVE_URL
-              value: {{ .Values.gateway.realtimeStt.url | quote }}
-            {{- end }}
+            {{- /* WHISPERLIVE_URL / streaming STT removed 2026-08-29 — voice
+                   STT is batch-only now (docs/components/gateway/discord-voice.md,
+                   "Resolved: Batch STT Only"). */}}
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
         {{- if .Values.gateway.vadSidecar.enabled }}
