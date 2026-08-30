@@ -1,37 +1,22 @@
-// Command gateway is the real inbound/outbound path for the Web platform
-// (docs/components/gateway.md, docs/components/gateway/web.md) — the first
-// real Gateway kind actually being built, replacing `starter` as the way a
-// real client submits messages. One process per tenant (not shared across
-// tenants — components/multi-tenancy.md's credential-isolation principle),
-// deployed alongside tenant-worker and that tenant's own Postgres in the
-// agent-harness-tenant chart, not agent-harness-shared.
+// Command gateway is the per-tenant inbound/outbound path for every client
+// platform this tenant has configured (docs/components/gateway.md). One
+// process per tenant, deployed alongside tenant-worker and that tenant's own
+// Postgres in the agent-harness-tenant chart.
 //
-// Web (webhook-like/polling) and Discord (connection-based, leased) both run
-// in this one process — docs/components/gateway.md's "Resolved: Per-Tenant
-// Deployment", one goroutine per platform kind this tenant has actually
-// configured, not one process per (tenant × platform):
+// This file is the composition root only: it builds the shared
+// infrastructure (Postgres pool, Temporal client, metrics) and the shared
+// core.Ingestor, then wires each platform adapter and starts it. Everything
+// else lives in internal/gateway/{core,lease,speech,web,discord,discordvoice,
+// discordui}:
 //
-//	POST /send     — verify Clerk JWT, resolve session_key, dedup, SignalWithStart, ack.
-//	GET  /poll     — verify Clerk JWT, resolve session_key, read new turns +
-//	                 any pending user_input_requests directly from Postgres.
-//	POST /respond  — verify Clerk JWT, answer a pending user_input_requests
-//	                 row via SignalWorkflow against its own workflow_id
-//	                 (docs/components/user-input.md).
-//	Discord goroutine(s) (discord.go) — one per token in DISCORD_BOT_TOKENS
-//	(comma-separated — a tenant can run more than one Discord bot,
-//	gateway.md's composable connection_id); DISCORD_BOT_TOKEN (singular) is
-//	still read as a one-bot fallback. Each connects only while holding that
-//	bot's own connection lease (gateway_connection_leases, leases.go), per
-//	gateway.md's "Resolved: Connection Leasing".
-//
-//	METRICS_BIND_ADDRESS Host:port the Prometheus exposition endpoint listens
-//	                    on. Default: 0.0.0.0:9090. Same mechanism as
-//	                    loop-worker/tenant-worker (docs/components/
-//	                    budget-guardrails.md's "Resolved: Metrics Export"),
-//	                    added here 2026-08-26 specifically for real voice-
-//	                    latency numbers (discord-voice.md's Notes Log) —
-//	                    this process had no metrics exposition at all before
-//	                    that.
+//	core         MessageEvent + Ingest (session resolve, dedup, SignalWithStart);
+//	             session-key identity; per-platform system prompts.
+//	lease        Postgres connection lease (Discord text + voice).
+//	speech       OpenAI-compatible STT/TTS + transcript text helpers.
+//	web          POST /send, GET /poll, POST /respond, GET /sessions (Clerk-auth).
+//	discord      Discord text: connection, ingest, DiscordDeliver*, commands.
+//	discordvoice Discord voice: capture, VoiceDeliver*, the voice DSP stack.
+//	discordui    Discord message components shared by discord + discordvoice.
 package main
 
 import (
@@ -44,12 +29,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/uber-go/tally/v4"
 	tallyprom "github.com/uber-go/tally/v4/prometheus"
 	"go.temporal.io/sdk/client"
 	contribtally "go.temporal.io/sdk/contrib/tally"
+
+	"agent-harness/workflows/internal/gateway/core"
+	"agent-harness/workflows/internal/gateway/discord"
+	"agent-harness/workflows/internal/gateway/lease"
+	"agent-harness/workflows/internal/gateway/web"
 )
 
 func envOrDefault(key, fallback string) string {
@@ -63,16 +52,9 @@ func envOrDefault(key, fallback string) string {
 // starts the HTTP listener serving /metrics — an exact copy of loop-worker's
 // own function (cmd/loop-worker/main.go), duplicated rather than shared
 // since the two are independent binaries with no existing common package for
-// this (docs/components/budget-guardrails.md's "Resolved: Metrics Export"
-// scoped this to loop-worker/tenant-worker only; the Gateway had none at
-// all until this — real voice-latency metrics below needed somewhere to
-// report to). Every activity registered on this process's embedded
-// per-connection workers (deliver_voice.go, deliver_voice_chunk.go,
-// deliver_discord.go) gets this handler automatically via
-// activity.GetMetricsHandler(ctx), the same way tenant-worker's Python
-// activities already get theirs via activity.metric_meter() — no per-struct
-// plumbing needed for the metrics that are emitted from inside a real
-// activity execution.
+// this (docs/components/budget-guardrails.md's "Resolved: Metrics Export").
+// Every activity on this process's embedded per-connection workers gets this
+// handler automatically via activity.GetMetricsHandler(ctx).
 func newMetricsHandler(bindAddress string) client.MetricsHandler {
 	reporter := tallyprom.NewReporter(tallyprom.Options{})
 	scope, _ := tally.NewRootScope(tally.ScopeOptions{
@@ -94,20 +76,15 @@ func newMetricsHandler(bindAddress string) client.MetricsHandler {
 	return contribtally.NewMetricsHandler(scope)
 }
 
-// discordBotTokens returns the configured Discord bot tokens for this
-// tenant — DISCORD_BOT_TOKENS (comma-separated, deploy/helm/agent-harness-tenant's
-// gateway.discord.bots list), same convention loop-worker's own
-// TEMPORAL_NAMESPACES already uses, with DISCORD_BOT_TOKEN (singular) kept
-// as a fallback for the pre-multi-bot single-value shape. Returns an empty
-// slice (not an error) when neither is set — Discord is one of possibly
-// several platform kinds this tenant's Gateway runs; having none configured
-// is a valid, common state (main.go's own loop over this is a no-op then).
+// discordBotTokens returns the configured Discord bot tokens for this tenant
+// — DISCORD_BOT_TOKENS (comma-separated), with DISCORD_BOT_TOKEN (singular)
+// kept as a one-bot fallback. Empty slice when neither is set: Discord is
+// one of possibly several platform kinds, and having none is a valid state.
 func discordBotTokens() []string {
 	if raw := os.Getenv("DISCORD_BOT_TOKENS"); raw != "" {
 		var out []string
 		for _, tok := range strings.Split(raw, ",") {
-			tok = strings.TrimSpace(tok)
-			if tok != "" {
+			if tok = strings.TrimSpace(tok); tok != "" {
 				out = append(out, tok)
 			}
 		}
@@ -119,26 +96,6 @@ func discordBotTokens() []string {
 		return []string{tok}
 	}
 	return nil
-}
-
-type server struct {
-	pool      *pgxpool.Pool
-	temporal  client.Client
-	taskQueue string
-	// voice — docs/components/gateway/discord-voice.md's per-guild live
-	// voice connection registry. In-memory only, same reasoning as
-	// discord.go's own dg session: gateway_connection_leases is the durable
-	// record of who holds each connection, this is just this replica's own
-	// bookkeeping of which ones it's currently serving.
-	voice *voiceState
-	// voiceFillerCache — docs/components/gateway/discord-voice.md's Notes
-	// Log, tiered filler injection. Built once at startup
-	// (synthesizeVoiceFillerCache), shared read-only across every connection
-	// this replica serves — never nil (an empty cache when FILLER_ENABLED
-	// isn't set, or pre-synthesis failed), so callers never need a separate
-	// nil check beyond what voiceFillerCache.hasAny/phraseAt already do
-	// internally.
-	voiceFillerCache *voiceFillerCache
 }
 
 func main() {
@@ -168,53 +125,30 @@ func main() {
 	}
 	defer temporalClient.Close()
 
-	// docs/components/gateway/web.md, "Resolved: Auth" — clerk.go, "Resolved
-	// via agent-brain's own pattern": read once at startup, not re-read per
-	// request. Fails loudly (not per-request 503s) if neither env var is
-	// set — a Gateway that can never verify anyone is not a degraded state
-	// worth serving traffic in, same as the Postgres/Temporal dial calls
-	// above.
-	clerkCfg := clerkConfigFromEnv()
+	// docs/components/gateway/web.md, "Resolved: Auth" — read once at startup,
+	// fail loud (not per-request 503s) if the Gateway can never verify anyone.
+	clerkCfg := web.ClerkConfigFromEnv()
 	if clerkCfg.JWKSURL == "" {
 		log.Fatalf("CLERK_JWKS_URL or CLERK_ISSUER is required")
 	}
 
-	s := &server{
-		pool:      pool,
-		temporal:  temporalClient,
-		taskQueue: envOrDefault("TEMPORAL_TASK_QUEUE", "agent-loop"),
-		voice:     newVoiceState(),
-		// Best-effort, not fail-loud — see synthesizeVoiceFillerCache's own
-		// comment. Deliberately after the Postgres/Temporal dial calls
-		// above (which DO fail loud), since this one degrading silently on
-		// a real failure is the correct behavior, not an oversight.
-		voiceFillerCache: synthesizeVoiceFillerCache(ctx),
-	}
+	taskQueue := envOrDefault("TEMPORAL_TASK_QUEUE", "agent-loop")
+	ingestor := core.NewIngestor(pool, temporalClient, taskQueue)
+	leaseMgr := lease.NewManager(pool)
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /send", requireClerkAuth(clerkCfg, http.HandlerFunc(s.handleSend)))
-	mux.Handle("GET /poll", requireClerkAuth(clerkCfg, http.HandlerFunc(s.handlePoll)))
-	mux.Handle("POST /respond", requireClerkAuth(clerkCfg, http.HandlerFunc(s.handleRespond)))
-	mux.Handle("GET /sessions", requireClerkAuth(clerkCfg, http.HandlerFunc(s.handleListSessions)))
+	web.New(ingestor, pool, temporalClient, clerkCfg).Register(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
-	// discord.go — only this tenant's configured platform kinds run, per
-	// gateway.md's per-tenant, one-goroutine-per-platform model. One
-	// startDiscordPlatform goroutine per configured bot token (gateway.md's
-	// composable connection_id — a tenant can run more than one Discord
-	// bot), same comma-separated-list convention loop-worker's own
-	// TEMPORAL_NAMESPACES already uses. holderID identifies this specific
-	// process to gateway_connection_leases; a fresh one per bot per process
-	// start is fine — the lease is about which process currently holds a
-	// given live connection, not about recognizing a process across
-	// restarts.
+	// One goroutine per configured Discord bot (gateway.md's per-tenant,
+	// one-goroutine-per-platform model; a tenant can run more than one bot).
 	for _, botToken := range discordBotTokens() {
-		go s.startDiscordPlatform(ctx, botToken, uuid.NewString())
+		bot := discord.New(ctx, botToken, ingestor, pool, temporalClient, leaseMgr)
+		go bot.Run(ctx)
 	}
 
 	addr := envOrDefault("GATEWAY_BIND_ADDRESS", "0.0.0.0:8090")
 	httpServer := &http.Server{Addr: addr, Handler: mux}
-
 	go func() {
 		log.Printf("gateway (web) listening on %s", addr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -225,7 +159,7 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
-	stopPlatforms() // signals the Discord goroutine (if running) to release its lease and disconnect
+	stopPlatforms() // Discord goroutines release their leases and disconnect.
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
