@@ -74,6 +74,48 @@ func CompressContextWorkflow(ctx workflow.Context, turnID string) error {
 	return workflow.ExecuteActivity(actx, "CompressContext", turnID).Get(actx, nil)
 }
 
+// RecordSkillOutcomeWorkflow — skill subsystem phase 2
+// (docs/components/skill-subsystem.md, "Recording"). Same thin-wrapper
+// reasoning as WriteMemoryWorkflow: a detached child so the activity's
+// completion is recorded against a still-open history, not the turn's
+// already-closed one. Dispatched from TurnWorkflow's end-of-turn block for
+// top-level task turns of moderate/complex complexity.
+func RecordSkillOutcomeWorkflow(ctx workflow.Context, input types.RecordSkillOutcomeInput) error {
+	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+	actx := workflow.WithActivityOptions(ctx, ao)
+	recordErr := workflow.ExecuteActivity(actx, "RecordSkillOutcome", input).Get(actx, nil)
+
+	// Trigger synthesis, debounced by a fixed workflow ID — an "already
+	// started" rejection IS the debounce (same pattern agent-brain's mining
+	// trigger uses, memory-slot.md's "Resolved: Recall Latency"). ABANDON so
+	// it outlives this wrapper; ALLOW_DUPLICATE so a fresh run can start once
+	// the previous one has finished. Wait only for it to be accepted.
+	scwo := workflow.ChildWorkflowOptions{
+		WorkflowID:            "skill-synthesis",
+		ParentClosePolicy:     enumspb.PARENT_CLOSE_POLICY_ABANDON,
+		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+	}
+	scctx := workflow.WithChildOptions(ctx, scwo)
+	sf := workflow.ExecuteChildWorkflow(scctx, SkillSynthesisWorkflow, types.SkillSynthesizeInput{
+		TriggerTurnID: input.TurnID,
+	})
+	if err := sf.GetChildWorkflowExecution().Get(ctx, nil); err != nil {
+		workflow.GetLogger(ctx).Info("skill synthesis not started (already running or start failed)", "error", err)
+	}
+	return recordErr
+}
+
+// SkillSynthesisWorkflow — skill subsystem phase 3
+// (docs/components/skill-subsystem.md, "Synthesis"). Thin wrapper; the
+// activity does everything — assign candidates to clusters, run the
+// generalization pass, write learned procedures / new versions / notes.
+// Longer timeout because it makes several model calls.
+func SkillSynthesisWorkflow(ctx workflow.Context, input types.SkillSynthesizeInput) error {
+	ao := workflow.ActivityOptions{StartToCloseTimeout: 10 * time.Minute}
+	actx := workflow.WithActivityOptions(ctx, ao)
+	return workflow.ExecuteActivity(actx, "SkillSynthesize", input).Get(actx, nil)
+}
+
 const (
 	maxIterations = 20        // components/temporal-workflow.md, Resolved: Stop-Condition Default Values
 	maxRetries    = 5         // turn-level cumulative cap, distinct from per-activity MaximumAttempts
@@ -544,7 +586,8 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	// Deterministic FIFO queue for follow-up messages, per components/temporal-workflow.md
 	// "Resolved: Signal Coalescing" — the handler only appends (pure, deterministic
 	// under replay); dequeue-and-fold-one happens explicitly at loop boundaries below,
-	// never batched.
+	// never batched. Set up before the request-pipeline steps below so routing can
+	// race its own completion against a follow-up message arriving mid-phase.
 	var pendingMessages []types.SignalPayload
 	signalChan := workflow.GetSignalChannel(ctx, NewMessageSignalName)
 	// deliveryInterruptNotify — docs/components/gateway/discord-voice.md's
@@ -568,6 +611,42 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 			notifySel.Select(gctx)
 		}
 	})
+
+	// --- Step 2: request understanding
+	// (docs/components/request-pipeline/02-request-understanding.md). A cheap
+	// fast-tier analysis of the inbound message — intent + complexity routing
+	// scalars, plus a distilled retrieval query and named entities for the
+	// step-4/5/7 retrieval subsystems — dispatched once per top-level turn
+	// before the reason-act loop. Best-effort: the activity itself degrades to
+	// a neutral representation on any failure, and an infrastructure-level
+	// failure of the dispatch is logged and ignored — this is a pipeline
+	// enhancement, never load-bearing, so it must not fail or block the turn.
+	// Subagents skip it: their task is defined by the parent's spawn, not a
+	// user message.
+	var taskRep types.TaskRepresentation
+	if input.ParentType == "session" {
+		cao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+		cactx := workflow.WithActivityOptions(ctx, cao)
+		if err := workflow.ExecuteActivity(cactx, "ClassifyRequest", types.ClassifyRequestInput{TurnID: input.TurnID}).Get(cactx, &taskRep); err != nil {
+			logger.Error("ClassifyRequest failed, proceeding without task representation", "turn_id", input.TurnID, "error", err)
+		} else {
+			logger.Info("request classified", "turn_id", input.TurnID, "intent", taskRep.Intent, "complexity", taskRep.Complexity, "confidence", taskRep.Confidence, "retrieval_query", taskRep.RetrievalQuery)
+		}
+	}
+
+	// --- Step 3: routing + retrieval orchestration
+	// (docs/components/request-pipeline/03-routing.md). RoutingWorkflow (child,
+	// awaited) decides which retrieval subsystems this turn needs and runs the
+	// active subset in parallel under a phase deadline, staging results to
+	// turn_retrieval. Raced against an incoming message: a follow-up
+	// mid-routing cancels routing and the turn proceeds un-enriched — see
+	// startRouting. Best-effort like step 2. Held for the pipeline steps that
+	// consume it (planner, prompt assembly).
+	var routing RoutingResult
+	if input.ParentType == "session" {
+		routing = startRouting(ctx, input.TurnID, taskRep, &pendingMessages)
+	}
+	_ = routing
 
 	var stopReason string
 
@@ -608,6 +687,10 @@ loop:
 			ContextSeq:   contextSeq,
 			HintModality: hintModality,
 			HintTier:     hintTier,
+			// Step 2's estimate — ModelCall uses it only to bootstrap the
+			// first call's tier (when HintTier is empty). Zero value for
+			// subagents; harmless to pass every iteration.
+			Complexity: taskRep.Complexity,
 		}
 		mcFuture := workflow.ExecuteActivity(mctx, "ModelCall", modelInput)
 
@@ -892,6 +975,26 @@ loop:
 		actx := workflow.WithActivityOptions(ctx, ao)
 		_ = workflow.ExecuteActivity(actx, "Deliver", input.TurnID).Get(actx, nil)
 		interruptedPayload = deliverConnectionBased(ctx, interrupts, input.SessionKey, input.ConnectionID, input.TurnID)
+	}
+
+	// --- Skill subsystem phase 2 (docs/components/skill-subsystem.md,
+	// "Recording"). Detached child (ABANDON), same reasoning as
+	// WriteMemoryWorkflow. Only top-level task turns of moderate/complex
+	// complexity — a trivial task has no procedure worth learning, and a
+	// subagent's work enters via its parent's transcript if at all. A
+	// classification failure (empty taskRep) also skips it.
+	if input.ParentType == "session" && taskRep.Intent == "task" &&
+		(taskRep.Complexity == "moderate" || taskRep.Complexity == "complex") {
+		rcwo := workflow.ChildWorkflowOptions{
+			WorkflowID:        input.TurnID + ":record-skill",
+			ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
+		}
+		rcctx := workflow.WithChildOptions(ctx, rcwo)
+		rf := workflow.ExecuteChildWorkflow(rcctx, RecordSkillOutcomeWorkflow, types.RecordSkillOutcomeInput{
+			TurnID:     input.TurnID,
+			StopReason: stopReason,
+		})
+		_ = rf.GetChildWorkflowExecution().Get(ctx, nil) // wait for start only
 	}
 
 	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "interrupted_during_delivery", interruptedPayload != nil)

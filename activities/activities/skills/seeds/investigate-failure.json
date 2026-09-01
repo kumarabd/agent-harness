@@ -1,0 +1,16 @@
+{
+  "id": "investigate-failure",
+  "title": "Investigate why something is failing",
+  "trigger_text": "debug an error, failing test, crash, or unexpected behaviour and find the root cause",
+  "scope": "global",
+  "preconditions": [],
+  "body": [
+    { "step_id": "reproduce", "instruction": "Reproduce the failure directly and capture the exact error output — do not work from a paraphrase", "tool_ref": "a shell", "slots": [] },
+    { "step_id": "locate", "instruction": "Read the failing code path and the surrounding context; identify the specific line or condition that breaks", "tool_ref": "a code-search or file-read tool", "slots": [] },
+    { "step_id": "hypothesis", "instruction": "State one concrete hypothesis for the cause and the smallest check that would confirm or refute it", "tool_ref": null, "slots": [] },
+    { "step_id": "verify", "instruction": "Run that check. If refuted, form the next hypothesis rather than guessing at a fix", "tool_ref": "a shell", "slots": [] },
+    { "step_id": "fix", "instruction": "Apply the minimal change that addresses the confirmed cause, then re-run the reproduction to confirm it's resolved", "tool_ref": "a file-edit tool", "slots": [] }
+  ],
+  "done_criteria": ["the reproduction no longer fails", "the cause is understood, not just the symptom suppressed"],
+  "notes": ["Confirm the cause before changing code — a fix applied to an unconfirmed hypothesis often just moves the bug."]
+}

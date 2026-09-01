@@ -1,5 +1,13 @@
 # Component: Skills
 
+> **SUPERSEDED — the current skill design is
+> [`components/skill-subsystem.md`](skill-subsystem.md) ("The Skill Graph"),
+> 2026-08-31.** A skill is a procedure the harness learns from its own execution:
+> a flat `skill_procedures` store, offline synthesis of recorded transcripts into
+> versioned procedures, a co-occurrence graph + a derived cluster hierarchy, and
+> a retrieval scoring blend. Harness-owned, not agent-brain. This file is kept
+> only as the history of the earlier mcp-hub document-store design.
+>
 > STATUS: SUPERSEDED — **reverted 2026-08-29, the same day it was built.** The mcp-hub-document-store design below (`search_skills`/`get_skill` as two native tools passing through to mcp-hub's own skill store) was fully implemented, then undone at the user's direction: a skill is being reconsidered as an **abstract concept living on the memory layer** (`components/memory-slot.md`) rather than a separate discovery mechanism with its own tools and its own per-tenant document store. Kept here as history, not deleted — same treatment `components/dreaming.md` gave its own superseded batch-job design. See "Superseded: mcp-hub Document-Store Design" below and the Notes Log for the reversal detail; see `components/memory-slot.md`'s own Open Questions for the redirect's forward-pointer.
 
 ### Superseded: mcp-hub Document-Store Design

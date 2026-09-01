@@ -1,0 +1,16 @@
+{
+  "id": "implement-change",
+  "title": "Implement a change or feature in a codebase",
+  "trigger_text": "add a feature, make a code change, or modify behaviour in an existing project",
+  "scope": "global",
+  "preconditions": ["the change is understood well enough to state what 'done' looks like"],
+  "body": [
+    { "step_id": "orient", "instruction": "Find the code that owns the behaviour being changed — the files, the entry points, the existing patterns to match", "tool_ref": "a code-search tool", "slots": [] },
+    { "step_id": "plan", "instruction": "Decide the smallest set of edits that achieves the change and keeps the code consistent with what's around it", "tool_ref": null, "slots": [] },
+    { "step_id": "edit", "instruction": "Make the edits, matching the surrounding code's style, naming, and error handling", "tool_ref": "a file-edit tool", "slots": ["code_style"] },
+    { "step_id": "check", "instruction": "Build, lint, and run the relevant tests; fix what breaks before moving on", "tool_ref": "a shell", "slots": [] },
+    { "step_id": "verify", "instruction": "Confirm the change does what was asked — exercise it, don't assume", "tool_ref": "a shell", "slots": [] }
+  ],
+  "done_criteria": ["the change works when exercised", "build/lint/tests pass", "the diff reads like it belongs in this codebase"],
+  "notes": ["Match the existing code — do not introduce a new pattern for something the project already has a way of doing."]
+}

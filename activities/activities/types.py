@@ -47,6 +47,110 @@ class ModelCallInput:
     # registry's own bootstrap value.
     hint_modality: str = ""
     hint_tier: str = ""
+    # docs/components/request-pipeline/02-request-understanding.md — step 2's
+    # complexity estimate, threaded through so ModelCall can bootstrap the
+    # turn's FIRST tier from it (empty hint_tier only). Empty for subagents
+    # and when step 2 fell back.
+    complexity: str = ""
+
+
+@dataclass
+class ClassifyRequestInput:
+    """ClassifyRequest's only input — docs/components/request-pipeline/
+    02-request-understanding.md. The activity reads the turn's seed user
+    message (and a little recent context) from Postgres itself and returns a
+    TaskRepresentation."""
+
+    turn_id: str = ""
+
+
+@dataclass
+class TaskRepresentation:
+    """Step 2's output. Small derived routing signals only — the two routing
+    scalars (intent/complexity), the classifier's confidence, a distilled
+    retrieval query, and a few named entities. Carried by the workflow the
+    same way ModelCallOutput's next_hint_tier and ToolCallRef's {server,tool}
+    are: routing metadata derived from the message, not the message content
+    itself (which stays Postgres-side). retrieval_query/entities are passed
+    straight into the step-4/5/7 retrieval activities by RetrievalWorkflow.
+    confidence == 0.0 marks a fallback / un-classified turn."""
+
+    intent: str = ""
+    complexity: str = ""
+    confidence: float = 0.0
+    retrieval_query: str = ""
+    entities: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MemoryRetrieveInput:
+    """MemoryRetrieve's input — docs/components/request-pipeline/
+    04-memory-retrieval.md. retrieval_query is the distilled query from step
+    2's TaskRepresentation, a small derived signal passed straight in by
+    RoutingWorkflow (not read from Postgres)."""
+
+    turn_id: str = ""
+    retrieval_query: str = ""
+
+
+@dataclass
+class ToolDiscoverInput:
+    """ToolDiscover's input — docs/components/request-pipeline/
+    07-tool-discovery.md."""
+
+    turn_id: str = ""
+    retrieval_query: str = ""
+    entities: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SkillDiscoverInput:
+    """SkillDiscover's input — docs/components/request-pipeline/
+    05-skill-discovery.md."""
+
+    turn_id: str = ""
+    retrieval_query: str = ""
+
+
+@dataclass
+class ComposeSkillInput:
+    """ComposeSkill's input — docs/components/request-pipeline/
+    06-skill-composition.md. Reads the staged memory / tool / skill rows from
+    turn_retrieval by turn_id itself."""
+
+    turn_id: str = ""
+
+
+@dataclass
+class RecordSkillOutcomeInput:
+    """RecordSkillOutcome's input — docs/components/skill-subsystem.md,
+    "Recording". The activity reads the turn's transcript, tool calls, and
+    staged skill rows from Postgres itself; the workflow only supplies the
+    turn_id and the loop's stop reason (which it can't persist cleanly)."""
+
+    turn_id: str = ""
+    stop_reason: str = ""
+
+
+@dataclass
+class SkillSynthesizeInput:
+    """SkillSynthesize's input — docs/components/skill-subsystem.md,
+    "Synthesis". The activity processes the whole un-synthesized candidate
+    queue; this carries only the triggering turn for logging."""
+
+    trigger_turn_id: str = ""
+
+
+@dataclass
+class SubsystemResult:
+    """What each retrieval-phase activity returns to RoutingWorkflow — a
+    status and the count of rows it staged to turn_retrieval. No content: the
+    rows are read from turn_retrieval by later steps. status is
+    "ok" | "empty" | "error" as returned by the activity; RoutingWorkflow may
+    additionally record "timed_out" / "skipped" in the same shape."""
+
+    status: str = "empty"
+    count: int = 0
 
 
 @dataclass

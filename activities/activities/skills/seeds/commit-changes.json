@@ -1,0 +1,15 @@
+{
+  "id": "commit-changes",
+  "title": "Commit code changes with a clear message",
+  "trigger_text": "commit staged or unstaged code changes to version control with a well-formed commit message",
+  "scope": "global",
+  "preconditions": ["the working tree has changes worth committing"],
+  "body": [
+    { "step_id": "review", "instruction": "Show what changed so the message reflects the actual diff, not an assumption", "tool_ref": "a version-control tool", "slots": [] },
+    { "step_id": "stage", "instruction": "Stage the files that belong in this commit; leave unrelated changes out", "tool_ref": "a version-control tool", "slots": [] },
+    { "step_id": "message", "instruction": "Write a concise message: a short imperative summary line, then a body explaining why if it isn't obvious", "tool_ref": "a version-control tool", "slots": ["commit_style"] },
+    { "step_id": "commit", "instruction": "Create the commit", "tool_ref": "a version-control tool", "slots": [] }
+  ],
+  "done_criteria": ["a single focused commit exists with a message that would make sense to a reviewer months later"],
+  "notes": ["Do not bundle unrelated changes into one commit.", "Do not invent a message before looking at the diff."]
+}

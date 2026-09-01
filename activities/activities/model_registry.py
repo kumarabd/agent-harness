@@ -158,6 +158,19 @@ def _cost_per_token(env_prefix: str, kind: str) -> float:
     return float(raw) / 1_000_000
 
 
+def tier_for_complexity(complexity: str) -> str | None:
+    """docs/components/request-pipeline/02-request-understanding.md — bootstrap
+    the first ModelCall's language tier from step 2's complexity estimate,
+    instead of always starting at `_DEFAULT_TIER`. Returns None for an
+    absent/unknown value so the caller falls back to `default_hint()`."""
+    return {
+        "trivial": "fast",
+        "simple": "fast",
+        "moderate": "medium",
+        "complex": "expert",
+    }.get(complexity)
+
+
 def escalate(tier: str) -> str:
     """docs/components/model-registry.md, "Resolved: Escalate-on-Retry" —
     fast -> medium -> expert, capped at expert (never escalates past the

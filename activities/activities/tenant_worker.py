@@ -74,6 +74,10 @@ from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
 from . import llm_client, shell_hub
+from .classify import ClassifyRequestActivity
+from .skills import seed as skill_seed
+from .skills.record import RecordSkillOutcomeActivity
+from .skills.synthesize import SkillSynthesizeActivity
 from .compress_context import CompressContextActivity
 from .db import create_pool
 from .deliver import DeliverActivity
@@ -81,6 +85,12 @@ from .get_max_turn_seq import GetMaxTurnSeqActivity
 from .insert_message import InsertMessageActivity
 from .model_call import ModelCallActivity
 from .persist import PersistActivity
+from .retrieval import (
+    ComposeSkillActivity,
+    MemoryRetrieveActivity,
+    SkillDiscoverActivity,
+    ToolDiscoverActivity,
+)
 from .seed_child_session import SeedChildSessionContextActivity
 from .subagent_manifest import SubagentManifestActivity
 from .tool_call import DenyToolCallActivity, ToolCallActivity
@@ -100,6 +110,11 @@ async def main() -> None:
     # builds shell_hub's in-process zvec index once at startup.
     # No-op if shell_hub.CATALOG is empty or EMBEDDING_BASE_URL isn't set.
     await shell_hub.init()
+    # docs/components/skill-subsystem.md phase 1 — load the authored seed
+    # procedures into skill_procedures. Idempotent; embeds only new/changed
+    # seeds. No-op if EMBEDDING_BASE_URL isn't set (seeds present but not
+    # retrievable until it is).
+    await skill_seed.init(pool)
     # AsyncOpenAI clients are no longer constructed here (2026-08-28,
     # per-tier provider revision) — every activity that needs one
     # resolves it via llm_client.get_client(model_config), keyed on the
@@ -128,6 +143,13 @@ async def main() -> None:
         task_queue=task_queue,
         activities=[
             ModelCallActivity(pool, client).__call__,
+            ClassifyRequestActivity(pool).__call__,
+            MemoryRetrieveActivity(pool).__call__,
+            ToolDiscoverActivity(pool).__call__,
+            SkillDiscoverActivity(pool).__call__,
+            ComposeSkillActivity(pool).__call__,
+            RecordSkillOutcomeActivity(pool).__call__,
+            SkillSynthesizeActivity(pool).__call__,
             ToolCallActivity(pool).__call__,
             InsertMessageActivity(pool).__call__,
             GetMaxTurnSeqActivity(pool).__call__,

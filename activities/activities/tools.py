@@ -398,26 +398,24 @@ async def memory_expand(arguments: dict, ctx: ToolContext) -> dict:
     return await agent_brain.call_tool("memory_expand", arguments)
 
 
-async def search_tools(arguments: dict, ctx: ToolContext) -> dict:
-    """docs/components/tool-registry.md, "Resolved: mcp-hub-Mediated
-    Integration Mechanism" + "Resolved: Native-Tool Discovery" — fans the
-    query out to mcp-hub (real, unchanged) and shell-hub (local, in-process)
-    and returns one combined list, so discovery is genuinely central from
-    the model's perspective in one tool call. Gracefully returns only
-    whichever source is actually configured/available rather than erroring
+async def discover_tools(query: str, top_k: int = 5) -> list[dict]:
+    """The core of search_tools, ctx-free so both the model-facing tool
+    handler below AND the request pipeline's ToolDiscover activity
+    (docs/components/request-pipeline/07-tool-discovery.md) can call it.
+
+    Fans the query out to mcp-hub (real, unchanged) and shell-hub (local,
+    in-process) and returns one combined list of {server, tool, description,
+    input_schema[, score]}. Gracefully returns only whichever source is
+    actually configured/available rather than erroring
     (mcp_hub.McpHubNotConfiguredError mirrors agent_brain's own
-    not-configured shape) — a deployment with no mcp-hub or no shell-hub
-    catalog still works, just with fewer discoverable tools."""
-    query = arguments.get("query", "")
-    top_k = arguments.get("top_k", 5)
-    # top_k is documented (TOOLS_SCHEMA) as "max results to return" — the
-    # combined total, not a per-source budget. Found via live testing
-    # (docs/components/tool-registry.md's Notes Log): passing the full
-    # top_k to both sources independently and concatenating meant a "top 5"
-    # request actually returned up to 10. Split evenly, mcp-hub (the
-    # curated, primary discovery tier) taking the remainder on an odd
-    # split — shell-hub is the supplementary, uncurated local tier, not an
-    # equally-weighted peer corpus.
+    not-configured shape).
+
+    top_k is the combined total, not a per-source budget — found via live
+    testing (docs/components/tool-registry.md's Notes Log): passing the full
+    top_k to both sources and concatenating meant a "top 5" request returned
+    up to 10. Split evenly, mcp-hub (the curated primary tier) taking the
+    remainder on an odd split — shell-hub is the supplementary local tier,
+    not an equally-weighted peer corpus."""
     mcp_hub_top_k = top_k - top_k // 2
     shell_hub_top_k = top_k // 2
 
@@ -432,8 +430,17 @@ async def search_tools(arguments: dict, ctx: ToolContext) -> dict:
     # text alone.
     mcp_hub_results = raw["result"] if isinstance(raw, dict) and "result" in raw else raw
     shell_hub_results = await shell_hub.search(query, shell_hub_top_k)
+    return list(mcp_hub_results) + shell_hub_results
 
-    return {"results": list(mcp_hub_results) + shell_hub_results}
+
+async def search_tools(arguments: dict, ctx: ToolContext) -> dict:
+    """docs/components/tool-registry.md, "Resolved: mcp-hub-Mediated
+    Integration Mechanism" + "Resolved: Native-Tool Discovery" — the
+    model-facing wrapper around discover_tools: one combined list so
+    discovery is central from the model's perspective in one tool call. A
+    deployment with no mcp-hub or no shell-hub catalog still works, just
+    with fewer discoverable tools."""
+    return {"results": await discover_tools(arguments.get("query", ""), arguments.get("top_k", 5))}
 
 
 async def call_tool(arguments: dict, ctx: ToolContext) -> dict:

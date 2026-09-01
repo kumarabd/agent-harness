@@ -1,0 +1,15 @@
+{
+  "id": "research-and-report",
+  "title": "Research a topic and report what you found",
+  "trigger_text": "look into a question or topic, gather information from tools or sources, and summarise the findings for the user",
+  "scope": "global",
+  "preconditions": [],
+  "body": [
+    { "step_id": "frame", "instruction": "Restate the question precisely — what specifically does the user need to know, and what would a good answer let them do", "tool_ref": null, "slots": [] },
+    { "step_id": "gather", "instruction": "Pull information from the relevant tools or sources; prefer primary/authoritative sources over restated ones", "tool_ref": "a search or retrieval tool", "slots": [] },
+    { "step_id": "reconcile", "instruction": "Where sources disagree, say so and weigh them rather than picking one silently", "tool_ref": null, "slots": [] },
+    { "step_id": "report", "instruction": "Answer the framed question directly first, then the supporting detail; cite where each claim came from", "tool_ref": null, "slots": ["report_length"] }
+  ],
+  "done_criteria": ["the user's actual question is answered", "claims are traceable to a source", "uncertainty is stated, not hidden"],
+  "notes": ["Lead with the answer, not the process."]
+}

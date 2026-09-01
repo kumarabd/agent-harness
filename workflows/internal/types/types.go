@@ -110,6 +110,97 @@ type ModelCallInput struct {
 	// case, not a literal default here.
 	HintModality string `json:"hint_modality"`
 	HintTier     string `json:"hint_tier"`
+	// Complexity — docs/components/request-pipeline/02-request-understanding.md.
+	// Step 2's complexity estimate, threaded through opaquely so ModelCall can
+	// bootstrap the turn's FIRST tier from it instead of always starting at
+	// medium. The workflow never interprets it; empty for subagents and when
+	// step 2 fell back.
+	Complexity string `json:"complexity"`
+}
+
+// ClassifyRequestInput is ClassifyRequest's only input
+// (docs/components/request-pipeline/02-request-understanding.md). The activity
+// reads the turn's seed user message (and a little recent context) from
+// Postgres itself and returns a TaskRepresentation.
+type ClassifyRequestInput struct {
+	TurnID string `json:"turn_id"`
+}
+
+// TaskRepresentation is step 2's output — small derived routing signals only:
+// the two routing scalars (intent/complexity), the classifier's confidence, a
+// distilled retrieval query, and a few named entities. Carried by the workflow
+// the same way ModelCallOutput.NextHintTier and ToolCallRef's {Server,Tool}
+// are — routing metadata derived from the message, not the message content
+// (which stays Postgres-side). RetrievalQuery/Entities are passed straight
+// into the step-4/5/7 retrieval activities by RetrievalWorkflow. Confidence ==
+// 0 marks a fallback / un-classified turn (the activity degrades to a neutral
+// representation rather than failing).
+type TaskRepresentation struct {
+	Intent         string   `json:"intent"`     // "conversational" | "question" | "task" | "meta"
+	Complexity     string   `json:"complexity"` // "trivial" | "simple" | "moderate" | "complex"
+	Confidence     float64  `json:"confidence"`
+	RetrievalQuery string   `json:"retrieval_query"`
+	Entities       []string `json:"entities"`
+}
+
+// MemoryRetrieveInput is MemoryRetrieve's input
+// (docs/components/request-pipeline/04-memory-retrieval.md). RetrievalQuery is
+// the distilled query from step 2's TaskRepresentation — a small derived
+// signal passed straight in by RoutingWorkflow, not read from Postgres.
+type MemoryRetrieveInput struct {
+	TurnID         string `json:"turn_id"`
+	RetrievalQuery string `json:"retrieval_query"`
+}
+
+// ToolDiscoverInput is ToolDiscover's input
+// (docs/components/request-pipeline/07-tool-discovery.md).
+type ToolDiscoverInput struct {
+	TurnID         string   `json:"turn_id"`
+	RetrievalQuery string   `json:"retrieval_query"`
+	Entities       []string `json:"entities"`
+}
+
+// SkillDiscoverInput is SkillDiscover's input
+// (docs/components/request-pipeline/05-skill-discovery.md).
+type SkillDiscoverInput struct {
+	TurnID         string `json:"turn_id"`
+	RetrievalQuery string `json:"retrieval_query"`
+}
+
+// ComposeSkillInput is ComposeSkill's input
+// (docs/components/request-pipeline/06-skill-composition.md). The activity
+// reads the staged memory/tool/skill rows from turn_retrieval by turn_id.
+type ComposeSkillInput struct {
+	TurnID string `json:"turn_id"`
+}
+
+// RecordSkillOutcomeInput is RecordSkillOutcome's input
+// (docs/components/skill-subsystem.md, "Recording"). The activity reads the
+// turn's transcript / tool calls / staged skill rows from Postgres itself;
+// the workflow supplies only the turn_id and the reason the reason-act loop
+// stopped (which it doesn't persist cleanly anywhere).
+type RecordSkillOutcomeInput struct {
+	TurnID     string `json:"turn_id"`
+	StopReason string `json:"stop_reason"`
+}
+
+// SkillSynthesizeInput is SkillSynthesize's input
+// (docs/components/skill-subsystem.md, "Synthesis"). The activity processes
+// the whole un-synthesized candidate queue; this carries only the triggering
+// turn, for logging.
+type SkillSynthesizeInput struct {
+	TriggerTurnID string `json:"trigger_turn_id"`
+}
+
+// SubsystemResult is what each retrieval-phase activity returns to
+// RoutingWorkflow — a status and the count of rows it staged to
+// turn_retrieval. No content: the rows are read from turn_retrieval by later
+// steps. Status is "ok" | "empty" | "error" from the activity; RoutingWorkflow
+// records "timed_out" / "skipped" in the same shape for subsystems it didn't
+// run or that missed the phase deadline.
+type SubsystemResult struct {
+	Status string `json:"status"`
+	Count  int    `json:"count"`
 }
 
 // ToolCallRef is one tool call minted by ModelCall — name/ID/dispatch-kind

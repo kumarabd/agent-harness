@@ -34,41 +34,24 @@ LLM-schema metadata yet — a generic schema-registry abstraction for exactly
 five tools would be premature; add future real tools here by hand alongside
 their TOOL_REGISTRY entry in tools.py.
 
-**Session-start memory retrieval** (docs/components/memory-slot.md,
-"Resolved: Two Retrieval Triggers" + "Resolved: Failure Handling"):
-build_conversation calls agent-brain's memory_search once, unconditionally,
-the first time a session's first turn builds its conversation (turn_seq==1,
-parent_type=='session', and no assistant message yet for this turn — i.e.
-the very first ModelCall of a brand-new session, inferred from message
-count rather than threading context_seq through, since InsertMessage's
-start-of-turn write is the only row present at that point). Bounded retry
-(3 attempts, matching ToolCall's MaximumAttempts), then degrades to no
-retrieved background rather than failing the turn — this is a plain
-in-process retry, not a separate Temporal activity, since it's a step
-*inside* the already-activity-tracked ModelCall. Results are rendered into
-one labeled system-role block placed *before* the live conversation
+**Cross-session memory** is no longer retrieved here. It's the request
+pipeline's step 4 (docs/components/request-pipeline/04-memory-retrieval.md):
+`RoutingWorkflow` dispatches the `MemoryRetrieve` activity once per top-level
+turn, which calls agent-brain's `memory_search`, filters/budgets the fused
+results, and stages them to `turn_retrieval` as `kind='memory'`.
+build_conversation just reads those staged rows every ModelCall and splices
+them into a labeled system-role block *before* the live conversation
 (docs/components/memory-slot.md's "Resolved: Staleness Is Handled by
-Placement") — not memory-slot.md's originally-designed typed
-{content, harness_type} normalization: that round-trips a
-`attributes.harness_type` tag stamped at write time, but agent-brain's real,
-current memory_write tool schema (internal/mcp/tools_events.go, verified
-directly) has no generic `attributes` input field to stamp it through in
-the first place — a design/implementation gap discovered while building
-this, not fixed here (agent-brain's own repo, out of scope for this
-project). Skipped entirely rather than half-implemented against a shape the
-real tool doesn't support; the raw fused results are rendered as-is
-instead.
+Placement"). The old `turn_seq==1` in-process retrieval + its bespoke retry
+loop are gone.
 """
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 
-from . import agent_brain, ids, lcm, model_registry
+from . import ids, lcm
 from .types import Usage
-
-logger = logging.getLogger(__name__)
 
 # docs/components/model-registry.md, "Resolved: Selection Mechanism" — not a
 # judgment-call nudge (contrast the reverted search_tools-before-shell_exec
@@ -487,63 +470,6 @@ def tools_schema_for(is_subagent: bool) -> list[dict]:
     return [tool for tool in TOOLS_SCHEMA if tool["function"]["name"] not in _SUBAGENT_ONLY_TOOL_NAMES]
 
 
-_MEMORY_SEARCH_RETRY_ATTEMPTS = 3  # matches ToolCall's MaximumAttempts (docs/components/temporal-workflow.md)
-
-
-def _render_memory_results(results: list[dict]) -> str:
-    """Best-effort text rendering of memory_search's fused results — see
-    module docstring on why this isn't the typed {content, harness_type}
-    normalization memory-slot.md originally specified. Each source shape
-    genuinely differs (internal/recall/fusion.go's FusedResult), so this
-    picks the most relevant text field per source rather than assuming one
-    uniform "content" field exists."""
-    lines = []
-    for r in results:
-        source = r.get("source", "?")
-        if r.get("statement"):
-            text = r["statement"]
-        elif r.get("term") and r.get("definition"):
-            text = f"{r['term']}: {r['definition']}"
-        elif r.get("emu", {}).get("semantic_fact"):
-            sf = r["emu"]["semantic_fact"]
-            text = f"predicate={sf.get('predicate')} object={sf.get('object_value')}"
-        else:
-            text = f"(id={r.get('id')} — use memory_expand for full content)"
-        lines.append(f"- [{source}] {text}")
-    return "\n".join(lines)
-
-
-async def _session_start_memory_block(turn_id: str, query: str) -> dict | None:
-    """Returns a system-role message with retrieved background, or None if
-    agent-brain isn't configured for this deployment or every retry attempt
-    failed (degrade gracefully, per module docstring's Failure Handling
-    note — never raises)."""
-    result = None
-    for attempt in range(1, _MEMORY_SEARCH_RETRY_ATTEMPTS + 1):
-        try:
-            result = await agent_brain.call_tool("memory_search", {"query": query, "limit": 10})
-            break
-        except agent_brain.AgentBrainNotConfiguredError:
-            return None
-        except Exception:  # noqa: BLE001 - real network/protocol failure, bounded retry then degrade
-            logger.warning("session-start memory_search failed (attempt %d/%d) for turn %s",
-                            attempt, _MEMORY_SEARCH_RETRY_ATTEMPTS, turn_id, exc_info=True)
-            if attempt == _MEMORY_SEARCH_RETRY_ATTEMPTS:
-                return None
-
-    results = result.get("results", [])
-    if not results:
-        return None
-    rendered = _render_memory_results(results)
-    return {
-        "role": "system",
-        "content": (
-            "The following is background from prior sessions, possibly stale — weigh it "
-            "against what this conversation has already established:\n" + rendered
-        ),
-    }
-
-
 @dataclass
 class RealModelResult:
     content: str
@@ -560,47 +486,61 @@ class RealModelResult:
 
 async def build_conversation(conn, turn_id: str, system_prompt: str) -> tuple[list[dict], int]:
     """Session-wide context assembly (docs/components/context-slot.md) —
-    delegates to lcm.assemble, which reads every top-level turn under this
-    turn's session, not just this one (the fix that doc's "Resolved: Scope"
-    section calls for — cross-turn session memory used to be a real gap,
-    now closed). This function's own remaining job is narrower: detect
-    session-start (still a turn_id-scoped question — "is this the first
-    ModelCall of the first top-level turn" — genuinely different from lcm's
-    assembly concern, so it stays here) and splice in the memory-slot
-    retrieval block lcm.assemble has no reason to know about.
+    delegates to lcm.assemble for the within-session conversation + summary
+    DAG, then splices in whatever the request pipeline's retrieval phase
+    (docs/components/request-pipeline/04-memory-retrieval.md) staged for this
+    turn in `turn_retrieval`.
 
-    Returns (conversation, context_tokens) — context_tokens is threaded
-    back through ModelCallOutput to the workflow for the compression-gate
-    check (turn.go can't accumulate this itself across separate
-    turn-workflow executions — see lcm.assemble's own docstring).
+    Runs every ModelCall. The staged rows don't change within a turn
+    (RoutingWorkflow ran once at turn start), so the background block is
+    present for every iteration — not just the first, as the old
+    `turn_seq==1` retrieval was.
+
+    Returns (conversation, context_tokens) — context_tokens is threaded back
+    through ModelCallOutput to the workflow for the compression-gate check
+    (turn.go can't accumulate this itself across separate turn-workflow
+    executions — see lcm.assemble's own docstring).
     """
-    turn_row = await conn.fetchrow("SELECT parent_type, turn_seq FROM turns WHERE turn_id = $1", turn_id)
     session_key = ids.session_key_of(turn_id)
-
     conversation, context_tokens = await lcm.assemble(conn, session_key, system_prompt)
 
-    if turn_row is not None and turn_row["parent_type"] == "session" and turn_row["turn_seq"] == 1:
-        session_messages = await conn.fetch(
-            "SELECT role, content FROM messages WHERE parent_id = $1 ORDER BY seq", turn_id
-        )
-        # docs/components/memory-slot.md, "Resolved: Two Retrieval Triggers"
-        # — session-start is unconditional, fires once, on this turn's first
-        # ModelCall only (only InsertMessage's own start-of-turn row exists
-        # yet, no assistant response). Deliberately a direct message-count
-        # check, not inferred from len(conversation) — lcm.assemble's output
-        # length isn't a reliable proxy (it could vary with future changes
-        # to what gets prepended, e.g. summary rows).
-        is_session_start = len(session_messages) == 1 and session_messages[0]["role"] == "user"
-        if is_session_start:
-            first_message = session_messages[0]
-            memory_block = await _session_start_memory_block(turn_id, first_message["content"])
-            if memory_block is not None:
-                # Placed right after the system prompt — before the summary
-                # DAG / verbatim window lcm.assemble already appended,
-                # matching memory-slot.md's "Resolved: Staleness" placement
-                # (retrieved background before live session content).
-                conversation.insert(1, memory_block)
-                context_tokens += lcm.estimate_tokens(memory_block["content"])
+    # Both blocks are request-pipeline retrieval output, staged in
+    # turn_retrieval by the routing phase and read fresh every ModelCall.
+    # Placed right after the system prompt — before the summary DAG / verbatim
+    # window lcm.assemble appended — matching memory-slot.md's "Resolved:
+    # Staleness Is Handled by Placement". The composed skill (a how-to for the
+    # task) goes first, then long-term memory (background context).
+    memory_rows = await conn.fetch(
+        "SELECT content FROM turn_retrieval WHERE turn_id = $1 AND kind = 'memory' ORDER BY seq",
+        turn_id,
+    )
+    if memory_rows:
+        block = {
+            "role": "system",
+            "content": (
+                "The following is background from prior sessions and long-term memory, "
+                "possibly stale — weigh it against what this conversation has already "
+                "established:\n" + "\n".join(f"- {row['content']}" for row in memory_rows)
+            ),
+        }
+        conversation.insert(1, block)
+        context_tokens += lcm.estimate_tokens(block["content"])
+
+    composed_row = await conn.fetchrow(
+        "SELECT content FROM turn_retrieval WHERE turn_id = $1 AND kind = 'composed' ORDER BY seq LIMIT 1",
+        turn_id,
+    )
+    if composed_row is not None and composed_row["content"].strip():
+        block = {
+            "role": "system",
+            "content": (
+                "Suggested procedure for this task, assembled from past successful runs — "
+                "follow it where it fits, adapt or ignore it where the situation differs:\n"
+                + composed_row["content"]
+            ),
+        }
+        conversation.insert(1, block)
+        context_tokens += lcm.estimate_tokens(block["content"])
 
     return conversation, context_tokens
 
