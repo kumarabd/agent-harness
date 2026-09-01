@@ -74,8 +74,29 @@ one-line wrapper (`{"results": await discover_tools(...)}`), unchanged in
 behavior. Both it and this phase call the same primitive. The model-initiated
 path stays.
 
+### Notes Log
+
+- 2026-09-01: **`discover_tools` hardened after a live failure.** A real
+  message (a pasted markdown process doc, full of `word:` and quotes) went
+  through as the `retrieval_query` verbatim — `ClassifyRequest` had degraded
+  to the raw message on a provider 503 — and blew up `shell_hub.search`'s
+  zvec FTS lane (`FTS query parse failed: field-prefixed queries are not
+  supported`). That exception propagated out of `discover_tools` and threw
+  away the mcp-hub results too, failing `ToolDiscover` on every retry. Two
+  fixes: (1) `shell_hub.search` now reduces the query to a lowercase
+  alphanumeric token bag (`_fts_safe`, capped at 32) for the FTS lane only —
+  the vector lane still gets the raw query, and FTS here is just an
+  RRF-fused keyword boost, not load-bearing; an empty result skips the FTS
+  `Query` entirely. (2) `discover_tools` isolates the two sources —
+  shell-hub failures are logged and skipped (deterministic, not worth a
+  retry, never worth losing mcp-hub over); mcp-hub failures still propagate
+  so `RoutingWorkflow`'s retry can recover a transient outage.
+
 ### Open Questions
 
 - Top-k value (`_TOP_K = 10`) — deferred, numeric-tuning discipline.
 - mcp-hub's result score field — `_score` probes `score` / `similarity` /
   `rrf_score` defensively; confirm the real shape.
+- Whether **mcp-hub's** own `search_tools` needs the same query scrubbing —
+  it didn't error in the live incident (it's a remote semantic-search
+  service, not local zvec), but unconfirmed for adversarial input.

@@ -270,6 +270,26 @@ async def init() -> None:
     logger.info("shell_hub: discovered and indexed %d command(s)", len(catalog))
 
 
+# zvec's FTS grammar (tantivy-style) reads `word:` as a field-prefixed query
+# and treats `+ - " ( ) [ ] ^ ~ * ? \ / AND OR NOT` as operators — a parse
+# failure there raises out of _collection.query and takes the whole search
+# with it. search() gets vague natural-language task descriptions, and when
+# ClassifyRequest degrades the query IS the raw user message (markdown,
+# colons, code), so the query is never trustworthy FTS input. Reduce it to a
+# bag of plain alphanumeric tokens for the FTS lane only — the vector lane
+# still gets the raw query (embeddings handle any text), and FTS here is just
+# a keyword-overlap boost fused via RRF, not the load-bearing signal.
+_FTS_MAX_TOKENS = 32
+
+
+def _fts_safe(query: str) -> str:
+    # lowercased so a stray "AND"/"OR"/"NOT" token isn't read as a boolean
+    # operator (tantivy only treats the uppercase forms as operators); FTS
+    # matching is case-insensitive anyway.
+    tokens = re.findall(r"[a-z0-9]+", (query or "").lower())
+    return " ".join(tokens[:_FTS_MAX_TOKENS])
+
+
 async def search(query: str, top_k: int = 5) -> list[dict]:
     """Shaped like mcp_hub.call_tool("search_tools", ...)'s own results
     ({server, tool, description, input_schema}) so tools.search_tools can
@@ -282,12 +302,13 @@ async def search(query: str, top_k: int = 5) -> list[dict]:
         return []
 
     query_vector = await asyncio.to_thread(_embedder.embed, query)
+    queries = [zvec.Query(field_name="embedding", vector=query_vector)]
+    fts_query = _fts_safe(query)
+    if fts_query:
+        queries.append(zvec.Query(field_name="description", fts=zvec.Fts(query_string=fts_query)))
     results = await asyncio.to_thread(
         _collection.query,
-        [
-            zvec.Query(field_name="embedding", vector=query_vector),
-            zvec.Query(field_name="description", fts=zvec.Fts(query_string=query)),
-        ],
+        queries,
         topk=top_k,
         reranker=zvec.RrfReRanker(rank_constant=60),  # matches agent-brain's own RRF rrfK=60
         output_fields=["name", "description"],

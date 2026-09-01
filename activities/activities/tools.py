@@ -43,6 +43,7 @@ result.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import signal
@@ -54,6 +55,8 @@ from temporalio import activity
 from temporalio.exceptions import CancelledError
 
 from . import agent_brain, claim_check, ids, lcm, leases, mcp_hub, shell_hub
+
+logger = logging.getLogger(__name__)
 
 _SESSION_ROOT_ENV = "SESSION_ROOT"
 # Local-dev fallback; real deployments set SESSION_ROOT to match the Helm
@@ -419,17 +422,30 @@ async def discover_tools(query: str, top_k: int = 5) -> list[dict]:
     mcp_hub_top_k = top_k - top_k // 2
     shell_hub_top_k = top_k // 2
 
+    # mcp-hub is the curated primary tier — a genuine failure there
+    # propagates so RoutingWorkflow's RetryPolicy can recover a transient
+    # outage, then records "error" (07-tool-discovery.md's stated posture).
+    # Only "not configured" degrades silently.
     try:
         raw = await mcp_hub.call_tool("search_tools", {"query": query, "top_k": mcp_hub_top_k})
+        # FastMCP (mcp-hub's own server framework) wraps a tool's non-object
+        # return value in {"result": ...} — MCP's structured_content must be a
+        # JSON object, and search_tools' real return is a bare list — confirmed
+        # by a real call against the live cluster, not assumed from the spec
+        # text alone.
+        mcp_hub_results = list(raw["result"] if isinstance(raw, dict) and "result" in raw else raw)
     except mcp_hub.McpHubNotConfiguredError:
-        raw = []
-    # FastMCP (mcp-hub's own server framework) wraps a tool's non-object
-    # return value in {"result": ...} — MCP's structured_content must be a
-    # JSON object, and search_tools' real return is a bare list — confirmed
-    # by a real call against the live cluster, not assumed from the spec
-    # text alone.
-    mcp_hub_results = raw["result"] if isinstance(raw, dict) and "result" in raw else raw
-    shell_hub_results = await shell_hub.search(query, shell_hub_top_k)
+        mcp_hub_results = []
+
+    # shell-hub is the supplementary local tier. Its failures are mostly
+    # deterministic (a zvec FTS parse error on a messy query) — not worth a
+    # retry, and never worth losing mcp-hub's results over — so log and skip.
+    try:
+        shell_hub_results = await shell_hub.search(query, shell_hub_top_k)
+    except Exception:  # noqa: BLE001 - best-effort supplementary source, never load-bearing
+        logger.warning("discover_tools: shell-hub search failed, continuing with mcp-hub results only", exc_info=True)
+        shell_hub_results = []
+
     return list(mcp_hub_results) + shell_hub_results
 
 

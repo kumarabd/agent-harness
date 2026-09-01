@@ -1,0 +1,7 @@
+{
+  "_comment": "Suite B / b2 — REAL provider. Run AFTER b1 (any session). A second design task with NO process doc handed in. If b1's learning worked, SkillDiscover now retrieves the learned:* procedure from b1 and ComposeSkill uses it — the agent applying a skill it taught itself. Run manually.",
+  "message": {
+    "role": "user",
+    "content": "I want to add a saved-views feature to the dashboard: users pick filters and column layout, name it, and it shows up in a dropdown to switch back to later. Help me design it — no code yet."
+  }
+}

@@ -81,6 +81,12 @@ That's the whole process — no other registration needed.
   and runs local worker binaries against a real model. Different purpose
   (full-stack validation with real cost) from this directory's free
   regression suite — see its own `README.md`.
+- **`superpowers-b/`** — an **eval flow** for the skill subsystem: no seeds,
+  the agent is taught a process ([superpowers](https://github.com/obra/superpowers)
+  brainstorming/writing-plans/…) by conversation and the RL loop turns those
+  runs into `learned:*` procedures it then reuses. Driven live (a human — or
+  the developer via the `starter` binary against a real web session key —
+  holds real multi-turn conversations), not scripted. See its `README.md`.
 - **`shell-exec-basic.json`, `shell-exec-parallel.json`,
   `multi-step-task.json`, `subagent-merge-happy.json`,
   `subagent-merge-conflict.json`** — each scripts a `shell_exec` call
