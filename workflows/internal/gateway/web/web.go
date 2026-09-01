@@ -36,6 +36,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("GET /poll", requireClerkAuth(h.clerk, http.HandlerFunc(h.handlePoll)))
 	mux.Handle("POST /respond", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleRespond)))
 	mux.Handle("GET /sessions", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleListSessions)))
+	mux.Handle("GET /skills", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleListSkills)))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
