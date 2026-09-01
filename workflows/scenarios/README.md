@@ -1,11 +1,23 @@
 # Scenarios — Regression Suite
 
-A growing suite of scripted, zero-cost Temporal scenarios, run against the
+A growing suite of scripted Temporal scenarios, run against the
 **already-deployed live cluster workers** (no local worker binaries, no
-scaling anything down, no real LLM API spend) — the thing to run after any
-change touching `ModelCall`, `turn.go`'s dispatch loop, tool_calls minting,
-or the `lcm/` package, instead of re-deriving verification from scratch
-every time.
+scaling anything down) — the thing to run after any change touching
+`ModelCall`, `turn.go`'s dispatch loop, tool_calls minting, the `lcm/`
+package, or the pre-LLM request pipeline, instead of re-deriving
+verification from scratch every time.
+
+> **Not zero-cost any more.** The scripted-fixture path replaces only the
+> reason-act loop's own model calls. Since the request pipeline landed
+> (`docs/components/request-pipeline.md`), `turn.go` runs steps 2–8 for
+> every turn regardless of fixtures — `ClassifyRequest` (fast tier),
+> `RoutingWorkflow` → `MemoryRetrieve` (agent-brain), `SkillDiscover`
+> (embeddings), `ToolDiscover` (mcp-hub), `ComposeSkill` (medium tier). So
+> each scenario turn now spends a few cents of real fast/medium-tier LLM +
+> a handful of backend calls. Cheap, but real — this is deliberate: those
+> steps are exactly what the newer scenarios verify. Step 9
+> (`prompt.assemble`) and the reason-act model calls themselves are still
+> the only fully-scripted parts.
 
 ## Running it
 
@@ -82,6 +94,54 @@ That's the whole process — no other registration needed.
   yourself until auto-approval support is added to this runner (see
   `run_all.sh`'s own comment for the exact `temporal workflow signal`
   invocation).
+
+## Coverage added 2026-09-01 — request pipeline steps 8 & 9
+
+In `run_all.sh` (standalone, real steps 2–8, scripted loop):
+
+- **`plan-progress-lifecycle.json`** — the `plan_progress` meta-tool
+  (`request-pipeline/08-planning.md`). `ModelCall` peels `plan_progress` out
+  of the scripted tool stream, `plan.apply_progress` writes `turn_plan`:
+  appends a new checkpoint for an unknown id + intent, updates status when
+  the id exists, handles `done` / (no status →) `pending` / `skipped`.
+  Asserts on the ids this fixture chose (`c1`/`c2`/`c3`) so it doesn't care
+  whether the real pipeline also seeded a `cp1..cpN` plan from a matched
+  skill (it usually does).
+- **`skill-plan-integration.json`** — the whole pre-LLM pipeline end to end
+  against the live deploy. A task matching the seeded `investigate-failure`
+  procedure → `SkillDiscover` stages `kind='skill'`, `ComposeSkill` stages
+  `kind='composed'` **and** seeds `turn_plan` (`cp1..cpN` from the merged
+  procedure), the scripted `plan_progress` calls advance those seeded
+  checkpoints, and `RecordSkillOutcome` writes a `skill_candidates` row. The
+  `skill_candidates` check reads the `classify` log line to distinguish "the
+  classifier said `simple`, correctly skipped" from a real bug.
+- **`subagent-full-agent.json`** — `request-pipeline/08-planning.md`,
+  "Subagents are full agents". A spawned subagent with a clearly-complex
+  task now runs its own `RoutingWorkflow` (`{sub}:routing` completes) and
+  gets its own `skill_candidates` row via `RecordSkillOutcome` — neither
+  happened for subagents before the `ParentType=='session'` gate came off.
+  Also checks `plan_progress` lands on a non-root turn_id.
+
+Run manually (not in `run_all.sh`):
+
+- **`reconcile-initial.json` / `reconcile-followup.json`** — a chained pair
+  (same shape as `interrupt-*`): run the second against the same session
+  while the first is parked on `slow_tool`. The mid-turn follow-up must
+  trigger a detached `RoutingWorkflow` in `Mode="reconcile"`
+  (`{turn}:reconcile:1`, Memory + Skill re-key only, no `Route()` gate, no
+  `turn_plan` re-seed). `reconcile-followup.expect.sh` checks that workflow
+  ran to completion.
+  ```
+  KEY="test:reconcile:$(date +%s)"
+  nohup workflows/scenarios/run_scenario.sh reconcile-initial "$KEY" >/tmp/ri.log 2>&1 & disown
+  sleep 6
+  workflows/scenarios/run_scenario.sh reconcile-followup "$KEY"
+  ```
+- **`real-llm-pipeline.json`** — spends real money. The only end-to-end
+  check of step 9 (`prompt.assemble`), which the scripted path skips
+  entirely. A real ModelCall gets the composed skill + plan progress +
+  capabilities + memory sections; the model's answer visibly follows the
+  composed procedure. `run_scenario.sh real-llm-pipeline`.
 
 ## Coverage added 2026-08-29
 

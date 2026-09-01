@@ -1,0 +1,44 @@
+{
+  "_comment": "End-to-end pre-LLM pipeline against the live deploy: a task message that should match the seeded 'investigate-failure' procedure. Steps 2-8 run for real (ClassifyRequest + RoutingWorkflow + SkillDiscover + ComposeSkill, all real activities/model calls); only the reason-act loop itself is scripted. Verifies SkillDiscover stages kind='skill' rows, ComposeSkill stages kind='composed' AND seeds turn_plan (cp1..cpN), the scripted plan_progress calls advance those seeded checkpoints, and RecordSkillOutcome writes a skill_candidates row at turn end.",
+  "message": {
+    "role": "user",
+    "content": "Debug why the nightly integration build has failed for three consecutive days across the api, worker, and scheduler services. Reproduce it, find the shared root cause, implement the fix, and add a regression test so it can't recur."
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Pulling the recent build logs to reproduce the failure.",
+      "tool_calls": [
+        { "name": "search", "is_subagent": false, "arguments": { "query": "nightly integration build failure logs api worker" } },
+        { "name": "plan_progress", "is_subagent": false, "arguments": { "updates": [
+          { "checkpoint_id": "cp1", "status": "done" }
+        ] } }
+      ],
+      "usage": { "input_tokens": 120, "output_tokens": 30 }
+    },
+    {
+      "content": "Reading the failing code path shared by both services.",
+      "tool_calls": [
+        { "name": "search", "is_subagent": false, "arguments": { "query": "shared test fixture api worker integration" } },
+        { "name": "plan_progress", "is_subagent": false, "arguments": { "updates": [
+          { "checkpoint_id": "cp2", "status": "done" }
+        ] } }
+      ],
+      "usage": { "input_tokens": 130, "output_tokens": 30 }
+    },
+    {
+      "content": "Confirming the hypothesis with a targeted check.",
+      "tool_calls": [
+        { "name": "search", "is_subagent": false, "arguments": { "query": "flaky shared fixture race condition" } },
+        { "name": "plan_progress", "is_subagent": false, "arguments": { "updates": [
+          { "checkpoint_id": "cp3", "status": "revised", "note": "root cause is a shared flaky test fixture, not the build config" }
+        ] } }
+      ],
+      "usage": { "input_tokens": 130, "output_tokens": 30 }
+    },
+    {
+      "content": "Root cause: a shared integration test fixture has a race that surfaces under CI load, failing both services non-deterministically. Fix: make the fixture set-up idempotent and scope it per-test.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 150, "output_tokens": 60 }
+    }
+  ]
+}

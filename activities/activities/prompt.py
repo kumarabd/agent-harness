@@ -100,6 +100,15 @@ async def assemble(
         conversation.insert(1, {"role": "system", "content": s.text})
         context_tokens += s.tokens
 
+    if sections:
+        logger.info(
+            "prompt.assemble[%s]: %d enrichment section(s) [%s], %d ctx tokens (budget %s)",
+            turn_id,
+            len(sections),
+            ", ".join(f"{s.name}:{s.tokens}" for s in sections),
+            context_tokens,
+            budget if budget is not None else "none",
+        )
     return conversation, context_tokens
 
 

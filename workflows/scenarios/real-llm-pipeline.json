@@ -1,0 +1,7 @@
+{
+  "_comment": "REAL-LLM (spends money) — the only way to exercise step 9 (prompt.assemble), which is skipped entirely on the scripted-fixture path. No scripted_model_responses => every ModelCall hits the real provider. A task that matches the 'investigate-failure' seed, phrased to be answerable in prose without tools, so it's one real call. Verifies the composed skill + plan progress + capabilities hint + memory sections all assemble into a real prompt and the model responds. Run manually: run_scenario.sh real-llm-pipeline",
+  "message": {
+    "role": "user",
+    "content": "Walk me through, step by step, how you would investigate a flaky integration test that fails roughly one run in five. Explain your approach in prose — do not run any tools, just describe what you'd do and why."
+  }
+}

@@ -83,6 +83,9 @@ SCENARIOS=(
   lcm-retrieval
   lcm-grep-nested-fold
   anthropic-basic
+  plan-progress-lifecycle
+  skill-plan-integration
+  subagent-full-agent
 )
 
 PASSED=()
