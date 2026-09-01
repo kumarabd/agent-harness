@@ -616,21 +616,23 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	// (docs/components/request-pipeline/02-request-understanding.md). A cheap
 	// fast-tier analysis of the inbound message — intent + complexity routing
 	// scalars, plus a distilled retrieval query and named entities for the
-	// step-4/5/7 retrieval subsystems — dispatched once per top-level turn
-	// before the reason-act loop. Best-effort: the activity itself degrades to
-	// a neutral representation on any failure, and an infrastructure-level
+	// step-4/5/7 retrieval subsystems. Best-effort: the activity itself degrades
+	// to a neutral representation on any failure, and an infrastructure-level
 	// failure of the dispatch is logged and ignored — this is a pipeline
 	// enhancement, never load-bearing, so it must not fail or block the turn.
-	// Subagents skip it: their task is defined by the parent's spawn, not a
-	// user message.
+	// Runs for subagents too (request-pipeline/08-planning.md, "Subagents are
+	// full agents"): the spawn prompt is written as the turn's seed user message
+	// by InsertMessage, exactly what ClassifyRequest reads, and a subagent
+	// handed a complex sub-task deserves its own skill discovery and plan. A
+	// subagent handed a trivial one classifies simple and fast-paths.
 	var taskRep types.TaskRepresentation
-	if input.ParentType == "session" {
+	{
 		cao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 		cactx := workflow.WithActivityOptions(ctx, cao)
 		if err := workflow.ExecuteActivity(cactx, "ClassifyRequest", types.ClassifyRequestInput{TurnID: input.TurnID}).Get(cactx, &taskRep); err != nil {
 			logger.Error("ClassifyRequest failed, proceeding without task representation", "turn_id", input.TurnID, "error", err)
 		} else {
-			logger.Info("request classified", "turn_id", input.TurnID, "intent", taskRep.Intent, "complexity", taskRep.Complexity, "confidence", taskRep.Confidence, "retrieval_query", taskRep.RetrievalQuery)
+			logger.Info("request classified", "turn_id", input.TurnID, "parent_type", input.ParentType, "intent", taskRep.Intent, "complexity", taskRep.Complexity, "confidence", taskRep.Confidence, "retrieval_query", taskRep.RetrievalQuery)
 		}
 	}
 
@@ -642,10 +644,15 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	// mid-routing cancels routing and the turn proceeds un-enriched — see
 	// startRouting. Best-effort like step 2. Held for the pipeline steps that
 	// consume it (planner, prompt assembly).
-	var routing RoutingResult
-	if input.ParentType == "session" {
-		routing = startRouting(ctx, input.TurnID, taskRep, &pendingMessages)
+	//
+	// For a subagent, parentTurnID is passed through so RoutingWorkflow inherits
+	// the parent's staged kind='memory' rows instead of re-querying agent-brain
+	// (skill + tool discovery still run fresh — the sub-task differs).
+	parentTurnID := ""
+	if input.ParentType == "turn" {
+		parentTurnID = input.ParentID
 	}
+	routing := startRouting(ctx, input.TurnID, parentTurnID, taskRep, &pendingMessages)
 	_ = routing
 
 	var stopReason string
@@ -922,6 +929,28 @@ loop:
 			if err := workflow.ExecuteActivity(iactx, "InsertMessage", insertInput).Get(iactx, nil); err != nil {
 				return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
 			}
+
+			// --- request-pipeline/08-planning.md, "Reconciliation trigger":
+			// a mid-turn follow-up is a course correction. Re-run retrieval
+			// (memory + skills only, re-keyed on the follow-up, replacing the
+			// stale bundle; ComposeSkill regenerates the composed block but not
+			// the plan ledger). Detached (ABANDON) and best-effort — the next
+			// ModelCall picks up whatever landed by the time it assembles
+			// context; there's no benefit to blocking the correction on it.
+			// Skipped when routing never enriched this turn (fast path).
+			if !routing.Plan.FastPath {
+				rcwo := workflow.ChildWorkflowOptions{
+					WorkflowID:        input.TurnID + ":reconcile:" + strconv.Itoa(iterations),
+					ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
+				}
+				rcctx := workflow.WithChildOptions(ctx, rcwo)
+				rf := workflow.ExecuteChildWorkflow(rcctx, RoutingWorkflow, RoutingWorkflowInput{
+					TurnID: input.TurnID,
+					Task:   taskRep,
+					Mode:   "reconcile",
+				})
+				_ = rf.GetChildWorkflowExecution().Get(ctx, nil) // wait for start only
+			}
 			continue loop
 		}
 
@@ -979,11 +1008,14 @@ loop:
 
 	// --- Skill subsystem phase 2 (docs/components/skill-subsystem.md,
 	// "Recording"). Detached child (ABANDON), same reasoning as
-	// WriteMemoryWorkflow. Only top-level task turns of moderate/complex
-	// complexity — a trivial task has no procedure worth learning, and a
-	// subagent's work enters via its parent's transcript if at all. A
-	// classification failure (empty taskRep) also skips it.
-	if input.ParentType == "session" && taskRep.Intent == "task" &&
+	// WriteMemoryWorkflow. Any task turn — top-level or subagent — of
+	// moderate/complex complexity: a trivial task has no procedure worth
+	// learning, but a subagent's task is self-contained by construction and is
+	// prime procedural material (request-pipeline/08-planning.md). A
+	// classification failure (empty taskRep) still skips it. Subagent
+	// procedures join the same-session co-occurrence graph — session_key_of
+	// resolves a subagent turn_id to its session (ids.py).
+	if (input.ParentType == "session" || input.ParentType == "turn") && taskRep.Intent == "task" &&
 		(taskRep.Complexity == "moderate" || taskRep.Complexity == "complex") {
 		rcwo := workflow.ChildWorkflowOptions{
 			WorkflowID:        input.TurnID + ":record-skill",

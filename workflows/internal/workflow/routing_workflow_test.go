@@ -82,6 +82,88 @@ func TestRoutingWorkflow_SubsystemError(t *testing.T) {
 	require.Equal(t, "ok", result.Tools.Status)
 }
 
+func TestRoutingWorkflow_SubagentInheritsParentMemory(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+
+	var gotMemInput types.MemoryRetrieveInput
+	env.RegisterActivityWithOptions(
+		func(_ context.Context, in types.MemoryRetrieveInput) (types.SubsystemResult, error) {
+			gotMemInput = in
+			return types.SubsystemResult{Status: "ok", Count: 2}, nil
+		},
+		activity.RegisterOptions{Name: "MemoryRetrieve"},
+	)
+	mockSubsystem[types.ToolDiscoverInput](env, "ToolDiscover", types.SubsystemResult{Status: "empty"}, nil)
+	mockSubsystem[types.SkillDiscoverInput](env, "SkillDiscover", types.SubsystemResult{Status: "empty"}, nil)
+
+	env.ExecuteWorkflow(RoutingWorkflow, RoutingWorkflowInput{
+		TurnID:       "s:turn:1:sub:1",
+		Task:         types.TaskRepresentation{Intent: "task", Complexity: "moderate", Confidence: 0.9},
+		ParentTurnID: "s:turn:1",
+	})
+
+	require.NoError(t, env.GetWorkflowError())
+	// The subagent's routing passes the parent turn id through to MemoryRetrieve,
+	// which copies the parent's staged rows rather than re-querying agent-brain.
+	require.Equal(t, "s:turn:1", gotMemInput.ParentTurnID)
+}
+
+func TestRoutingWorkflow_ReconcileMode(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+
+	var memIn types.MemoryRetrieveInput
+	var skillIn types.SkillDiscoverInput
+	var composeIn types.ComposeSkillInput
+	toolsCalled := false
+	env.RegisterActivityWithOptions(
+		func(_ context.Context, in types.MemoryRetrieveInput) (types.SubsystemResult, error) {
+			memIn = in
+			return types.SubsystemResult{Status: "ok", Count: 1}, nil
+		},
+		activity.RegisterOptions{Name: "MemoryRetrieve"},
+	)
+	env.RegisterActivityWithOptions(
+		func(_ context.Context, in types.SkillDiscoverInput) (types.SubsystemResult, error) {
+			skillIn = in
+			return types.SubsystemResult{Status: "ok", Count: 2}, nil
+		},
+		activity.RegisterOptions{Name: "SkillDiscover"},
+	)
+	env.RegisterActivityWithOptions(
+		func(_ context.Context, _ types.ToolDiscoverInput) (types.SubsystemResult, error) {
+			toolsCalled = true
+			return types.SubsystemResult{Status: "ok", Count: 1}, nil
+		},
+		activity.RegisterOptions{Name: "ToolDiscover"},
+	)
+	env.RegisterActivityWithOptions(
+		func(_ context.Context, in types.ComposeSkillInput) (types.SubsystemResult, error) {
+			composeIn = in
+			return types.SubsystemResult{Status: "ok", Count: 1}, nil
+		},
+		activity.RegisterOptions{Name: "ComposeSkill"},
+	)
+
+	// A conversational task would normally fast-path; reconcile mode ignores that.
+	env.ExecuteWorkflow(RoutingWorkflow, RoutingWorkflowInput{
+		TurnID: "s:turn:1",
+		Task:   types.TaskRepresentation{Intent: "conversational", Complexity: "trivial", Confidence: 0.95},
+		Mode:   "reconcile",
+	})
+
+	require.NoError(t, env.GetWorkflowError())
+	var result RoutingResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.False(t, result.Plan.FastPath)
+	require.False(t, toolsCalled, "reconcile mode skips tool discovery")
+	require.True(t, memIn.Reconcile)
+	require.True(t, skillIn.Reconcile)
+	require.True(t, composeIn.Reconcile)
+	require.True(t, result.ComposedSkill)
+}
+
 func TestRoutingWorkflow_ComposeRunsWhenSkillsFound(t *testing.T) {
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()

@@ -18,7 +18,7 @@ import logging
 
 from temporalio import activity
 
-from .. import ids
+from .. import ids, plan
 from ..types import RecordSkillOutcomeInput
 from . import embedding, store
 
@@ -54,6 +54,7 @@ class RecordSkillOutcomeActivity:
                 "SELECT metadata FROM turn_retrieval WHERE turn_id = $1 AND kind = 'skill'",
                 input.turn_id,
             )
+            checkpoints = await plan.read(conn, input.turn_id)
 
         user_messages = [m for m in messages if m["role"] == "user"]
         task_text = (user_messages[0]["content"] or "").strip() if user_messages else ""
@@ -78,6 +79,14 @@ class RecordSkillOutcomeActivity:
                 composed_from.append(meta["procedure_id"])
 
         transcript = _build_transcript(messages, tool_calls)
+        # The plan ledger's final state, prepended — the checkpoints in their
+        # final order (with revised/skipped/added steps marked) ARE the
+        # effective procedure the run followed; synthesis (generalize.py) reads
+        # it as the structured skeleton alongside the raw trajectory
+        # (request-pipeline/08-planning.md, "Feeds synthesis").
+        plan_final = plan.render_final(checkpoints)
+        if plan_final:
+            transcript = plan_final + "\n\n" + transcript
         task_embedding = await embedding.embed(task_text)
 
         try:

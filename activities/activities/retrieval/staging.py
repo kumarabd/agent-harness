@@ -41,6 +41,24 @@ async def write_rows(pool, turn_id: str, rows: list[RetrievalRow]) -> int:
     return len(rows)
 
 
+async def replace_rows(pool, turn_id: str, kind: str, rows: list[RetrievalRow]) -> int:
+    """Atomically swap ALL rows of one kind for a turn — delete then re-write in
+    a single transaction. Used by the reconciliation pass (request-pipeline/
+    08-planning.md): re-keyed retrieval replaces the stale bundle rather than
+    appending to it, so the rendered block stays bounded across repeated
+    corrections. Returns the number of rows written."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM turn_retrieval WHERE turn_id = $1 AND kind = $2", turn_id, kind)
+            if rows:
+                await conn.executemany(
+                    "INSERT INTO turn_retrieval (turn_id, kind, seq, content, score, metadata) "
+                    "VALUES ($1, $2, $3, $4, $5, $6)",
+                    [(turn_id, r.kind, r.seq, r.content, r.score, json.dumps(r.metadata)) for r in rows],
+                )
+    return len(rows)
+
+
 async def read_rows(pool, turn_id: str, kinds: tuple[str, ...]) -> list[RetrievalRow]:
     """Read staged rows for a turn, ordered by (kind, seq)."""
     records = await pool.fetch(

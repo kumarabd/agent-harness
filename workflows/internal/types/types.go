@@ -150,6 +150,17 @@ type TaskRepresentation struct {
 type MemoryRetrieveInput struct {
 	TurnID         string `json:"turn_id"`
 	RetrievalQuery string `json:"retrieval_query"`
+	// ParentTurnID is set only for a subagent turn (request-pipeline/
+	// 08-planning.md, "Subagents are full agents"). When present, MemoryRetrieve
+	// copies the parent's staged kind='memory' rows into this turn's
+	// turn_retrieval instead of re-querying agent-brain — memory is about the
+	// user's world, stable across a turn tree, and the parent's front-loaded
+	// snapshot is a consistent point-in-time capture.
+	ParentTurnID string `json:"parent_turn_id,omitempty"`
+	// Reconcile (request-pipeline/08-planning.md, "Reconciliation trigger") —
+	// when true the activity re-keys on the turn's latest user message (the
+	// correction that triggered this pass) and replaces its staged rows.
+	Reconcile bool `json:"reconcile,omitempty"`
 }
 
 // ToolDiscoverInput is ToolDiscover's input
@@ -165,6 +176,8 @@ type ToolDiscoverInput struct {
 type SkillDiscoverInput struct {
 	TurnID         string `json:"turn_id"`
 	RetrievalQuery string `json:"retrieval_query"`
+	// See MemoryRetrieveInput.Reconcile.
+	Reconcile bool `json:"reconcile,omitempty"`
 }
 
 // ComposeSkillInput is ComposeSkill's input
@@ -172,6 +185,9 @@ type SkillDiscoverInput struct {
 // reads the staged memory/tool/skill rows from turn_retrieval by turn_id.
 type ComposeSkillInput struct {
 	TurnID string `json:"turn_id"`
+	// request-pipeline/08-planning.md — a reconcile-mode compose regenerates the
+	// kind='composed' block but does not re-seed turn_plan.
+	Reconcile bool `json:"reconcile,omitempty"`
 }
 
 // RecordSkillOutcomeInput is RecordSkillOutcome's input

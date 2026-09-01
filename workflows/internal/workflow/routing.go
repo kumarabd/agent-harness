@@ -57,9 +57,20 @@ func Route(task types.TaskRepresentation) RoutingPlan {
 
 // RoutingWorkflowInput is RoutingWorkflow's input — a turn_id plus step 2's
 // task representation (small derived routing metadata, not content).
+// ParentTurnID is set only for a subagent turn (request-pipeline/
+// 08-planning.md): its memory is inherited from the parent's snapshot rather
+// than retrieved fresh.
+//
+// Mode == "reconcile" (request-pipeline/08-planning.md, "Reconciliation
+// trigger") is a lighter re-run dispatched mid-turn when the user corrects
+// course: memory + skill discovery only (no tools, no Route() gate), re-keyed
+// on the correction inside the activities, replacing the stale bundle;
+// ComposeSkill regenerates the composed block but leaves turn_plan alone.
 type RoutingWorkflowInput struct {
-	TurnID string                   `json:"turn_id"`
-	Task   types.TaskRepresentation `json:"task"`
+	TurnID       string                   `json:"turn_id"`
+	Task         types.TaskRepresentation `json:"task"`
+	ParentTurnID string                   `json:"parent_turn_id,omitempty"`
+	Mode         string                   `json:"mode,omitempty"` // "" | "reconcile"
 }
 
 // RoutingResult is RoutingWorkflow's output — the plan it chose plus a
@@ -82,7 +93,15 @@ type RoutingResult struct {
 // the turn proceeds with whatever enrichment landed.
 func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingResult, error) {
 	logger := workflow.GetLogger(ctx)
+
+	reconcile := input.Mode == "reconcile"
+	// Reconcile mode skips the Route() gate entirely: the user has already
+	// corrected course, so memory + skills are always worth re-keying. Tools
+	// are not — the available capability set didn't change.
 	plan := Route(input.Task)
+	if reconcile {
+		plan = RoutingPlan{Memory: true, Skills: true}
+	}
 
 	result := RoutingResult{
 		Plan:   plan,
@@ -115,6 +134,8 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 		f := workflow.ExecuteActivity(actx, "MemoryRetrieve", types.MemoryRetrieveInput{
 			TurnID:         input.TurnID,
 			RetrievalQuery: input.Task.RetrievalQuery,
+			ParentTurnID:   input.ParentTurnID,
+			Reconcile:      reconcile,
 		})
 		subsystems = append(subsystems, pendingSubsystem{f, &result.Memory})
 	}
@@ -130,6 +151,7 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 		f := workflow.ExecuteActivity(actx, "SkillDiscover", types.SkillDiscoverInput{
 			TurnID:         input.TurnID,
 			RetrievalQuery: input.Task.RetrievalQuery,
+			Reconcile:      reconcile,
 		})
 		subsystems = append(subsystems, pendingSubsystem{f, &result.Skills})
 	}
@@ -198,7 +220,7 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
 		})
 		var cr types.SubsystemResult
-		if err := workflow.ExecuteActivity(cctx, "ComposeSkill", types.ComposeSkillInput{TurnID: input.TurnID}).Get(cctx, &cr); err != nil {
+		if err := workflow.ExecuteActivity(cctx, "ComposeSkill", types.ComposeSkillInput{TurnID: input.TurnID, Reconcile: reconcile}).Get(cctx, &cr); err != nil {
 			logger.Warn("routing: ComposeSkill failed", "turn_id", input.TurnID, "error", err)
 		} else {
 			result.ComposedSkill = cr.Status == "ok" && cr.Count > 0
@@ -215,7 +237,7 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 // and the turn proceeds un-enriched rather than making them wait for
 // enrichment they've already superseded. Returns the RoutingResult (zero
 // value if routing failed or was interrupted — always safe to read).
-func startRouting(ctx workflow.Context, turnID string, task types.TaskRepresentation, pendingMessages *[]types.SignalPayload) RoutingResult {
+func startRouting(ctx workflow.Context, turnID, parentTurnID string, task types.TaskRepresentation, pendingMessages *[]types.SignalPayload) RoutingResult {
 	logger := workflow.GetLogger(ctx)
 
 	routingCtx, cancelRouting := workflow.WithCancel(ctx)
@@ -224,8 +246,9 @@ func startRouting(ctx workflow.Context, turnID string, task types.TaskRepresenta
 		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
 	}
 	future := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(routingCtx, cwo), RoutingWorkflow, RoutingWorkflowInput{
-		TurnID: turnID,
-		Task:   task,
+		TurnID:       turnID,
+		Task:         task,
+		ParentTurnID: parentTurnID,
 	})
 
 	_ = workflow.Await(ctx, func() bool {

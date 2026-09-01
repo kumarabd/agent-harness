@@ -87,10 +87,20 @@ class MemoryRetrieveInput:
     """MemoryRetrieve's input — docs/components/request-pipeline/
     04-memory-retrieval.md. retrieval_query is the distilled query from step
     2's TaskRepresentation, a small derived signal passed straight in by
-    RoutingWorkflow (not read from Postgres)."""
+    RoutingWorkflow (not read from Postgres).
+
+    parent_turn_id is set only for a subagent turn (request-pipeline/
+    08-planning.md, "Subagents are full agents"): when present, the activity
+    copies the parent's staged kind='memory' rows into this turn's
+    turn_retrieval instead of calling agent-brain."""
 
     turn_id: str = ""
     retrieval_query: str = ""
+    parent_turn_id: str = ""
+    # request-pipeline/08-planning.md, "Reconciliation trigger" — when true the
+    # activity re-keys on the turn's latest user message (the correction) and
+    # replaces its staged rows rather than appending.
+    reconcile: bool = False
 
 
 @dataclass
@@ -110,6 +120,8 @@ class SkillDiscoverInput:
 
     turn_id: str = ""
     retrieval_query: str = ""
+    # See MemoryRetrieveInput.reconcile.
+    reconcile: bool = False
 
 
 @dataclass
@@ -119,6 +131,11 @@ class ComposeSkillInput:
     turn_retrieval by turn_id itself."""
 
     turn_id: str = ""
+    # request-pipeline/08-planning.md — a reconcile-mode compose regenerates the
+    # kind='composed' block but does NOT re-seed turn_plan (the model has been
+    # tracking checkpoints; blindly overwriting intents/positions mid-turn would
+    # desync its plan_progress reports).
+    reconcile: bool = False
 
 
 @dataclass

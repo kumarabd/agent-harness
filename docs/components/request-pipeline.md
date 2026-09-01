@@ -1,10 +1,11 @@
 # Component: Request Pipeline
 
-> STATUS: IN PROGRESS — the pre-LLM stages that turn a raw inbound message into
-> an assembled, task-scoped model prompt. **Step 2 is implemented**; steps 3–7
-> are designed (per-phase docs under `request-pipeline/`) but not built; steps
-> 8–9 are reserved slots only. Steps 1, 10, 11 already exist under other
-> components.
+> STATUS: **All 9 pre-LLM phases (2–9) are built.** (2–4, 7 implemented; 5–6 =
+> the skill subsystem, phases 1–5; 8 = the living plan ledger +
+> subagents-as-full-agents + reconciliation trigger; 9 = prompt assembly's
+> section model + budget arbitration.) Steps 1, 10, 11 already exist under
+> other components. Every phase is additive and degrades cleanly to today's
+> behavior with its inputs absent — see "Degradation is layered" below.
 >
 > This file is the index and the cross-cutting contract. Each phase has its own
 > doc:
@@ -15,6 +16,8 @@
 > - [`06-skill-composition.md`](request-pipeline/06-skill-composition.md) — pipeline contract; design in `skill-subsystem.md`
 > - [`../skill-subsystem.md`](skill-subsystem.md) — **"The Skill Graph"**, the full design for steps 5 & 6
 > - [`07-tool-discovery.md`](request-pipeline/07-tool-discovery.md)
+> - [`08-planning.md`](request-pipeline/08-planning.md) — **built**; the living checkpoint ledger + subagents-as-full-agents + reconciliation trigger
+> - [`09-prompt-assembly.md`](request-pipeline/09-prompt-assembly.md) — **built**; the section model + budget arbitration
 
 ### Role (one line)
 
@@ -60,13 +63,15 @@ behavior when its inputs are absent.**
      RoutingResult  → staged bundle + per-subsystem status
             │
             ▼
-         PLANNER                      8. Planning (reserved)
-            │
+      PLAN LEDGER                     8. Planning — compose emits a checkpoint
+            │                            ledger; the loop tracks + revises it
             ▼
-      PROMPT ASSEMBLY                 9. Multi-source prompt composition (reserved)
-            │
+      PROMPT ASSEMBLY                 9. prompt.assemble — ordered sections,
+            │                            budget-shed capabilities/memory first
             ▼
            LLM                        10. Model execution (turn.go loop)
+            │                             — reports plan_progress each step;
+            │                               a correction/failure re-fires retrieval
             │
      ┌──────┴──────┐
      ▼             ▼
@@ -87,8 +92,8 @@ behavior when its inputs are absent.**
 | 5 | Skill discovery | `05` + `skill-subsystem.md` | **built** (phases 1–5: flat-cosine + full scoring incl. recency → `kind='skill'`; cluster hierarchy deferred) |
 | 6 | Skill composition | `06` + `skill-subsystem.md` | **built** (merge → `kind='composed'` → into the prompt) |
 | 7 | Tool discovery | `07-tool-discovery.md` | **implemented** (`ToolDiscover` → `discover_tools`, stages `kind='tool'`) |
-| 8 | Planning | — | reserved slot |
-| 9 | Prompt assembly | — | reserved slot (`llm.build_conversation` today) |
+| 8 | Planning | `08-planning.md` | **built** — `turn_plan` ledger (migration `017`) seeded by `ComposeSkill`, `plan_progress` meta-tool applied in `ModelCall`, progress block in `build_conversation`, final state → synthesis. Subagents run steps 2–3 + skill recording. Mid-turn follow-up → detached `RoutingWorkflow` `Mode="reconcile"`. Failure-run reconciliation + DAG deferred. |
+| 9 | Prompt assembly | `09-prompt-assembly.md` | **built** — `prompt.py`'s section model (composed skill, plan progress, capabilities hint, memory, in that order) + budget arbitration (sheds capabilities then memory). `llm.build_conversation` now a thin call-through. |
 | 10 | Model execution | `components/temporal-workflow.md` | done |
 | 11 | Memory write-back | `components/memory-slot.md` | partial |
 
@@ -132,18 +137,75 @@ for any misroute or missing backend is the current, un-enriched harness.
 
 ### Open Questions / To Design
 
-- **Steps 8 (planning) and 9 (prompt assembly)** — not designed. Planning may
-  stay implicit in the reason-act loop; assembly formalizes
-  `llm.build_conversation` into a multi-source composer.
 - **A pre-step-2 non-LLM filter** for obviously trivial messages ("hi",
   "thanks") — would save even the `ClassifyRequest` call. The deferred Tier-1
   trigger shared with `context-slot.md` / `memory-slot.md`.
 - **Whether steps 2–9 eventually collapse into one `PrepareTurnWorkflow`** —
-  deferred; build the phases as peers first, see how planning and assembly want
-  to compose.
+  deferred; all nine phases now exist as peers (2–3 as workflow/orchestration,
+  4–9 as activities dispatched from `RoutingWorkflow` or `ModelCall`) with no
+  friction observed yet that a merge would fix.
 
 ### Notes Log
 
+- 2026-09-01: **Step 9 built — `09-prompt-assembly.md`. All 9 pre-LLM phases
+  now built.** New `activities/activities/prompt.py`: `assemble(conn, turn_id,
+  system_prompt, context_window)` — explicit section model (composed skill,
+  plan progress — never shed; capabilities hint, memory — shed in that order
+  under budget pressure), replacing the ad-hoc stack of
+  `conversation.insert(1, ...)` calls. **New capabilities section** renders
+  staged `kind='tool'` rows as a plain hint block (`- server/tool — desc`) —
+  closes the gap `07-tool-discovery.md` flagged (`ToolDiscover`'s output never
+  reached the prompt except via a composed skill's tool_ref bindings; a
+  `question` turn or a skill-less `task` got tool discovery for nothing).
+  Budget: `ENRICHMENT_BUDGET_FRACTION=0.25` of `context_window`; `0`
+  (unresolved tier / fixture path) means no shedding. `llm.build_conversation`
+  is now a thin call-through kept as `model_call.py`'s stable call site.
+  `model_call.py`: moved model-tier resolution (`model_config`/
+  `context_window`) before the `build_conversation` call — small,
+  behavior-preserving reorder so assembly can see the budget. No Go changes —
+  runs entirely inside `ModelCall`. Verified via a monkeypatched end-to-end
+  smoke test (section order; shedding under a tiny `context_window`); no
+  Python test infra exists in this repo.
+- 2026-08-31: **Step 8 built.** (a) *Subagent gate fix* — `turn.go` runs steps
+  2 + 3 and `RecordSkillOutcome` for `ParentType == "turn"`; `MemoryRetrieve`
+  gained `parent_turn_id` → copies the parent's staged `kind='memory'` rows
+  (`_inherit`) instead of calling agent-brain; `RoutingWorkflowInput.ParentTurnID`
+  threads it. (b) *Plan ledger* — `turn_plan` table (migration `017`, mirrored),
+  `activities/activities/plan.py` (`seed` / `apply_progress` / `read` /
+  `render_block` / `render_final` / `split_progress_calls`), `plan_progress`
+  meta-tool in `llm.TOOLS_SCHEMA`. `ModelCall` peels `plan_progress` out of the
+  tool stream (like the providers strip `declare_next_step_hint`) and applies it
+  to `turn_plan` in its own transaction — no new activity, no `turn.go` change.
+  `ComposeSkill`'s merge call now returns `{procedure, checkpoints}` and seeds
+  the ledger (degrades to the top procedure's `body` steps). `build_conversation`
+  renders the progress block after the composed-skill block. `RecordSkillOutcome`
+  prepends `render_final` to the synthesis transcript. (c) *Reconciliation
+  trigger* — `turn.go`'s follow-up branch dispatches a detached (`ABANDON`)
+  `RoutingWorkflow` with `Mode="reconcile"`: skips `Route()` + `ToolDiscover`,
+  `MemoryRetrieve`/`SkillDiscover` get `Reconcile:true` → re-key on
+  `"{retrieval_query} / {latest user msg}"` (read in-activity via
+  `retrieval/reconcile.py`, no content crosses the workflow), `replace_rows`
+  swaps the stale bundle, `ComposeSkill` (`Reconcile:true`) regenerates the
+  composed block but not `turn_plan`. `staging.replace_rows` added. Failure-run
+  half of the trigger deferred (no clean query).
+- 2026-08-31: **Step 8 (planning) designed — `08-planning.md`.** Resolved via a
+  brainstorm. Rejected a standalone `Plan` activity (latency + tokens on every
+  complex turn; re-formats compose's work) and recursive decompose-to-leaves
+  (decomposes on assumptions, plan inertia). Landed on a **living checkpoint
+  ledger**: `ComposeSkill` emits an ordered `{intent, done_when, status}` list
+  (no skill → no ledger → loop as today), the loop carries a progress block and
+  the model reports advancement via a `plan_progress` tool call, corrections /
+  failure-runs revise it, and the final state is structured input to skill
+  synthesis (this is the artifact `skill-subsystem.md`'s reward model means by
+  "whatever the planner produced"). Sequential only — DAG/parallelism deferred.
+  New table `turn_plan` (migration `017`, mutable, unlike write-once
+  `turn_retrieval`). **Related:** subagents become full agents — steps 2 + 3 run
+  for `ParentType == "turn"` too (a subagent classifies its own task, fast-paths
+  if trivial, gets its own skill/tool discovery, inherits the parent's memory
+  snapshot); `RecordSkillOutcome` extends to moderate/complex subagent turns.
+  **Also:** a mid-turn correction or failure-run re-invokes `RoutingWorkflow` in
+  a light "reconcile" mode (skill + memory only) and merges the results into
+  `turn_retrieval` — the only routing work that happens inside the loop.
 - 2026-08-30: **Introduced; step 2 implemented; steps 3–7 designed.** Split into
   per-phase docs under `request-pipeline/`. The 11-step framing comes from a
   design conversation working through how to give the harness procedural

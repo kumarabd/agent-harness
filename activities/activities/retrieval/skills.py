@@ -24,7 +24,8 @@ from ..skills import embedding
 from ..skills import select as skill_select
 from ..skills import store
 from ..types import SkillDiscoverInput, SubsystemResult
-from .staging import RetrievalRow, write_rows
+from .reconcile import reconcile_query
+from .staging import RetrievalRow, replace_rows, write_rows
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,8 @@ class SkillDiscoverActivity:
     @activity.defn(name="SkillDiscover")
     async def __call__(self, input: SkillDiscoverInput) -> SubsystemResult:
         query = input.retrieval_query.strip()
+        if input.reconcile:
+            query = await reconcile_query(self._pool, input.turn_id, query)
         if not query:
             return SubsystemResult(status="empty", count=0)
 
@@ -99,7 +102,10 @@ class SkillDiscoverActivity:
             )
             for i, s in enumerate(chosen)
         ]
-        written = await write_rows(self._pool, input.turn_id, rows)
+        if input.reconcile:
+            written = await replace_rows(self._pool, input.turn_id, "skill", rows)
+        else:
+            written = await write_rows(self._pool, input.turn_id, rows)
         logger.info(
             "SkillDiscover[%s]: staged %d skill row(s): %s",
             input.turn_id,

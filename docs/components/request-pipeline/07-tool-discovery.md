@@ -56,13 +56,14 @@ capability.
 
 - **Skill composition (step 6)** — resolves the skeleton's *abstract* tool
   references ("a git-hosting tool", "a metrics-query tool") to concrete
-  `{server, tool}` pairs against this list. This is why `ComposeSkill` waits for
+  `{server, tool}` pairs against this list, and the checkpoint ledger it emits
+  (step 8) inherits those bindings. This is why `ComposeSkill` waits for
   `ToolDiscover` to settle.
-- **Planner (step 8)** — builds concrete steps against real, available tools.
-- **Prompt assembly (step 9)** — may narrow the tool schema handed to the first
-  `ModelCall` to the discovered set plus the always-on tools (open — narrowing
-  risks hiding a tool the model would have known to ask for; likely keep the
-  full schema and just surface the discovered subset as a hint).
+- **Prompt assembly (step 9)** — resolved: kept the full tool schema, and
+  surfaces the discovered subset as a plain hint block (a "capabilities"
+  section, `09-prompt-assembly.md`) rather than narrowing what the model can
+  call. Narrowing was rejected — it risks hiding a tool the model would have
+  known to ask for.
 
 ### Relationship to `tool-registry.md`
 
@@ -75,7 +76,6 @@ path stays.
 
 ### Open Questions
 
-- Whether step 9 narrows the first-call tool schema (above).
 - Top-k value (`_TOP_K = 10`) — deferred, numeric-tuning discipline.
 - mcp-hub's result score field — `_score` probes `score` / `similarity` /
   `rrf_score` defensively; confirm the real shape.

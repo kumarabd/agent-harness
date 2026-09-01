@@ -27,7 +27,7 @@ import time
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from . import ids, llm, llm_client, model_registry, permissions
+from . import ids, llm, llm_client, model_registry, permissions, plan
 from .types import ModelCallInput, ModelCallOutput, ToolCallRef, Usage
 
 logger = logging.getLogger(__name__)
@@ -108,21 +108,6 @@ class ModelCallActivity:
                 context_window = 0
                 next_hint_modality, next_hint_tier = model_registry.default_hint()
             else:
-                session_row = await conn.fetchrow(
-                    "SELECT system_prompt, platform FROM sessions WHERE session_key = $1",
-                    ids.session_key_of(input.turn_id),
-                )
-                system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
-                platform = session_row["platform"] if session_row else None
-                conversation, context_tokens = await llm.build_conversation(conn, input.turn_id, system_prompt)
-
-                # docs/components/context-slot.md's Memory-Access Tools —
-                # lcm_expand's schema-level subagent-only restriction needs
-                # to know which kind of turn this is; caller_is_subagent
-                # (computed once, above, shared with the fixture path and
-                # the recursion-termination guard) already answers that.
-                tools_schema = llm.tools_schema_for(caller_is_subagent)
-
                 # docs/components/model-registry.md, "Resolved: Selection
                 # Mechanism" + "Resolved: Escalate-on-Retry" — the previous
                 # step's hint picks the tier; a Temporal-driven retry of this
@@ -138,6 +123,11 @@ class ModelCallActivity:
                 # Empty/unknown complexity (subagents, a step-2 fallback) still
                 # lands on the medium default. Only consulted when hint_tier is
                 # empty, so later steps' self-declared hints always win.
+                #
+                # Resolved BEFORE build_conversation (moved 2026-09-01,
+                # request-pipeline/09-prompt-assembly.md) so its context_window
+                # can bound how much of it prompt assembly's enrichment sections
+                # may consume before shedding.
                 hint_modality = input.hint_modality or model_registry.default_hint()[0]
                 hint_tier = (
                     input.hint_tier
@@ -149,6 +139,23 @@ class ModelCallActivity:
                     hint_tier = model_registry.escalate(hint_tier)
                 model_config = model_registry.resolve(hint_modality, hint_tier)
                 context_window = model_config.context_window
+
+                session_row = await conn.fetchrow(
+                    "SELECT system_prompt, platform FROM sessions WHERE session_key = $1",
+                    ids.session_key_of(input.turn_id),
+                )
+                system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
+                platform = session_row["platform"] if session_row else None
+                conversation, context_tokens = await llm.build_conversation(
+                    conn, input.turn_id, system_prompt, context_window
+                )
+
+                # docs/components/context-slot.md's Memory-Access Tools —
+                # lcm_expand's schema-level subagent-only restriction needs
+                # to know which kind of turn this is; caller_is_subagent
+                # (computed once, above, shared with the fixture path and
+                # the recursion-termination guard) already answers that.
+                tools_schema = llm.tools_schema_for(caller_is_subagent)
 
                 # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
                 # real provider round-trip time only; the fixture path above isn't
@@ -194,12 +201,36 @@ class ModelCallActivity:
                 content, raw_tool_calls, usage = real.content, real.raw_tool_calls, real.usage
                 next_hint_modality, next_hint_tier = real.next_hint_modality, real.next_hint_tier
 
+            # docs/components/request-pipeline/08-planning.md — peel the
+            # plan_progress meta-tool out of the response the same way the
+            # providers already strip declare_next_step_hint: it carries no work
+            # of its own, never becomes a tool_calls row, and doesn't count
+            # toward has_tool_calls. A plan_progress-only response therefore ends
+            # the turn ("no_tool_calls") after recording the progress — the
+            # model marking a final checkpoint done and stopping. Applied in its
+            # own transaction, before the message/tool_calls write below, so a
+            # plan-bookkeeping failure can't poison that write.
+            plan_updates, raw_tool_calls = plan.split_progress_calls(raw_tool_calls)
+            if plan_updates:
+                try:
+                    async with conn.transaction():
+                        applied = await plan.apply_progress(conn, input.turn_id, plan_updates)
+                    logger.info(
+                        "ModelCall[%s:%d]: applied %d/%d plan update(s)",
+                        input.turn_id, input.context_seq, applied, len(plan_updates),
+                    )
+                except Exception:  # noqa: BLE001 - best-effort; never fail the call over plan bookkeeping
+                    logger.warning(
+                        "ModelCall[%s:%d]: plan_progress apply failed", input.turn_id, input.context_seq, exc_info=True
+                    )
+
             logger.info(
-                "ModelCall[%s:%d] -> %r (tool_calls=%d)",
+                "ModelCall[%s:%d] -> %r (tool_calls=%d, plan_updates=%d)",
                 input.turn_id,
                 input.context_seq,
                 content[:60],
                 len(raw_tool_calls),
+                len(plan_updates),
             )
 
             async with conn.transaction():

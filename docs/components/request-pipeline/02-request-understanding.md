@@ -72,9 +72,7 @@ the query as activity input, not a Postgres read.)
   maps `trivial`/`simple` → `fast`, `moderate` → `medium`, `complex` → `expert`;
   `ModelCallInput.complexity` is threaded from `turn.go`, and `model_call.py`
   uses it for the turn's first call when `hint_tier` is empty (empty/unknown →
-  the `medium` default; later steps' self-declared hints always win). Original
-  note: `complexity` could replace the hardcoded `medium`
-  for the first `ModelCall`. Deferred to step 9.
+  the `medium` default; later steps' self-declared hints always win).
 
 ### Notes Log
 

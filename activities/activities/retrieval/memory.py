@@ -24,7 +24,8 @@ from temporalio import activity
 
 from .. import agent_brain, lcm
 from ..types import MemoryRetrieveInput, SubsystemResult
-from .staging import RetrievalRow, write_rows
+from .reconcile import reconcile_query
+from .staging import RetrievalRow, read_rows, replace_rows, write_rows
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,12 @@ class MemoryRetrieveActivity:
 
     @activity.defn(name="MemoryRetrieve")
     async def __call__(self, input: MemoryRetrieveInput) -> SubsystemResult:
+        if input.parent_turn_id and not input.reconcile:
+            return await self._inherit(input.turn_id, input.parent_turn_id)
+
         query = input.retrieval_query.strip()
+        if input.reconcile:
+            query = await reconcile_query(self._pool, input.turn_id, query)
         if not query:
             logger.info("MemoryRetrieve[%s]: empty query — nothing to retrieve", input.turn_id)
             return SubsystemResult(status="empty", count=0)
@@ -128,8 +134,44 @@ class MemoryRetrieveActivity:
         rows = _select(response.get("results", []) or [])
         if not rows:
             logger.info("MemoryRetrieve[%s]: no usable results for query=%r", input.turn_id, query)
+            # Reconcile with no hits leaves the original rows in place — an empty
+            # result is likelier a noisier query than a signal the old context
+            # went stale.
             return SubsystemResult(status="empty", count=0)
 
-        written = await write_rows(self._pool, input.turn_id, rows)
-        logger.info("MemoryRetrieve[%s]: staged %d memory rows (query=%r)", input.turn_id, written, query)
+        if input.reconcile:
+            written = await replace_rows(self._pool, input.turn_id, "memory", rows)
+        else:
+            written = await write_rows(self._pool, input.turn_id, rows)
+        logger.info(
+            "MemoryRetrieve[%s]: staged %d memory rows (query=%r, reconcile=%s)",
+            input.turn_id, written, query, input.reconcile,
+        )
+        return SubsystemResult(status="ok", count=written)
+
+    async def _inherit(self, turn_id: str, parent_turn_id: str) -> SubsystemResult:
+        """Subagent path (request-pipeline/08-planning.md): copy the parent's
+        already-staged kind='memory' rows rather than re-query agent-brain.
+        Memory is about the user's world — stable across a turn tree — and the
+        parent's front-loaded snapshot is a consistent point-in-time capture."""
+        parent_rows = await read_rows(self._pool, parent_turn_id, ("memory",))
+        if not parent_rows:
+            logger.info(
+                "MemoryRetrieve[%s]: parent %s staged no memory — nothing to inherit",
+                turn_id,
+                parent_turn_id,
+            )
+            return SubsystemResult(status="empty", count=0)
+        # re-seq defensively; read_rows already orders by (kind, seq)
+        rows = [
+            RetrievalRow(kind="memory", seq=i, content=r.content, score=r.score, metadata=r.metadata)
+            for i, r in enumerate(parent_rows)
+        ]
+        written = await write_rows(self._pool, turn_id, rows)
+        logger.info(
+            "MemoryRetrieve[%s]: inherited %d memory rows from parent %s",
+            turn_id,
+            written,
+            parent_turn_id,
+        )
         return SubsystemResult(status="ok", count=written)

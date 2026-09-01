@@ -2,8 +2,8 @@
 
 This module owns the provider-NEUTRAL side of the LLM call: the tools
 schema every provider advertises, the default system prompt, the
-`build_conversation` context-assembly helper (session-start memory
-retrieval + LCM assembly), and the RealModelResult return shape. The
+`build_conversation` call-through (full assembly now lives in `prompt.py`
+— request-pipeline step 9), and the RealModelResult return shape. The
 actual per-provider request/response translation lives in
 activities/activities/providers/ (Provider ABC — OpenAI-compatible
 covers real OpenAI, DeepSeek, Qwen/DashScope, Groq, OpenRouter, Crusoe,
@@ -15,13 +15,14 @@ what used to be a `raise RuntimeError("no real model provider configured")`.
 
 `messages` only stores plain role/content rows — there's no OpenAI-shaped
 representation of an assistant's prior tool_calls or their results anywhere
-in the schema. build_conversation reconstructs a valid OpenAI conversation
-from the existing tables (messages + tool_calls) with no new columns: an
-assistant message that minted tool calls gets its `tool_calls` array
-rebuilt from the tool_calls rows keyed by message_id, each immediately
-followed by a `role: "tool"` message carrying that call's result, matched by
-tool_call_id (tool_calls.tool_call_id is reused verbatim as OpenAI's
-tool_call_id — any string works, no second ID scheme needed).
+in the schema. `lcm.assembly.assemble` (reached via `prompt.assemble`)
+reconstructs a valid OpenAI conversation from the existing tables (messages +
+tool_calls) with no new columns: an assistant message that minted tool calls
+gets its `tool_calls` array rebuilt from the tool_calls rows keyed by
+message_id, each immediately followed by a `role: "tool"` message carrying
+that call's result, matched by tool_call_id (tool_calls.tool_call_id is
+reused verbatim as OpenAI's tool_call_id — any string works, no second ID
+scheme needed).
 
 TOOLS_SCHEMA now also includes `memory_search`/`memory_expand`
 (docs/components/memory-slot.md) and `search_tools`/`call_tool`
@@ -34,23 +35,21 @@ LLM-schema metadata yet — a generic schema-registry abstraction for exactly
 five tools would be premature; add future real tools here by hand alongside
 their TOOL_REGISTRY entry in tools.py.
 
-**Cross-session memory** is no longer retrieved here. It's the request
-pipeline's step 4 (docs/components/request-pipeline/04-memory-retrieval.md):
-`RoutingWorkflow` dispatches the `MemoryRetrieve` activity once per top-level
-turn, which calls agent-brain's `memory_search`, filters/budgets the fused
-results, and stages them to `turn_retrieval` as `kind='memory'`.
-build_conversation just reads those staged rows every ModelCall and splices
-them into a labeled system-role block *before* the live conversation
-(docs/components/memory-slot.md's "Resolved: Staleness Is Handled by
-Placement"). The old `turn_seq==1` in-process retrieval + its bespoke retry
-loop are gone.
+**Prompt assembly** — request pipeline step 9
+(docs/components/request-pipeline/09-prompt-assembly.md), `prompt.py` — owns
+the whole ordered, budget-bounded conversation: `lcm.assemble`'s summary
+DAG + verbatim window, then the composed skill (step 6), the plan ledger
+(step 8), discovered tools (step 7), and long-term memory (step 4), each
+staged by the request pipeline's retrieval phase and read fresh every
+ModelCall. `build_conversation` here is kept only as model_call.py's stable
+call site.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import ids, lcm
+from . import prompt
 from .types import Usage
 
 # docs/components/model-registry.md, "Resolved: Selection Mechanism" — not a
@@ -381,6 +380,55 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            # docs/components/request-pipeline/08-planning.md — the living
+            # checkpoint ledger. A meta-tool like declare_next_step_hint: it
+            # rides the response's existing round-trip, carries no work of its
+            # own, and ModelCall peels it out of the tool stream to apply
+            # against turn_plan rather than minting a tool_calls row for it.
+            # Offered on every turn; it's a no-op the model omits when no plan
+            # is shown or nothing changed.
+            "name": "plan_progress",
+            "description": (
+                "When a plan is shown in your context, call this alongside your response whenever a "
+                "checkpoint's state changes: mark it \"done\" once its 'done when' condition is met, "
+                "\"skipped\" if you're deliberately bypassing it, or \"revised\" (with a note) if the "
+                "task diverged from what that step assumed. You may also add a step the plan is "
+                "missing by giving a new checkpoint_id together with an intent. Omit this tool "
+                "entirely on steps where no checkpoint changed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "updates": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "checkpoint_id": {
+                                    "type": "string",
+                                    "description": "The cp id shown in the plan block (e.g. \"cp2\"), or a new id to add a missing step.",
+                                },
+                                "status": {"type": "string", "enum": ["done", "skipped", "revised"]},
+                                "note": {
+                                    "type": "string",
+                                    "description": "Why the step was revised or skipped, or what a correction changed.",
+                                },
+                                "intent": {
+                                    "type": "string",
+                                    "description": "Only when adding a step the plan is missing: what the new step accomplishes.",
+                                },
+                            },
+                            "required": ["checkpoint_id"],
+                        },
+                    },
+                },
+                "required": ["updates"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": _NEXT_STEP_HINT_TOOL_NAME,
             # docs/components/model-registry.md, "Resolved: Selection
             # Mechanism" — included alongside whatever other tool_calls a
@@ -484,65 +532,17 @@ class RealModelResult:
     next_hint_tier: str = "medium"
 
 
-async def build_conversation(conn, turn_id: str, system_prompt: str) -> tuple[list[dict], int]:
-    """Session-wide context assembly (docs/components/context-slot.md) —
-    delegates to lcm.assemble for the within-session conversation + summary
-    DAG, then splices in whatever the request pipeline's retrieval phase
-    (docs/components/request-pipeline/04-memory-retrieval.md) staged for this
-    turn in `turn_retrieval`.
-
-    Runs every ModelCall. The staged rows don't change within a turn
-    (RoutingWorkflow ran once at turn start), so the background block is
-    present for every iteration — not just the first, as the old
-    `turn_seq==1` retrieval was.
-
-    Returns (conversation, context_tokens) — context_tokens is threaded back
-    through ModelCallOutput to the workflow for the compression-gate check
-    (turn.go can't accumulate this itself across separate turn-workflow
-    executions — see lcm.assemble's own docstring).
+async def build_conversation(
+    conn, turn_id: str, system_prompt: str, context_window: int = 0
+) -> tuple[list[dict], int]:
+    """Thin call-through to `prompt.assemble` — request pipeline step 9
+    (docs/components/request-pipeline/09-prompt-assembly.md) owns the section
+    model, ordering, and budget arbitration; this stays the stable call site
+    model_call.py already uses. `context_window` (0 if unknown, e.g. the
+    fixture path) bounds how much of it enrichment may consume before
+    `prompt.assemble` starts shedding sections.
     """
-    session_key = ids.session_key_of(turn_id)
-    conversation, context_tokens = await lcm.assemble(conn, session_key, system_prompt)
-
-    # Both blocks are request-pipeline retrieval output, staged in
-    # turn_retrieval by the routing phase and read fresh every ModelCall.
-    # Placed right after the system prompt — before the summary DAG / verbatim
-    # window lcm.assemble appended — matching memory-slot.md's "Resolved:
-    # Staleness Is Handled by Placement". The composed skill (a how-to for the
-    # task) goes first, then long-term memory (background context).
-    memory_rows = await conn.fetch(
-        "SELECT content FROM turn_retrieval WHERE turn_id = $1 AND kind = 'memory' ORDER BY seq",
-        turn_id,
-    )
-    if memory_rows:
-        block = {
-            "role": "system",
-            "content": (
-                "The following is background from prior sessions and long-term memory, "
-                "possibly stale — weigh it against what this conversation has already "
-                "established:\n" + "\n".join(f"- {row['content']}" for row in memory_rows)
-            ),
-        }
-        conversation.insert(1, block)
-        context_tokens += lcm.estimate_tokens(block["content"])
-
-    composed_row = await conn.fetchrow(
-        "SELECT content FROM turn_retrieval WHERE turn_id = $1 AND kind = 'composed' ORDER BY seq LIMIT 1",
-        turn_id,
-    )
-    if composed_row is not None and composed_row["content"].strip():
-        block = {
-            "role": "system",
-            "content": (
-                "Suggested procedure for this task, assembled from past successful runs — "
-                "follow it where it fits, adapt or ignore it where the situation differs:\n"
-                + composed_row["content"]
-            ),
-        }
-        conversation.insert(1, block)
-        context_tokens += lcm.estimate_tokens(block["content"])
-
-    return conversation, context_tokens
+    return await prompt.assemble(conn, turn_id, system_prompt, context_window)
 
 
 # call_model / call_model_streaming moved to
