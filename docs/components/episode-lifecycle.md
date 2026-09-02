@@ -8,6 +8,20 @@
 > retrieval re-keyed on `episode_id`. Compile + `go test` clean; live
 > verification via `workflows/scenarios/superpowers-b/`.
 >
+> **Pre-existing bug found during live verification (2026-09-01):** the Session
+> Coordinator's idle-exit check (`coordinator.go`) fired on *every* turn
+> completion, not only on the idle timer — so a coordinator terminated the
+> instant each turn ended (with no queued follow-up) and was recreated by the
+> next message. Harmless before episodes (no per-session state was lost);
+> fatal for them, because `CloseSessionEpisodes` on that exit closed every
+> episode before a follow-up turn could attach. Fixed: a `wasIdle` guard so
+> the exit only triggers when the coordinator was genuinely idle-waiting —
+> giving a real post-turn grace window (`idleTTL`), which is what episode
+> attachment needs. The three scripted scenarios (`skill-plan-integration`,
+> `plan-progress-lifecycle`, `subagent-full-agent`) pass against the deploy;
+> the multi-turn attachment path is covered by the `episode-multiturn-*`
+> chained pair.
+>
 > **Deviation from this doc as first written:** the tables were NOT renamed
 > (`turn_retrieval` / `turn_plan` keep their names) — only the key column
 > `turn_id` → `episode_id`, to keep the blast radius across code and docs

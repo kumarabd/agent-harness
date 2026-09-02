@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 # adds a stale composed block the model can ignore. Numeric-tuning-deferred.
 _CONT_FLOOR = 0.55
 _RECORD_COMPLEXITIES = {"moderate", "complex"}
+# Ordered weakest → strongest, for "upgrading" an episode's classification when
+# a continuation turn is more actionable than the anchor was.
+_INTENT_RANK = {"conversational": 0, "meta": 1, "question": 2, "task": 3}
+_COMPLEXITY_RANK = {"trivial": 0, "simple": 1, "moderate": 2, "complex": 3}
 
 
 async def anchor_text(conn, turn_id: str) -> str:
@@ -115,6 +119,7 @@ async def open_or_attach(conn, turn_id: str, task, anchor_embedding) -> OpenEpis
     if open_ep is not None:
         if _should_continue(task, open_ep["task_embedding"], anchor_embedding):
             await conn.execute("UPDATE turns SET episode_id = $2 WHERE turn_id = $1", turn_id, open_ep["episode_id"])
+            await _upgrade_classification(conn, open_ep["episode_id"], task)
             logger.info("episode: turn %s ATTACHED to open episode %s", turn_id, open_ep["episode_id"])
             return OpenEpisodeResult(episode_id=open_ep["episode_id"], attached=True, superseded_episode_id="")
         await _close(conn, open_ep["episode_id"], "superseded", "superseded")
@@ -125,6 +130,28 @@ async def open_or_attach(conn, turn_id: str, task, anchor_embedding) -> OpenEpis
     await _insert(conn, turn_id, session_key, task, anchor_embedding)
     logger.info("episode: turn %s OPENED new episode (superseded=%r)", turn_id, superseded)
     return OpenEpisodeResult(episode_id=turn_id, attached=False, superseded_episode_id=superseded)
+
+
+async def _upgrade_classification(conn, episode_id: str, task) -> None:
+    """A continuation turn can be more actionable than the anchor was
+    ("...and now implement it" following "let's talk through the approach").
+    Bump the episode's intent/complexity to the stronger of the two so the
+    recording gate (and synthesis) see it as the task it became."""
+    row = await conn.fetchrow("SELECT intent, complexity FROM episodes WHERE episode_id = $1", episode_id)
+    if row is None:
+        return
+    new_intent = row["intent"]
+    if _INTENT_RANK.get(task.intent, 0) > _INTENT_RANK.get(row["intent"], 0):
+        new_intent = task.intent
+    new_complexity = row["complexity"]
+    if _COMPLEXITY_RANK.get(task.complexity, 0) > _COMPLEXITY_RANK.get(row["complexity"], 0):
+        new_complexity = task.complexity
+    if new_intent != row["intent"] or new_complexity != row["complexity"]:
+        await conn.execute(
+            "UPDATE episodes SET intent = $2, complexity = $3 WHERE episode_id = $1",
+            episode_id, new_intent, new_complexity,
+        )
+        logger.info("episode: %s classification upgraded to intent=%s complexity=%s", episode_id, new_intent, new_complexity)
 
 
 async def complete_if_plan_done(conn, episode_id: str, stop_reason: str) -> bool:

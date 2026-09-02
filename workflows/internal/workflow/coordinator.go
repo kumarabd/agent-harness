@@ -88,6 +88,13 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 	haveSignal := false
 
 	for {
+		// Were we actually idle-waiting on entry to this iteration? Only then
+		// can the idle timer be what wakes us — a turn completing (which also
+		// clears turnActive, below) must NOT be mistaken for an idle timeout,
+		// or the coordinator exits the instant every turn ends and no episode
+		// (docs/components/episode-lifecycle.md) ever survives to a follow-up
+		// turn. Before episodes this was a harmless early exit + recreate.
+		wasIdle := !turnActive
 		idleTimerCtx, cancelIdleTimer := workflow.WithCancel(ctx)
 		idleTimer := workflow.NewTimer(idleTimerCtx, idleTTL)
 
@@ -132,11 +139,14 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 		sel.Select(ctx)
 		cancelIdleTimer()
 
-		if !turnActive && !haveSignal {
-			// Only the idle timer could have fired for us to get here with no
-			// signal and no active turn — self-terminate per the resolved TTL
+		if wasIdle && !turnActive && !haveSignal {
+			// The idle timer fired while we were genuinely idle (no turn just
+			// completed into this branch) — self-terminate per the resolved TTL
 			// design (components/session-coordinator.md). A fresh
-			// SignalWithStart recreates this workflow on demand.
+			// SignalWithStart recreates this workflow on demand. A turn
+			// finishing instead falls through to the `!haveSignal` continue
+			// below, which loops back and arms a fresh idle timer — so there IS
+			// a real post-turn grace window now, which episode attachment needs.
 			logger.Info("coordinator idle timeout, exiting", "session_key", input.SessionKey)
 
 			// docs/components/memory-slot.md's "Resolved: Write-Path
