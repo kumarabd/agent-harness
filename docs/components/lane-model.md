@@ -1,14 +1,35 @@
 # Component: Lane Model
 
-> STATUS: BUILT (2026-09-01), not yet redeployed. `routing.go`
+> STATUS: BUILT + DEPLOYED + VERIFIED (2026-09-01). `routing.go`
 > (`laneIsDeliberate` + reworked `Route()`), `turn.go` (`OpenEpisode` is now the
 > single lane decision point — always called for a non-conversational turn,
 > returns `episode_id == ""` for a Lite turn), `episode.py` /
 > `OpenEpisodeInput.want_new_episode`, `record.py` gate widened to
 > `{task, question}`. `routing_test.go` covers the new table + `laneIsDeliberate`.
 > Scenario messages retuned (`plan-progress-lifecycle`, `episode-upgrade-initial`
-> to clearly-Deliberate; `episode-supersede-followup` now tests a Lite supersede).
+> to clearly-Deliberate; `episode-supersede-followup` classifier-agnostic).
 > Compile + `go test` clean.
+>
+> **Live status (2026-09-01, redeployed):** Deliberate lane fully verified —
+> `skill-plan-integration`, `plan-progress-lifecycle`, `subagent-full-agent`,
+> `episode-plan-complete`, `episode-multiturn`, `episode-supersede` all pass.
+> **Fully verified live 2026-09-01** (after the fast tier was moved off the
+> thinking model `nvidia/Nemotron-3.5-Lightning` — whose default reasoning
+> starved `classify.py`'s 400-token cap and forced every turn to Deliberate —
+> to plain instruct models: fast `google/gemma-4-31b-it`, medium
+> `Qwen/Qwen3-235B-A22B-Instruct-2507`, expert `deepseek-ai/DeepSeek-V4-Pro`,
+> `deploy/helm/tenants/abishekk.yaml`, `helm upgrade` only):
+> - **Lite**: `question/trivial` → no episode, `Route()` = memory-only
+>   (`tools skipped skills skipped`), no plan, no candidate, fast tier.
+> - **Deliberate**: `skill-plan-integration`, `plan-progress-lifecycle`,
+>   `subagent-full-agent`, `episode-plan-complete` all pass.
+> - **`episode-multiturn`**: `task/complex` then `task/moderate` follow-up →
+>   attach → one episode, one candidate spanning both turns.
+> - **`episode-supersede`**: `task/complex` then unrelated `task/simple` →
+>   the simple task closes the abandoned episode (recorded `outcome=failure`)
+>   and takes the Lite lane itself (`is Lite, no episode` in the log).
+> - **`episode-upgrade`**: `question/complex` then `task/moderate` follow-up →
+>   attach + `classification upgraded to intent=task` → episode records.
 >
 > Names the two request lanes and gives the lightweight one (**Lite**) the same
 > first-class definition the heavyweight one (**Deliberate**) already has via
@@ -81,9 +102,10 @@ for `question` and `task`.
 Deliberate is exactly three cells — `(task, moderate)`, `(task, complex)`,
 `(question, complex)` — plus one override:
 
-- **`confidence < 0.5`** (the step-2 neutral fallback) → **Deliberate**
-  regardless of cell, so a misclassified real task is never under-provisioned.
-  Same conservative posture `Route()` already takes.
+- **`confidence < 0.5`** (the classifier's own self-reported uncertainty —
+  step 2 has no "wasn't classified" state; a failed classify fails the turn)
+  → **Deliberate** regardless of cell, so a shakily-classified real task is
+  never under-provisioned. Same conservative posture `Route()` already takes.
 
 Within Lite, `Route()` still chooses how much memory: **nothing** for
 `conversational` (the current `FastPath`), **memory** for everything else.

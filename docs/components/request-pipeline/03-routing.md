@@ -37,11 +37,11 @@ type RoutingPlan struct {
 
 **Router-owned activation, conservative.** The router decides the set; each
 subsystem keeps only a cheap *internal* guard ("backend unconfigured", "empty
-query") — "I can't run", not policy. A **low-confidence or fallback**
-classification (`Confidence < 0.5`, which includes the `Confidence == 0` step-2
-neutral fallback) takes the full path so nothing downstream is
-under-provisioned. Promote to per-subsystem `ShouldActivate(task)` predicates
-only when step 2 carries richer inputs.
+query") — "I can't run", not policy. A **low-confidence** classification
+(`Confidence < 0.5` — the model's own self-reported uncertainty; step 2 has no
+"wasn't classified" state, a failed classify fails the turn) takes the full
+path so nothing downstream is under-provisioned. Promote to per-subsystem
+`ShouldActivate(task)` predicates only when step 2 carries richer inputs.
 
 > **Being reworked by [`../lane-model.md`](../lane-model.md) (DESIGN, 2026-09-01):**
 > the rule table below collapses into two lanes — **Lite** (memory only, or
@@ -153,14 +153,23 @@ The activity returns `ok` / `empty` / `error`; `RoutingWorkflow` assigns
 exactly what it's working with — `{memory: ok, tools: error, skills: empty}`,
 never a silent gap.
 
-### Two degradation layers
+### What's tolerated, what fails
 
-1. **Subsystem-level** — an activity returns `empty` or `error`; the phase
-   continues with the others.
-2. **Phase-level** — `RoutingWorkflow` failing, or the interrupt race firing →
-   `startRouting` returns the zero-value `RoutingResult`, `turn.go` logs it, and
-   the turn proceeds un-enriched (= today's behavior). Same posture as
-   `ClassifyRequest`.
+1. **Fan-out subsystem miss — tolerated.** MemoryRetrieve / ToolDiscover /
+   SkillDiscover return `empty` or `error`, or miss the phase deadline
+   (`timed_out`). Recorded in `RoutingResult`, never a silent gap, and the
+   phase continues with whatever landed — these are genuinely additive
+   enrichment and a slow backend must not stall the turn.
+2. **Interrupt race — tolerated.** A follow-up message arrives mid-routing →
+   routing is cancelled, `startRouting` returns a nil error, the turn proceeds
+   against the superseding message. A deliberate supersede, not a failure.
+3. **ComposeSkill failure — fails the turn.** ComposeSkill has no fallback
+   render (see [`06-skill-composition.md`](06-skill-composition.md)). A failure
+   propagates out of `RoutingWorkflow`; `startRouting` returns the error;
+   `turn.go` fails the turn. A half-composed skill that silently isn't
+   composed is worse than a visible failure. (A *reconcile*-mode compose is
+   detached — its failure records a failed child execution and leaves the
+   episode's prior composed row in place.)
 
 ### Reference-passing — two categories
 

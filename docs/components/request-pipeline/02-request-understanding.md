@@ -19,7 +19,7 @@ representation for the phases that follow.
 |---|---|---|
 | `intent` | routing | `conversational` \| `question` \| `task` \| `meta` |
 | `complexity` | routing, bootstrap tier | `trivial` \| `simple` \| `moderate` \| `complex` |
-| `confidence` | routing | 0.0–1.0; `0.0` marks a fallback / un-classified turn |
+| `confidence` | routing | 0.0–1.0; the model's own self-report. A low value routes to the safer Deliberate lane. Not a "wasn't classified" sentinel — there is no such state (a failed classify fails the turn) |
 | `retrieval_query` | steps 4 / 5 / 7 | a distilled search query — rephrased, follow-up references resolved, not the raw message |
 | `entities` | step 7 | named systems / tools / files / people; `[]` if none |
 
@@ -48,19 +48,28 @@ the query as activity input, not a Postgres read.)
 
 - **Top-level turns only.** A subagent's task is defined by its parent's spawn —
   `turn.go` guards on `ParentType == "session"`.
-- **Best-effort, never load-bearing.** Unconfigured `fast` tier / failed call /
-  unparseable output all degrade to `_neutral(user_message)` (`intent=task`,
-  `complexity=moderate`, `retrieval_query` = the raw message). Dispatch-level
-  failure is logged and ignored in `turn.go`.
+- **Load-bearing, no fallback.** Every lane / episode / retrieval decision
+  reads this representation, so there is no neutral/degraded stand-in.
+  Unconfigured `fast` tier, provider error, failed call, or output that
+  violates the contract all raise `ClassificationError` — Temporal retries the
+  bounded ladder, and an exhausted retry fails the turn in `turn.go`
+  (`turns.status='failed'`, the user gets an error, the failure is recorded).
+  Routing every request as `(task, moderate)` because the classifier is down
+  is exactly the invisible degradation this pipeline refuses to do — a broken
+  classifier is a bug to fix at the source, surfaced by failing turns.
 - **Recent context.** The classifier is given a short tail of the prior
   conversation (last few messages) so `retrieval_query` can resolve follow-ups
   ("yes, do that" → the actual task). Read from Postgres inside the activity;
   not the other axes, just enough for a good query.
 - **Tenant-worker.** Needs per-tenant `LANGUAGE_FAST_*`, the Python provider
   stack, and tenant Postgres for the seed message + recent context.
-- **Tolerant parsing.** Bare-JSON-object output; the parser strips fences,
-  extracts the first object, and coerces every field against a closed
-  allowed-set with a safe per-field fallback.
+- **Tolerant extraction, strict validation.** Bare-JSON-object output; the
+  parser strips fences and pulls the first object out of surrounding prose (a
+  well-meant response in slightly the wrong shape). But every field is then
+  checked against its contract — out-of-set enum, non-numeric confidence,
+  missing `retrieval_query` or `continues_prior` — and a violation raises
+  rather than being coerced to a default. (`entities` is the one advisory
+  field with no hard contract: a malformed list degrades to `[]`.)
 
 ### Downstream consumers (not wired)
 

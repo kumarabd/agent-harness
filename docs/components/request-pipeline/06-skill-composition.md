@@ -4,8 +4,16 @@
 > the staged `skill` rows, loads the procedure bodies, and merges them into one
 > ordered procedure (a medium-tier model call when there's ≥2 procedures or
 > memory/tools to fold in; a straight pass-through of the single procedure's
-> render otherwise; degrades to the top render on any failure). Staged as
+> render when there is genuinely nothing to merge/adapt/bind). Staged as
 > `kind='composed'`; `llm.build_conversation` splices it into the prompt.
+>
+> **No fallback.** Except the identity case above, the merge must succeed —
+> unconfigured medium tier, provider error, failed call, or unparseable output
+> all raise `CompositionError`. There is no "degrade to the top render": a
+> composed skill that silently isn't composed misroutes the whole turn. A
+> new-episode compose failure propagates through `RoutingWorkflow` and fails
+> the turn (`03-routing.md`); a reconcile-mode one records a failed child
+> execution and leaves the prior composed row in place.
 >
 > **Design lives in [`../skill-subsystem.md`](../skill-subsystem.md)** ("The
 > Skill Graph"), the Composition section. This file is just the

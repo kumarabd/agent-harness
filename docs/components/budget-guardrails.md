@@ -37,6 +37,42 @@ Scoped narrowly and deliberately: **visibility only** — token consumption, cal
 
 **Extended to the Gateway process, 2026-08-26** — not this component's own turn-level metrics, but the same mechanism, added when real voice-latency numbers were needed (`docs/components/gateway/discord-voice.md`'s Notes Log has the full detail: `voice_first_audio_latency_seconds`, `voice_chunk_gap_seconds`, `voice_tts_ttfb_seconds`, `voice_chunk_signal_gap_seconds`). The Gateway (`workflows/cmd/gateway/main.go`) had no metrics exposition at all before this — it now dials its Temporal client with the identical `newMetricsHandler` construction loop-worker already used (duplicated, not shared — three independent binaries, no existing common package worth introducing for one function), scraped the same `prometheus.io/*` annotation way (`gateway.metrics.*` in `agent-harness-tenant`'s `values.yaml`, `enabled: true` by default at port 9090).
 
+### Resolved: Pipeline-Phase Visibility (2026-09-02)
+
+A Grafana pass on a full scenario-suite run showed the pre-LLM pipeline
+(`components/request-pipeline.md`) is ~60% of turn wall-time — `RoutingWorkflow`
+alone averaged 7.4s, and inside it `ComposeSkill` is ~7.2s (a medium-tier merge
+call, `max_tokens=1100`). Three gaps fixed:
+
+- **Per-activity latency was there all along, under the wrong name.** The
+  Python SDK core emits `temporal_activity_execution_latency` (histogram, unit
+  = **milliseconds**, label `activity_type`) for *every* activity — that's the
+  metric to query for `ClassifyRequest` / `ComposeSkill` / `MemoryRetrieve` /
+  … timing. The `..._seconds` variant is emitted only by the Gateway (Go, which
+  sets `durations_as_seconds=true`), so a query for
+  `temporal_activity_execution_latency_seconds{activity_type="ComposeSkill"}`
+  silently returns nothing. No code change — a query/dashboard note.
+- **The three hand-rolled `*_latency_seconds` histograms had unusable
+  buckets.** They record seconds but kept Temporal core's default
+  (millisecond-oriented) boundaries, so every real value fell in the first
+  bucket and every percentile read the same number. Fixed with
+  `PrometheusConfig(histogram_bucket_overrides=…)` in `tenant_worker.py` —
+  seconds-appropriate boundaries for `classify_request_latency_seconds`,
+  `model_call_latency_seconds`, `tool_call_latency_seconds` (the list and the
+  boundaries live in `activities/metrics.py`).
+- **Semantic outcome was invisible.** The SDK metric shows an activity
+  succeeded, not *what it decided*. Added one counter per pre-LLM activity via
+  the `observe_outcome` decorator (`activities/metrics.py`):
+  `compose_skill_total` / `memory_retrieve_total` / `tool_discover_total` /
+  `skill_discover_total` (`outcome` = `ok|empty|error`), `open_episode_total`
+  (`outcome` = `opened|attached|superseded|none`), plus
+  `compose_skill_merge_total` (`result` = `merged|passthrough|no_provider|call_failed|unparsed`)
+  so a degraded compose is distinguishable from a real merge. `classify`'s
+  existing latency histogram now also carries the `intent`/`fallback`
+  attributes its counter already had, so classify latency can be sliced by
+  whether it fell back (a fallback both costs latency *and* forces the
+  Deliberate lane).
+
 ### Future Scope: Rule-Driven Controlled Stop
 Deliberately not addressed in this pass — parked, not designed:
 - Rule expressiveness: fixed named thresholds (today's shape, just made configurable) vs. a genuine rule engine evaluating arbitrary boolean conditions over the tracked metrics.
@@ -47,4 +83,5 @@ Deliberately not addressed in this pass — parked, not designed:
 
 ### Notes Log
 - 2026-08-16: Introduced as a scaffold, split out as its own component (rather than folded into `components/context-slot.md`) at the user's explicit direction — the focus is producing real metrics first, then a rule-driven controlled stop on top of them, distinct enough from context curation to warrant its own design surface. Grounded in `turn.go`'s current hardcoded stop-condition constants and `temporal-workflow.md`'s existing resolved stop-condition logic, audited the same day — not yet designed.
+- 2026-09-02: Pipeline-phase visibility pass (see "Resolved" section above) — `activities/activities/metrics.py` (new: `observe_outcome` decorator + the seconds-histogram bucket-override list), `tenant_worker.py` (`histogram_bucket_overrides` on `PrometheusConfig`), `observe_outcome` applied to `ComposeSkill`/`MemoryRetrieve`/`SkillDiscover`/`ToolDiscover`/`OpenEpisode`, `compose_skill_merge_total` in `retrieval/compose.py`, `intent`/`fallback` attributes added to `classify_request_latency_seconds`. Latency itself is unchanged — this pass only makes where the ~9s pre-LLM cost goes measurable; the cuts (ComposeSkill retry/timeout, classify fallback root-cause, serial critical path) are the follow-up.
 - 2026-08-22: At the user's explicit direction, scoped this pass to metrics export only (visibility for an external observability system), deferring the rule-driven controlled-stop half entirely to "Future Scope." Resolved the export mechanism as Temporal's own built-in per-SDK metrics handlers (replay-safe, no new activities/Postgres writes, no `GetVersion` gate needed), the concrete metric set on both the Go workflow side and Python activity side, the required per-tenant `namespace` label (since `loop-worker` is shared across tenants), and plain Prometheus scrape annotations (no `ServiceMonitor`) on both charts' worker Deployments.

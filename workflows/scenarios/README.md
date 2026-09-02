@@ -143,6 +143,17 @@ candidate, `outcome=success`, `required_correction=true`.
 `superpowers-b/` remains the broader live eval (a real teaching conversation,
 no scripting).
 
+### Lane model (added 2026-09-01 — docs/components/lane-model.md)
+
+- **`episode-plan-complete`** and the retuned `plan-progress-lifecycle` /
+  `episode-upgrade-initial` messages are all deliberately Deliberate-lane.
+- **`lite-simple-task.json`** (NOT in `run_all.sh`) — checks a simple task takes
+  the Lite lane: no episode, `turn_retrieval` memory-only, no `turn_plan`, no
+  `skill_candidates`. Its `expect.sh` reads the `classify` log line and **skips**
+  (rather than fails) if the classifier rated the turn moderate/complex — so
+  it's only real coverage while the fast-tier classifier is healthy. Run it by
+  hand once `classify[...] conf` is back above 0.
+
 ### Episode close-trigger coverage (added 2026-09-01, verified against the deploy)
 
 - **`episode-plan-complete.json`** (in `run_all.sh` — single turn) — the

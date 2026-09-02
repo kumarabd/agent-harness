@@ -79,7 +79,13 @@ class TaskRepresentation:
     are: routing metadata derived from the message, not the message content
     itself (which stays Postgres-side). retrieval_query/entities are passed
     straight into the step-4/5/7 retrieval activities by RetrievalWorkflow.
-    confidence == 0.0 marks a fallback / un-classified turn."""
+
+    ClassifyRequest has no fallback — every field here is a real classifier
+    output or the activity raised. `confidence` is the model's own self-report
+    (0.0–1.0); a genuinely low value still routes to the safer Deliberate lane
+    (`laneIsDeliberate`), but it no longer doubles as a "wasn't classified"
+    sentinel. The zero-value dataclass is only what an un-run activity would
+    leave; turn.go never proceeds with it (a classify failure fails the turn)."""
 
     intent: str = ""
     complexity: str = ""
@@ -89,8 +95,9 @@ class TaskRepresentation:
     # docs/components/episode-lifecycle.md — whether this message continues the
     # session's currently-open episode (the task the agent is mid-way through)
     # or starts a new one. Only meaningful when an episode is actually open;
-    # `turn.go` passes it to OpenEpisode. False on the classifier fallback (the
-    # degraded path there falls back to an embedding-similarity check).
+    # `turn.go` passes it to OpenEpisode. When `confidence` is low, OpenEpisode
+    # cross-checks this against embedding similarity rather than trusting it
+    # outright.
     continues_prior: bool = False
 
 

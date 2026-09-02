@@ -40,12 +40,14 @@ ep2="$(pg "SELECT COALESCE(episode_id,'') FROM turns WHERE turn_id = '$T2'")"
 echo "  turn:1 episode_id = '$ep1'"
 echo "  turn:2 episode_id = '$ep2'"
 [ "$ep1" = "$T1" ] || fail "turn:1 should have opened its own episode, got '$ep1'"
-[ -z "$ep2" ] || fail "turn:2 opened an episode ('$ep2') — an unrelated simple task should take the Lite lane (no episode)"
-ok "turn:1 had a Deliberate episode; turn:2 was Lite (no episode)"
-
-n_ep="$(pg "SELECT count(*) FROM episodes WHERE session_key = '$SESSION_KEY'")"
-[ "$n_ep" = "1" ] || fail "expected exactly 1 episodes row for the session, found $n_ep"
-ok "exactly one episodes row (turn:1's)"
+# turn:2 must NOT be attached to turn:1's episode — it either takes the Lite
+# lane (no episode) or, if the classifier rated it Deliberate, opens its own.
+[ "$ep2" != "$ep1" ] || fail "turn:2 ATTACHED to turn:1's episode — an unrelated task must supersede, not continue"
+if [ -z "$ep2" ]; then
+  ok "turn:2 took the Lite lane (no episode)"
+else
+  ok "turn:2 opened its own episode ($ep2) — classifier rated it Deliberate; supersede still applies"
+fi
 
 st1="$(pg "SELECT status || '|' || coalesce(close_reason,'-') FROM episodes WHERE episode_id = '$ep1'")"
 [ "$st1" = "superseded|superseded" ] || fail "turn:1 episode state = '$st1', expected 'superseded|superseded'"

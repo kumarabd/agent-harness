@@ -200,3 +200,27 @@ func TestRoutingWorkflow_ComposeRunsWhenSkillsFound(t *testing.T) {
 	require.True(t, composeCalled)
 	require.True(t, result.ComposedSkill)
 }
+
+func TestRoutingWorkflow_ComposeFailureFailsRouting(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+
+	mockSubsystem[types.MemoryRetrieveInput](env, "MemoryRetrieve", types.SubsystemResult{Status: "ok", Count: 1}, nil)
+	mockSubsystem[types.ToolDiscoverInput](env, "ToolDiscover", types.SubsystemResult{Status: "empty"}, nil)
+	mockSubsystem[types.SkillDiscoverInput](env, "SkillDiscover", types.SubsystemResult{Status: "ok", Count: 2}, nil)
+	env.RegisterActivityWithOptions(
+		func(_ context.Context, _ types.ComposeSkillInput) (types.SubsystemResult, error) {
+			return types.SubsystemResult{}, context.DeadlineExceeded
+		},
+		activity.RegisterOptions{Name: "ComposeSkill"},
+	)
+
+	env.ExecuteWorkflow(RoutingWorkflow, RoutingWorkflowInput{
+		TurnID: "s:turn:1",
+		Task:   types.TaskRepresentation{Intent: "task", Complexity: "complex", Confidence: 0.9},
+	})
+
+	// No fallback: a ComposeSkill failure is NOT swallowed — it fails the
+	// workflow, which turn.go turns into a failed turn.
+	require.Error(t, env.GetWorkflowError())
+}

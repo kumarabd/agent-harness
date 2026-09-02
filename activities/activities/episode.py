@@ -21,6 +21,7 @@ import logging
 from temporalio import activity
 
 from . import ids, plan
+from .metrics import observe_outcome
 from .skills import embedding
 from .skills.vectors import cosine
 from .types import (
@@ -34,10 +35,20 @@ from .types import (
 
 logger = logging.getLogger(__name__)
 
-# Degraded-path continuation threshold — used only when the classifier didn't
-# give a confident `continues_prior` (confidence < 0.5). Biased toward
-# continue: a false "new" re-fragments the episode, a false "continue" only
-# adds a stale composed block the model can ignore. Numeric-tuning-deferred.
+
+class EpisodeError(RuntimeError):
+    """Raised when OpenEpisode is handed state it should never see — an
+    unclassified task representation, chiefly. No fallback: the activity
+    raises, Temporal retries the bounded ladder, an exhausted retry fails the
+    turn (turn.go). A phantom episode (id set, no `episodes` row) is corrupt
+    state that every downstream step then builds on."""
+
+# Continuation threshold for the low-confidence cross-check — used only when
+# the classifier reported low confidence in its own `continues_prior`
+# (confidence < 0.5). Not a fallback for a failed classify (that fails the
+# turn); a real classifier that's genuinely unsure. Biased toward continue: a
+# false "new" re-fragments the episode, a false "continue" only adds a stale
+# composed block the model can ignore. Numeric-tuning-deferred.
 _CONT_FLOOR = 0.55
 _RECORD_COMPLEXITIES = {"moderate", "complex"}
 # Ordered weakest → strongest, for "upgrading" an episode's classification when
@@ -67,15 +78,18 @@ async def _open_top_level(conn, session_key: str):
 
 
 async def _insert(conn, episode_id: str, session_key: str, task, task_embedding) -> None:
+    # No `or "task"` / `or "moderate"` defaults here — `open_episode` has
+    # already validated the task representation is real. Writing a silent
+    # default would just bury an upstream bug in the episodes row.
     await conn.execute(
         "INSERT INTO episodes (episode_id, session_key, status, intent, complexity, "
         "retrieval_query, task_embedding) VALUES ($1, $2, 'open', $3, $4, $5, $6) "
         "ON CONFLICT (episode_id) DO NOTHING",
         episode_id,
         session_key,
-        task.intent or "task",
-        task.complexity or "moderate",
-        (task.retrieval_query or "")[:2000],
+        task.intent,
+        task.complexity,
+        task.retrieval_query[:2000],
         task_embedding,
     )
     await conn.execute("UPDATE turns SET episode_id = $2 WHERE turn_id = $1", episode_id, episode_id)
@@ -93,8 +107,9 @@ async def _close(conn, episode_id: str, status: str, reason: str) -> None:
 
 def _should_continue(task, open_embedding, anchor_embedding) -> bool:
     """Continue the open episode, or supersede it? Trust a confident classifier
-    verdict; fall back to embedding similarity (biased toward continue) when the
-    classifier degraded."""
+    verdict; cross-check against embedding similarity (biased toward continue)
+    when the classifier reported low confidence in its own read. (A classifier
+    that outright failed never gets here — that fails the turn.)"""
     if task.confidence >= 0.5:
         return bool(task.continues_prior)
     if not open_embedding or not anchor_embedding:
@@ -209,16 +224,34 @@ class EpisodeActivities:
         self._pool = pool
 
     async def _embed(self, text: str):
+        # Deliberately best-effort, unlike the classify/compose/OpenEpisode
+        # paths. `task_embedding` is read in exactly one place — the
+        # `_should_continue` tiebreaker, and only when the classifier itself
+        # reported low confidence in `continues_prior`. Absent, that check
+        # falls to "continue" (a defined, safe choice), and the common
+        # confidence >= 0.5 path never touches it. This is a genuinely optional
+        # signal degrading in scope, not a failure being masked with a
+        # fabricated result — so a blip in the embedding backend does not fail
+        # the turn.
         if not text:
             return None
         try:
             return await embedding.embed(text)
-        except Exception:  # noqa: BLE001 - embeddings are best-effort everywhere in this codebase
-            logger.warning("episode: embedding failed", exc_info=True)
+        except Exception:  # noqa: BLE001 - optional signal, see above
+            logger.warning("episode: embedding failed — continuation tiebreaker will default to continue", exc_info=True)
             return None
 
     @activity.defn(name="OpenEpisode")
+    @observe_outcome("open_episode_total")
     async def open_episode(self, inp: OpenEpisodeInput) -> OpenEpisodeResult:
+        task = inp.task
+        if task.intent not in _INTENT_RANK or task.complexity not in _COMPLEXITY_RANK or not task.retrieval_query:
+            raise EpisodeError(
+                "OpenEpisode got an unclassified task representation "
+                f"(intent={task.intent!r} complexity={task.complexity!r} "
+                f"retrieval_query={task.retrieval_query!r}) — ClassifyRequest should "
+                "have failed the turn before reaching here"
+            )
         async with self._pool.acquire() as conn:
             text = await anchor_text(conn, inp.turn_id)
         emb = await self._embed(text)  # outside the transaction — it's a network call

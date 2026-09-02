@@ -23,6 +23,7 @@ import logging
 
 from temporalio import activity
 
+from ..metrics import observe_outcome
 from ..tools import discover_tools
 from ..types import SubsystemResult, ToolDiscoverInput
 from .staging import RetrievalRow, write_rows
@@ -81,6 +82,7 @@ class ToolDiscoverActivity:
         self._pool = pool
 
     @activity.defn(name="ToolDiscover")
+    @observe_outcome("tool_discover_total")
     async def __call__(self, input: ToolDiscoverInput) -> SubsystemResult:
         query = _query(input)
         if not query:

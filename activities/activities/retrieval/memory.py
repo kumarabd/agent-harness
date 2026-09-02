@@ -23,6 +23,7 @@ import logging
 from temporalio import activity
 
 from .. import agent_brain, lcm
+from ..metrics import observe_outcome
 from ..types import MemoryRetrieveInput, SubsystemResult
 from .reconcile import reconcile_query
 from .staging import RetrievalRow, read_rows, replace_rows, write_rows
@@ -113,6 +114,7 @@ class MemoryRetrieveActivity:
         self._pool = pool
 
     @activity.defn(name="MemoryRetrieve")
+    @observe_outcome("memory_retrieve_total")
     async def __call__(self, input: MemoryRetrieveInput) -> SubsystemResult:
         if input.parent_turn_id and not input.reconcile:
             return await self._inherit(input.episode_id, input.parent_turn_id)

@@ -6,7 +6,7 @@ turns the inbound user message into a small task representation:
 
   - intent      — routing scalar
   - complexity  — routing scalar
-  - confidence  — the classifier's own confidence (0.0 == fallback)
+  - confidence  — the classifier's own confidence (0.0–1.0)
   - retrieval_query — a distilled search query for steps 4/5/7
   - entities    — named systems/tools/files/people
 
@@ -17,22 +17,27 @@ the retrieval activities. Nothing is persisted here; the bulk retrieved
 *content* (memory items, composed skill, tool schemas) is what goes through
 the `turn_retrieval` staging table, in later steps.
 
-Design principles, mirroring the graceful-degradation posture
-`agent_brain.py` / `exploration_summary.py` already use:
+Design principles:
 
 1. **Fast tier, not medium.** `model_registry.resolve("language", "fast")` —
    a low-stakes structured-extraction call, not on the reasoning path.
 
-2. **Best-effort, never load-bearing.** An unconfigured `fast` tier, a
-   provider error, or unparseable output all degrade to
-   `_neutral(user_message)` (`intent=task`, `complexity=moderate`,
-   `retrieval_query` = the raw message). The activity never raises for a
-   classification failure, so a turn is never blocked or failed by it.
+2. **No fallback. If it can't classify, it fails.** An unconfigured `fast`
+   tier, a provider error, an unparseable response, or output that doesn't
+   match the contract all raise `ClassificationError`. There is deliberately
+   no neutral/degraded representation — a broken classifier is a broken
+   turn, which surfaces (the turn fails, `turns.status='failed'`, Temporal
+   records it) and gets fixed at the source. Silently routing every turn as
+   `(task, moderate)` because the classifier is down is exactly the kind of
+   invisible degradation this system does not do.
 
-3. **Tolerant parsing, strict output shape.** The model is asked for a bare
-   JSON object; the parser strips markdown fences, extracts the first object
-   if needed, and coerces every field against a closed allowed-set with a
-   safe per-field fallback.
+3. **Tolerant extraction, strict validation.** The model is asked for a bare
+   JSON object; extraction strips markdown fences and pulls the first object
+   out of surrounding prose (a well-intentioned response in slightly the
+   wrong shape). But once extracted, every field is validated against its
+   contract — an out-of-set enum, a non-numeric confidence, a missing
+   `retrieval_query` — and anything that doesn't hold raises rather than
+   being coerced to a default.
 """
 
 from __future__ import annotations
@@ -49,12 +54,26 @@ from .types import ClassifyRequestInput, TaskRepresentation
 
 logger = logging.getLogger(__name__)
 
+
+class ClassificationError(RuntimeError):
+    """Raised whenever ClassifyRequest cannot produce a real task
+    representation — unconfigured tier, provider error, unparseable response,
+    or output that violates the contract. There is no fallback; the activity
+    raises, Temporal retries the bounded ladder, and an exhausted retry fails
+    the turn (turn.go). Deliberate: a broken classifier must be visible, not
+    papered over with a neutral guess."""
+
+
 # --- Taxonomy: the single source of truth for both closed enums. ---
 INTENTS = ("conversational", "question", "task", "meta")
 COMPLEXITIES = ("trivial", "simple", "moderate", "complex")
 
 # model-registry.md's tiers — fast is the right home for a cheap structured
-# extraction call that isn't on the reasoning path.
+# extraction call that isn't on the reasoning path. The `fast` tier MUST be a
+# non-thinking model: the completion is a ~5-field JSON object, and a thinking
+# model burns this budget on reasoning tokens, truncates the JSON, and now
+# (no fallback) fails the turn. That failure is the intended signal — fix the
+# tier, don't inflate the budget to hide a wrong model choice.
 _CLASSIFIER_TIER = "fast"
 _CLASSIFIER_MAX_TOKENS = 400
 
@@ -112,36 +131,34 @@ def build_classifier_user_content(
     return "\n\n".join(parts)
 
 
-def parse_task_representation(raw: str, user_message: str) -> TaskRepresentation:
-    """Parses the classifier's raw text, coercing each field against its
-    allowed set with a safe per-field fallback. Output that isn't a JSON
-    object at all degrades to `_neutral`. Pure, separately testable."""
-    fallback = _neutral(user_message)
+def parse_task_representation(raw: str) -> TaskRepresentation:
+    """Extract and validate the classifier's response. Extraction is tolerant
+    (markdown fences, prose around the object); validation is strict — every
+    field must match its contract or this raises `ClassificationError`. There
+    is no per-field fallback. Pure, separately testable."""
     obj = _extract_json_object(raw)
     if obj is None:
-        logger.warning("classify: classifier output was not a JSON object: %r", raw[:200])
-        return fallback
-    return TaskRepresentation(
-        intent=_coerce_enum(obj.get("intent"), INTENTS, fallback.intent),
-        complexity=_coerce_enum(obj.get("complexity"), COMPLEXITIES, fallback.complexity),
-        confidence=_coerce_confidence(obj.get("confidence")),
-        retrieval_query=_coerce_query(obj.get("retrieval_query"), user_message),
-        entities=_coerce_entities(obj.get("entities")),
-        continues_prior=bool(obj.get("continues_prior")) if isinstance(obj.get("continues_prior"), bool) else False,
-    )
+        raise ClassificationError(f"classifier output was not a JSON object: {raw[:200]!r}")
 
+    intent = _require_enum(obj.get("intent"), INTENTS, "intent")
+    complexity = _require_enum(obj.get("complexity"), COMPLEXITIES, "complexity")
+    confidence = _require_confidence(obj.get("confidence"))
 
-def _neutral(user_message: str) -> TaskRepresentation:
-    """The fallback whenever real classification can't run or can't be
-    parsed: an actionable task of middling complexity (so nothing downstream
-    under-provisions), the raw message as the retrieval query. `confidence ==
-    0.0` is the marker that this turn was not really classified."""
+    query = obj.get("retrieval_query")
+    if not isinstance(query, str) or not query.strip():
+        raise ClassificationError(f"retrieval_query missing or not a non-empty string: {query!r}")
+
+    continues_prior = obj.get("continues_prior")
+    if not isinstance(continues_prior, bool):
+        raise ClassificationError(f"continues_prior missing or not a boolean: {continues_prior!r}")
+
     return TaskRepresentation(
-        intent="task",
-        complexity="moderate",
-        confidence=0.0,
-        retrieval_query=_truncate(user_message.strip(), _MAX_RETRIEVAL_QUERY_CHARS),
-        entities=[],
+        intent=intent,
+        complexity=complexity,
+        confidence=confidence,
+        retrieval_query=_truncate(query.strip(), _MAX_RETRIEVAL_QUERY_CHARS),
+        entities=_clean_entities(obj.get("entities")),
+        continues_prior=continues_prior,
     )
 
 
@@ -172,27 +189,26 @@ def _extract_json_object(raw: str) -> dict | None:
     return None
 
 
-def _coerce_enum(value: object, allowed: tuple[str, ...], fallback: str) -> str:
+def _require_enum(value: object, allowed: tuple[str, ...], field: str) -> str:
     if isinstance(value, str) and value.strip().lower() in allowed:
         return value.strip().lower()
-    return fallback
+    raise ClassificationError(f"{field}={value!r} is not one of {allowed}")
 
 
-def _coerce_confidence(value: object) -> float:
+def _require_confidence(value: object) -> float:
     try:
         parsed = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return 0.0
+        raise ClassificationError(f"confidence={value!r} is not a number") from None
+    # A number slightly outside [0, 1] is a range slip, not a broken response —
+    # clamp it. A non-number is a broken response — raised above.
     return max(0.0, min(1.0, parsed))
 
 
-def _coerce_query(value: object, user_message: str) -> str:
-    if isinstance(value, str) and value.strip():
-        return _truncate(value.strip(), _MAX_RETRIEVAL_QUERY_CHARS)
-    return _truncate(user_message.strip(), _MAX_RETRIEVAL_QUERY_CHARS)
-
-
-def _coerce_entities(value: object) -> list[str]:
+def _clean_entities(value: object) -> list[str]:
+    """Entities are advisory extras, not a routing scalar — an absent or
+    malformed list is tolerated (empty), the well-formed part is bounded.
+    This is the one field with no hard contract to violate."""
     if not isinstance(value, list):
         return []
     out: list[str] = []
@@ -219,14 +235,19 @@ class ClassifyRequestActivity:
         meter = activity.metric_meter()
         started = time.monotonic()
 
+        # No try/except here on purpose: a ClassificationError propagates out
+        # of the activity, Temporal retries the bounded ladder (turn.go's
+        # ClassifyRequest ActivityOptions), and an exhausted retry fails the
+        # turn. Only *successful* classifications reach the metric — a
+        # persistent classifier failure shows up as a spike in Temporal's
+        # activity-failure metrics and failed turns, which is the point.
         representation = await self._classify(input.turn_id)
 
-        meter.create_histogram_float("classify_request_latency_seconds", unit="s").record(
+        tagged = meter.with_additional_attributes({"intent": representation.intent})
+        tagged.create_histogram_float("classify_request_latency_seconds", unit="s").record(
             time.monotonic() - started
         )
-        meter.with_additional_attributes(
-            {"intent": representation.intent, "fallback": str(representation.confidence == 0.0)}
-        ).create_counter("classify_request_total").add(1)
+        tagged.create_counter("classify_request_total").add(1)
         return representation
 
     async def _classify(self, turn_id: str) -> TaskRepresentation:
@@ -238,36 +259,34 @@ class ClassifyRequestActivity:
                 turn_id,
             )
             if seed is None or not seed["content"]:
-                logger.warning("classify: no seed user message for turn %s — neutral", turn_id)
-                return _neutral("")
+                # InsertMessage runs before ClassifyRequest and creates this
+                # row — its absence is a broken invariant, not a case to
+                # smooth over.
+                raise ClassificationError(f"no seed user message for turn {turn_id}")
             user_message: str = seed["content"]
             recent_context = await self._recent_context(conn, ids.session_key_of(turn_id), seed["turn_seq"])
             open_task = await self._open_task_summary(conn, ids.session_key_of(turn_id), turn_id)
 
         config = model_registry.resolve("language", _CLASSIFIER_TIER)
         if not config.model:
-            logger.info(
-                "classify: %s tier not configured — neutral classification for %s", _CLASSIFIER_TIER, turn_id
+            raise ClassificationError(
+                f"{_CLASSIFIER_TIER} language tier is not configured — cannot classify"
             )
-            return _neutral(user_message)
         try:
             provider = llm_client.get_provider(config)
         except RuntimeError as exc:
-            logger.info("classify: no provider (%s) — neutral classification for %s", exc, turn_id)
-            return _neutral(user_message)
+            raise ClassificationError(f"no provider for {_CLASSIFIER_TIER} tier: {exc}") from exc
 
-        try:
-            result = await provider.summarize_text(
-                system_prompt=_CLASSIFIER_SYSTEM_PROMPT,
-                user_content=build_classifier_user_content(user_message, recent_context, open_task),
-                model=config.model,
-                max_tokens=_CLASSIFIER_MAX_TOKENS,
-            )
-        except Exception:  # noqa: BLE001 - real network/API failure, bounded then degrade
-            logger.warning("classify: classifier call failed for %s — neutral", turn_id, exc_info=True)
-            return _neutral(user_message)
+        # A network/API failure propagates unchanged — Temporal's retry ladder
+        # handles the transient case, an exhausted retry fails the turn.
+        result = await provider.summarize_text(
+            system_prompt=_CLASSIFIER_SYSTEM_PROMPT,
+            user_content=build_classifier_user_content(user_message, recent_context, open_task),
+            model=config.model,
+            max_tokens=_CLASSIFIER_MAX_TOKENS,
+        )
 
-        representation = parse_task_representation(result.content, user_message)
+        representation = parse_task_representation(result.content)
         logger.info(
             "classify[%s]: intent=%s complexity=%s conf=%.2f query=%r entities=%s",
             turn_id,

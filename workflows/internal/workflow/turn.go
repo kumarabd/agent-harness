@@ -636,10 +636,12 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	// (docs/components/request-pipeline/02-request-understanding.md). A cheap
 	// fast-tier analysis of the inbound message — intent + complexity routing
 	// scalars, plus a distilled retrieval query and named entities for the
-	// step-4/5/7 retrieval subsystems. Best-effort: the activity itself degrades
-	// to a neutral representation on any failure, and an infrastructure-level
-	// failure of the dispatch is logged and ignored — this is a pipeline
-	// enhancement, never load-bearing, so it must not fail or block the turn.
+	// step-4/5/7 retrieval subsystems. It IS load-bearing: every lane / episode
+	// / retrieval decision below reads it, so there is no neutral fallback —
+	// ClassifyRequest either returns a real representation or raises
+	// (activities/classify.py), Temporal retries the bounded ladder, and an
+	// exhausted retry fails the turn here rather than silently routing every
+	// request as (task, moderate). A broken classifier must be visible.
 	// Runs for subagents too (request-pipeline/08-planning.md, "Subagents are
 	// full agents"): the spawn prompt is written as the turn's seed user message
 	// by InsertMessage, exactly what ClassifyRequest reads, and a subagent
@@ -647,13 +649,18 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	// subagent handed a trivial one classifies simple and fast-paths.
 	var taskRep types.TaskRepresentation
 	{
-		cao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+		// Bounded retry, not Temporal's unlimited default: ClassifyRequest now
+		// raises instead of degrading, and a persistently-failing classifier
+		// must fail the turn (failTurn below), not retry forever and hang it.
+		cao := workflow.ActivityOptions{
+			StartToCloseTimeout: activityTimeoutTierA,
+			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+		}
 		cactx := workflow.WithActivityOptions(ctx, cao)
 		if err := workflow.ExecuteActivity(cactx, "ClassifyRequest", types.ClassifyRequestInput{TurnID: input.TurnID}).Get(cactx, &taskRep); err != nil {
-			logger.Error("ClassifyRequest failed, proceeding without task representation", "turn_id", input.TurnID, "error", err)
-		} else {
-			logger.Info("request classified", "turn_id", input.TurnID, "parent_type", input.ParentType, "intent", taskRep.Intent, "complexity", taskRep.Complexity, "confidence", taskRep.Confidence, "retrieval_query", taskRep.RetrievalQuery)
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
 		}
+		logger.Info("request classified", "turn_id", input.TurnID, "parent_type", input.ParentType, "intent", taskRep.Intent, "complexity", taskRep.Complexity, "confidence", taskRep.Confidence, "retrieval_query", taskRep.RetrievalQuery)
 	}
 
 	// --- Lane split (docs/components/lane-model.md). `OpenEpisode` is the one
@@ -671,22 +678,28 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	episodeID := ""
 	attached := false
 	if taskRep.Intent != "conversational" {
-		eao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+		// No fallback: OpenEpisode is the lane decision point and it writes the
+		// episodes row every path downstream keys on. A failure used to fall
+		// back to `episodeID = input.TurnID` — a phantom episode with no
+		// episodes row, which then has retrieval staged under it, a plan
+		// seeded against it, and RecordSkillOutcome fired for it at close.
+		// That's corrupt state masquerading as a working turn. Bounded retry
+		// (it's a Postgres transaction — failures are transient), then fail.
+		eao := workflow.ActivityOptions{
+			StartToCloseTimeout: activityTimeoutTierA,
+			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+		}
 		eactx := workflow.WithActivityOptions(ctx, eao)
 		var openRes types.OpenEpisodeResult
 		wantNew := laneIsDeliberate(taskRep)
 		if err := workflow.ExecuteActivity(eactx, "OpenEpisode", types.OpenEpisodeInput{TurnID: input.TurnID, Task: taskRep, WantNewEpisode: wantNew}).Get(eactx, &openRes); err != nil {
-			logger.Error("OpenEpisode failed", "turn_id", input.TurnID, "error", err)
-			if wantNew {
-				episodeID = input.TurnID // Deliberate turn — fall back to a lone, un-linked episode
-			}
-		} else {
-			episodeID = openRes.EpisodeID
-			attached = openRes.Attached
-			logger.Info("lane resolved", "turn_id", input.TurnID, "episode_id", episodeID, "attached", attached, "superseded", openRes.SupersededEpisodeID, "want_new", wantNew)
-			if openRes.SupersededEpisodeID != "" {
-				dispatchRecordSkillOutcome(ctx, openRes.SupersededEpisodeID, "")
-			}
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+		}
+		episodeID = openRes.EpisodeID
+		attached = openRes.Attached
+		logger.Info("lane resolved", "turn_id", input.TurnID, "episode_id", episodeID, "attached", attached, "superseded", openRes.SupersededEpisodeID, "want_new", wantNew)
+		if openRes.SupersededEpisodeID != "" {
+			dispatchRecordSkillOutcome(ctx, openRes.SupersededEpisodeID, "")
 		}
 	}
 
@@ -709,8 +722,14 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 		dispatchReconcileRouting(ctx, episodeID, input.TurnID, taskRep, "attach")
 	default:
 		// startRouting races its own completion against a follow-up message and
-		// stages everything to Postgres; its return value is no longer read.
-		startRouting(ctx, stagingID, input.TurnID, parentTurnID, taskRep, &pendingMessages)
+		// stages everything to Postgres. A follow-up interrupt is a deliberate
+		// supersede (nil error). A non-nil error is a genuine RoutingWorkflow
+		// failure — after the "no fallback" changes that means ComposeSkill
+		// couldn't produce a merged procedure — and fails the turn rather than
+		// proceeding with a half-composed skill nobody can see is wrong.
+		if _, err := startRouting(ctx, stagingID, input.TurnID, parentTurnID, taskRep, &pendingMessages); err != nil {
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+		}
 	}
 
 	var stopReason string

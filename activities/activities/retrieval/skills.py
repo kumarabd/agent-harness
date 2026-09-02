@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 from temporalio import activity
 
+from ..metrics import observe_outcome
 from ..skills import embedding
 from ..skills import select as skill_select
 from ..skills import store
@@ -49,6 +50,7 @@ class SkillDiscoverActivity:
         self._pool = pool
 
     @activity.defn(name="SkillDiscover")
+    @observe_outcome("skill_discover_total")
     async def __call__(self, input: SkillDiscoverInput) -> SubsystemResult:
         query = input.retrieval_query.strip()
         if input.reconcile:

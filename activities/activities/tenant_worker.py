@@ -74,6 +74,7 @@ from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
 from . import llm_client, shell_hub
+from .metrics import LATENCY_BUCKETS_SECONDS, SECONDS_LATENCY_METRICS
 from .classify import ClassifyRequestActivity
 from .episode import EpisodeActivities
 from .skills import seed as skill_seed
@@ -137,9 +138,21 @@ async def main() -> None:
     # metrics for free, plus whatever ModelCallActivity/ToolCallActivity
     # record via activity.metric_meter(). Scraped directly (plain
     # prometheus.io/scrape pod annotations — no ServiceMonitor).
+    # The SDK's own duration metrics (temporal_activity_execution_latency etc.)
+    # are milliseconds and keep the core default boundaries. Our three
+    # hand-rolled histograms record *seconds* (ModelCall/ToolCall/Classify
+    # measure a provider round-trip, where seconds is the natural unit) — the
+    # ms-oriented default boundaries would collapse every real value into the
+    # first bucket, so widen them by name here. Keep in sync with
+    # metrics.SECONDS_LATENCY_METRICS / LATENCY_BUCKETS_SECONDS.
     runtime = Runtime(
         telemetry=TelemetryConfig(
-            metrics=PrometheusConfig(bind_address=os.environ.get("METRICS_BIND_ADDRESS", "0.0.0.0:9090"))
+            metrics=PrometheusConfig(
+                bind_address=os.environ.get("METRICS_BIND_ADDRESS", "0.0.0.0:9090"),
+                histogram_bucket_overrides={
+                    name: list(LATENCY_BUCKETS_SECONDS) for name in SECONDS_LATENCY_METRICS
+                },
+            )
         )
     )
     client = await Client.connect(address, namespace=namespace, runtime=runtime)

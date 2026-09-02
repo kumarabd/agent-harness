@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"fmt"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -15,6 +16,14 @@ import (
 // are recorded "timed_out" and the turn proceeds with partial enrichment.
 // Placeholder value, numeric-tuning-deferred like every other threshold here.
 const retrievalPhaseTimeout = 10 * time.Second
+
+// composePhaseTimeout bounds ComposeSkill's own attempt. It's a medium-tier
+// LLM merge (~7s observed), and — since ComposeSkill has no fallback and a
+// failure now propagates (a new-episode compose failure fails the turn) — the
+// per-attempt budget has to comfortably cover a slow-but-real merge rather
+// than turning a slow response into a turn failure. Separate from
+// retrievalPhaseTimeout, which sizes the parallel fan-out, not this.
+const composePhaseTimeout = 45 * time.Second
 
 // RoutingPlan is Route()'s decision: which retrieval subsystems this turn
 // activates. FastPath == true means none of them — proceed straight to the
@@ -233,17 +242,23 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 	// --- step 6: compose a skill, only if discovery actually produced
 	// candidates (plan.Skills alone isn't enough — there may be no matching
 	// skeleton). ComposeSkill reads the staged memory/tool/skill rows itself.
+	//
+	// No fallback: ComposeSkill either produces the merged procedure or raises
+	// (activities/retrieval/compose.py). A failure here is NOT swallowed — it
+	// propagates out of RoutingWorkflow. For a new-episode turn that fails the
+	// turn (startRouting -> turn.go); for a detached reconcile pass it just
+	// records a failed child execution and leaves the episode's prior composed
+	// row in place. Either way it is visible, not papered over.
 	if result.Skills.Status == "ok" && result.Skills.Count > 0 {
 		cctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			StartToCloseTimeout: retrievalPhaseTimeout,
+			StartToCloseTimeout: composePhaseTimeout,
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
 		})
 		var cr types.SubsystemResult
 		if err := workflow.ExecuteActivity(cctx, "ComposeSkill", types.ComposeSkillInput{EpisodeID: input.EpisodeID, Reconcile: reconcile}).Get(cctx, &cr); err != nil {
-			logger.Warn("routing: ComposeSkill failed", "episode_id", input.EpisodeID, "error", err)
-		} else {
-			result.ComposedSkill = cr.Status == "ok" && cr.Count > 0
+			return result, fmt.Errorf("ComposeSkill (episode %s): %w", input.EpisodeID, err)
 		}
+		result.ComposedSkill = cr.Status == "ok" && cr.Count > 0
 	}
 
 	return result, nil
@@ -254,11 +269,17 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 // pendingMessages (docs/components/request-pipeline/03-routing.md, "option
 // b"). If the user sends another message mid-routing, routing is cancelled
 // and the turn proceeds un-enriched rather than making them wait for
-// enrichment they've already superseded. Returns the RoutingResult (zero
-// value if routing failed or was interrupted — always safe to read).
+// enrichment they've already superseded — that's a deliberate supersede, not
+// a failure, so err is nil in that case.
+//
+// A non-nil err means RoutingWorkflow genuinely failed — which, after the
+// "no fallback" changes, means ComposeSkill couldn't produce a merged
+// procedure (the fan-out subsystems record their own errors into the result
+// and never fail the workflow). The caller (turn.go) fails the turn on it.
+// The RoutingResult is always safe to read (zero value on failure/interrupt).
 // episodeID is the retrieval staging key (== turnID for a new episode's opening
 // turn); turnID is the current turn.
-func startRouting(ctx workflow.Context, episodeID, turnID, parentTurnID string, task types.TaskRepresentation, pendingMessages *[]types.SignalPayload) RoutingResult {
+func startRouting(ctx workflow.Context, episodeID, turnID, parentTurnID string, task types.TaskRepresentation, pendingMessages *[]types.SignalPayload) (RoutingResult, error) {
 	logger := workflow.GetLogger(ctx)
 
 	routingCtx, cancelRouting := workflow.WithCancel(ctx)
@@ -289,13 +310,15 @@ func startRouting(ctx workflow.Context, episodeID, turnID, parentTurnID string, 
 	switch {
 	case interrupted:
 		logger.Info("routing interrupted by incoming message, proceeding un-enriched", "turn_id", turnID)
+		return result, nil
 	case err != nil:
-		logger.Error("routing did not complete, proceeding un-enriched", "turn_id", turnID, "error", err)
+		logger.Error("routing failed", "turn_id", turnID, "error", err)
+		return result, err
 	default:
 		logger.Info("routing complete", "turn_id", turnID,
 			"fast_path", result.Plan.FastPath,
 			"memory", result.Memory.Status, "tools", result.Tools.Status,
 			"skills", result.Skills.Status, "composed_skill", result.ComposedSkill)
+		return result, nil
 	}
-	return result
 }

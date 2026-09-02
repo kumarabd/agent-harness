@@ -108,7 +108,7 @@ CREATE TABLE episodes (
                   CHECK (status IN ('open','complete','abandoned','superseded')),
   intent          text NOT NULL DEFAULT 'task',
   retrieval_query text NOT NULL DEFAULT '',
-  task_embedding  real[],                            -- anchor message embedding, for the degraded continuation check
+  task_embedding  real[],                            -- anchor message embedding; the low-confidence continuation tiebreaker (optional — absent -> "continue")
   last_stop_reason text NOT NULL DEFAULT '',          -- the most recent turn's loop stop_reason — feeds the outcome reward
   opened_at       timestamptz NOT NULL DEFAULT now(),
   closed_at       timestamptz,
@@ -164,12 +164,22 @@ continuation) from "now help me with the deploy script" (a new task), which a
 raw embedding threshold cannot (this is exactly why the eval's turns failed to
 cluster at `ASSIGN_RADIUS`).
 
-Degraded path (classifier returned `confidence == 0.0`): continue if an episode
-is open and `intent != conversational` and
+Low-confidence tiebreaker (classifier reported `confidence < 0.5` in its own
+`continues_prior` — a real but shaky read, *not* a failed classify, which fails
+the turn): continue if an episode is open and `intent != conversational` and
 `cosine(new anchor embedding, episode.task_embedding) >= CONT_FLOOR` (start
 `0.55`, biased toward continue — a false "new" re-fragments, a false "continue"
-only adds a stale composed block the model can ignore). Numeric-tuning
-discipline: revisit with real data.
+only adds a stale composed block the model can ignore). If the anchor embedding
+is unavailable (embedding backend blip — the one optional signal here), this
+also defaults to continue. Numeric-tuning discipline: revisit with real data.
+
+**OpenEpisode has no fallback.** It writes the `episodes` row every downstream
+step keys on (retrieval staging, plan seed, RecordSkillOutcome at close), and
+it's the lane decision point. An unclassified task representation, or a
+Postgres failure that outlasts the bounded retry, fails the turn (`turn.go`) —
+it does *not* fall back to a phantom `episode_id = turn_id` with no row behind
+it (the prior behavior), which produced retrieval and plan state hanging off a
+nonexistent episode.
 
 #### Execute
 
