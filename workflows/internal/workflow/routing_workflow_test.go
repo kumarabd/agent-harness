@@ -98,6 +98,7 @@ func TestRoutingWorkflow_SubagentInheritsParentMemory(t *testing.T) {
 	mockSubsystem[types.SkillDiscoverInput](env, "SkillDiscover", types.SubsystemResult{Status: "empty"}, nil)
 
 	env.ExecuteWorkflow(RoutingWorkflow, RoutingWorkflowInput{
+		EpisodeID:    "s:turn:1:sub:1",
 		TurnID:       "s:turn:1:sub:1",
 		Task:         types.TaskRepresentation{Intent: "task", Complexity: "moderate", Confidence: 0.9},
 		ParentTurnID: "s:turn:1",
@@ -105,8 +106,10 @@ func TestRoutingWorkflow_SubagentInheritsParentMemory(t *testing.T) {
 
 	require.NoError(t, env.GetWorkflowError())
 	// The subagent's routing passes the parent turn id through to MemoryRetrieve,
-	// which copies the parent's staged rows rather than re-querying agent-brain.
+	// which resolves the parent's episode and copies its staged rows rather than
+	// re-querying agent-brain. Staging is keyed on the subagent's own episode.
 	require.Equal(t, "s:turn:1", gotMemInput.ParentTurnID)
+	require.Equal(t, "s:turn:1:sub:1", gotMemInput.EpisodeID)
 }
 
 func TestRoutingWorkflow_ReconcileMode(t *testing.T) {
@@ -147,10 +150,13 @@ func TestRoutingWorkflow_ReconcileMode(t *testing.T) {
 	)
 
 	// A conversational task would normally fast-path; reconcile mode ignores that.
+	// A between-turn continuation reconcile keys staging on the anchor episode
+	// while reading the new message from the current turn.
 	env.ExecuteWorkflow(RoutingWorkflow, RoutingWorkflowInput{
-		TurnID: "s:turn:1",
-		Task:   types.TaskRepresentation{Intent: "conversational", Complexity: "trivial", Confidence: 0.95},
-		Mode:   "reconcile",
+		EpisodeID: "s:turn:1",
+		TurnID:    "s:turn:4",
+		Task:      types.TaskRepresentation{Intent: "conversational", Complexity: "trivial", Confidence: 0.95},
+		Mode:      "reconcile",
 	})
 
 	require.NoError(t, env.GetWorkflowError())
@@ -161,6 +167,9 @@ func TestRoutingWorkflow_ReconcileMode(t *testing.T) {
 	require.True(t, memIn.Reconcile)
 	require.True(t, skillIn.Reconcile)
 	require.True(t, composeIn.Reconcile)
+	require.Equal(t, "s:turn:1", memIn.EpisodeID)
+	require.Equal(t, "s:turn:4", memIn.TurnID)
+	require.Equal(t, "s:turn:1", composeIn.EpisodeID)
 	require.True(t, result.ComposedSkill)
 }
 

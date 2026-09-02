@@ -54,7 +54,7 @@ class ComposeSkillActivity:
 
     @activity.defn(name="ComposeSkill")
     async def __call__(self, input: ComposeSkillInput) -> SubsystemResult:
-        rows = await read_rows(self._pool, input.turn_id, ("skill", "memory", "tool"))
+        rows = await read_rows(self._pool, input.episode_id, ("skill", "memory", "tool"))
         skill_rows = [r for r in rows if r.kind == "skill"]
         if not skill_rows:
             return SubsystemResult(status="empty", count=0)
@@ -63,7 +63,7 @@ class ComposeSkillActivity:
         procedures = await store.procedures_by_ids(self._pool, proc_ids)
         ordered = [procedures[pid] for pid in proc_ids if pid in procedures]
         if not ordered:
-            logger.info("ComposeSkill[%s]: staged skill rows resolved to no live procedure", input.turn_id)
+            logger.info("ComposeSkill[%s]: staged skill rows resolved to no live procedure", input.episode_id)
             return SubsystemResult(status="empty", count=0)
 
         memory = [r.content for r in rows if r.kind == "memory"]
@@ -72,7 +72,7 @@ class ComposeSkillActivity:
         composed, checkpoints = await self._compose(ordered, memory, tools)
         written = await write_rows(
             self._pool,
-            input.turn_id,
+            input.episode_id,
             [RetrievalRow(kind="composed", seq=0, content=composed, metadata={"procedure_ids": proc_ids})],
         )
         # Seed the plan ledger (request-pipeline/08-planning.md). Best-effort —
@@ -85,12 +85,12 @@ class ComposeSkillActivity:
         if checkpoints and not input.reconcile:
             try:
                 async with self._pool.acquire() as conn:
-                    seeded = await plan.seed(conn, input.turn_id, checkpoints)
+                    seeded = await plan.seed(conn, input.episode_id, checkpoints)
             except Exception:  # noqa: BLE001 - never fail compose over plan seeding
-                logger.warning("ComposeSkill[%s]: plan seed failed", input.turn_id, exc_info=True)
+                logger.warning("ComposeSkill[%s]: plan seed failed", input.episode_id, exc_info=True)
         logger.info(
             "ComposeSkill[%s]: composed from %s (%d chars, %d checkpoints)",
-            input.turn_id, proc_ids, len(composed), seeded,
+            input.episode_id, proc_ids, len(composed), seeded,
         )
         return SubsystemResult(status="ok", count=written)
 

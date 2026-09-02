@@ -75,6 +75,7 @@ from temporalio.worker import Worker
 
 from . import llm_client, shell_hub
 from .classify import ClassifyRequestActivity
+from .episode import EpisodeActivities
 from .skills import seed as skill_seed
 from .skills.record import RecordSkillOutcomeActivity
 from .skills.synthesize import SkillSynthesizeActivity
@@ -96,6 +97,14 @@ from .subagent_manifest import SubagentManifestActivity
 from .tool_call import DenyToolCallActivity, ToolCallActivity
 from .user_input import CloseUserInputActivity, RequestUserInputActivity
 from .write_memory import WriteMemoryActivity
+
+
+def _episode_activities(pool):
+    """docs/components/episode-lifecycle.md — EpisodeActivities holds four
+    @activity.defn methods (OpenEpisode / CompleteEpisode / CloseSubagentEpisode
+    / CloseSessionEpisodes); register each bound method."""
+    ea = EpisodeActivities(pool)
+    return [ea.open_episode, ea.complete_episode, ea.close_subagent_episode, ea.close_session_episodes]
 
 
 async def main() -> None:
@@ -144,6 +153,7 @@ async def main() -> None:
         activities=[
             ModelCallActivity(pool, client).__call__,
             ClassifyRequestActivity(pool).__call__,
+            *_episode_activities(pool),
             MemoryRetrieveActivity(pool).__call__,
             ToolDiscoverActivity(pool).__call__,
             SkillDiscoverActivity(pool).__call__,

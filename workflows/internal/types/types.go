@@ -99,7 +99,13 @@ type SignalPayload struct {
 // prior turn history from Postgres itself (it *is* the context-hydration
 // step now) and looks up ContextSeq's scripted/real response.
 type ModelCallInput struct {
-	TurnID     string `json:"turn_id"`
+	TurnID string `json:"turn_id"`
+	// EpisodeID — docs/components/episode-lifecycle.md. The episode this turn
+	// belongs to (== the anchor turn_id). Prompt assembly reads the staged
+	// retrieval + plan ledger by this, and plan_progress updates apply against
+	// it, so a continuation turn advances the episode's one ledger. Empty for a
+	// conversational fast-path turn.
+	EpisodeID  string `json:"episode_id"`
 	ContextSeq int    `json:"context_seq"`
 	// docs/components/model-registry.md, "Resolved: Selection Mechanism" —
 	// the previous step's self-declared hint for this step, threaded
@@ -141,6 +147,11 @@ type TaskRepresentation struct {
 	Confidence     float64  `json:"confidence"`
 	RetrievalQuery string   `json:"retrieval_query"`
 	Entities       []string `json:"entities"`
+	// ContinuesPrior — docs/components/episode-lifecycle.md. Whether this
+	// message continues the session's currently-open episode or starts a new
+	// one. Only meaningful when an episode is open; false on the classifier
+	// fallback (OpenEpisode's degraded path uses embedding similarity instead).
+	ContinuesPrior bool `json:"continues_prior"`
 }
 
 // MemoryRetrieveInput is MemoryRetrieve's input
@@ -148,56 +159,101 @@ type TaskRepresentation struct {
 // the distilled query from step 2's TaskRepresentation — a small derived
 // signal passed straight in by RoutingWorkflow, not read from Postgres.
 type MemoryRetrieveInput struct {
+	// EpisodeID (docs/components/episode-lifecycle.md) is the staging key —
+	// rows go to turn_retrieval keyed by it. TurnID is the current turn, used
+	// only for the reconcile-mode "latest user message" lookup.
+	EpisodeID      string `json:"episode_id"`
 	TurnID         string `json:"turn_id"`
 	RetrievalQuery string `json:"retrieval_query"`
-	// ParentTurnID is set only for a subagent turn (request-pipeline/
-	// 08-planning.md, "Subagents are full agents"). When present, MemoryRetrieve
-	// copies the parent's staged kind='memory' rows into this turn's
-	// turn_retrieval instead of re-querying agent-brain — memory is about the
-	// user's world, stable across a turn tree, and the parent's front-loaded
-	// snapshot is a consistent point-in-time capture.
+	// ParentTurnID is set only for a subagent turn ("Subagents are full
+	// agents"). When present, MemoryRetrieve resolves the parent turn's episode
+	// and copies its staged kind='memory' rows instead of re-querying
+	// agent-brain — memory is about the user's world, stable across a turn tree.
 	ParentTurnID string `json:"parent_turn_id,omitempty"`
-	// Reconcile (request-pipeline/08-planning.md, "Reconciliation trigger") —
-	// when true the activity re-keys on the turn's latest user message (the
-	// correction that triggered this pass) and replaces its staged rows.
+	// Reconcile (episode-lifecycle.md / request-pipeline/08-planning.md) — when
+	// true the activity re-keys on the current turn's latest user message and
+	// replaces the episode's staged rows.
 	Reconcile bool `json:"reconcile,omitempty"`
 }
 
 // ToolDiscoverInput is ToolDiscover's input
-// (docs/components/request-pipeline/07-tool-discovery.md).
+// (docs/components/request-pipeline/07-tool-discovery.md). Runs once per
+// episode (the opening turn); staged by EpisodeID.
 type ToolDiscoverInput struct {
-	TurnID         string   `json:"turn_id"`
+	EpisodeID      string   `json:"episode_id"`
 	RetrievalQuery string   `json:"retrieval_query"`
 	Entities       []string `json:"entities"`
 }
 
 // SkillDiscoverInput is SkillDiscover's input
-// (docs/components/request-pipeline/05-skill-discovery.md).
+// (docs/components/request-pipeline/05-skill-discovery.md). See
+// MemoryRetrieveInput for the EpisodeID / TurnID split.
 type SkillDiscoverInput struct {
+	EpisodeID      string `json:"episode_id"`
 	TurnID         string `json:"turn_id"`
 	RetrievalQuery string `json:"retrieval_query"`
-	// See MemoryRetrieveInput.Reconcile.
-	Reconcile bool `json:"reconcile,omitempty"`
+	Reconcile      bool   `json:"reconcile,omitempty"`
 }
 
 // ComposeSkillInput is ComposeSkill's input
 // (docs/components/request-pipeline/06-skill-composition.md). The activity
-// reads the staged memory/tool/skill rows from turn_retrieval by turn_id.
+// reads the staged memory/tool/skill rows from turn_retrieval by EpisodeID.
 type ComposeSkillInput struct {
-	TurnID string `json:"turn_id"`
+	EpisodeID string `json:"episode_id"`
 	// request-pipeline/08-planning.md — a reconcile-mode compose regenerates the
 	// kind='composed' block but does not re-seed turn_plan.
 	Reconcile bool `json:"reconcile,omitempty"`
 }
 
 // RecordSkillOutcomeInput is RecordSkillOutcome's input
-// (docs/components/skill-subsystem.md, "Recording"). The activity reads the
-// turn's transcript / tool calls / staged skill rows from Postgres itself;
-// the workflow supplies only the turn_id and the reason the reason-act loop
-// stopped (which it doesn't persist cleanly anywhere).
+// (docs/components/skill-subsystem.md, "Recording" + episode-lifecycle.md).
+// Fires ONCE when an episode closes. The activity reads the whole multi-turn
+// trajectory / tool calls / staged skill rows / plan ledger / episode row
+// from Postgres itself.
 type RecordSkillOutcomeInput struct {
-	TurnID     string `json:"turn_id"`
+	EpisodeID  string `json:"episode_id"`
 	StopReason string `json:"stop_reason"`
+}
+
+// --- docs/components/episode-lifecycle.md ---
+
+// OpenEpisodeInput — the activity reads the turn's parent_type / seed message /
+// session from Postgres; the workflow supplies the turn_id and step 2's task
+// representation.
+type OpenEpisodeInput struct {
+	TurnID string             `json:"turn_id"`
+	Task   TaskRepresentation `json:"task"`
+}
+
+// OpenEpisodeResult — EpisodeID is what to stage/key the turn under. Attached
+// means this turn joined an already-open episode (skip the full pipeline,
+// reconcile-refresh only). SupersededEpisodeID is non-empty when a
+// previously-open episode was closed to make room.
+type OpenEpisodeResult struct {
+	EpisodeID           string `json:"episode_id"`
+	Attached            bool   `json:"attached"`
+	SupersededEpisodeID string `json:"superseded_episode_id"`
+}
+
+// CompleteEpisodeInput — called at every turn end for a turn that belongs to an
+// episode: records the turn's stop_reason on the episode and, if the plan
+// ledger is now all-terminal, closes the episode as complete.
+type CompleteEpisodeInput struct {
+	EpisodeID  string `json:"episode_id"`
+	StopReason string `json:"stop_reason"`
+}
+
+type CompleteEpisodeResult struct {
+	Completed bool `json:"completed"`
+}
+
+// CloseSessionEpisodesInput — dispatched on the coordinator's idle-exit.
+type CloseSessionEpisodesInput struct {
+	SessionKey string `json:"session_key"`
+}
+
+type CloseSessionEpisodesResult struct {
+	EpisodeIDs []string `json:"episode_ids"`
 }
 
 // SkillSynthesizeInput is SkillSynthesize's input

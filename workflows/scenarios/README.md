@@ -101,6 +101,28 @@ That's the whole process — no other registration needed.
   `run_all.sh`'s own comment for the exact `temporal workflow signal`
   invocation).
 
+## Updated 2026-09-01 — episodes (docs/components/episode-lifecycle.md)
+
+The plan ledger and the staged retrieval are now **episode-scoped**, not
+turn-scoped: `turn_plan` / `turn_retrieval` key on `episode_id` (the anchor
+turn_id — renamed column, migration `018`), and `RecordSkillOutcome` fires
+**once when the episode closes**, not per turn. For a single-turn scripted
+scenario `episode_id == root turn_id`, so the assertions below just swap
+`turn_id` → `episode_id` in the `turn_plan` / `turn_retrieval` queries.
+
+Consequence for these scenarios: a scripted turn whose `plan_progress` does
+**not** drive every checkpoint terminal leaves the episode *open* at turn end —
+it closes (and records) on the coordinator's idle-exit (~`idleTTL`, 30s here)
+via `CloseSessionEpisodesWorkflow`. `skill-plan-integration.expect.sh`'s
+candidate poll is sized (~55s) to wait that out. A subagent's episode still
+closes at its turn end (`CloseSubagentEpisode`), so `subagent-full-agent`
+records promptly. `cleanup_test_data.sh` also clears the new `episodes` table.
+
+The multi-turn episode → **single** candidate behaviour (the whole point of
+the change) is exercised by the **`superpowers-b/`** live eval, not a scripted
+case — chained multi-turn scripting isn't supported by this runner (see the
+chained-pairs note above).
+
 ## Coverage added 2026-09-01 — request pipeline steps 8 & 9
 
 In `run_all.sh` (standalone, real steps 2–8, scripted loop):

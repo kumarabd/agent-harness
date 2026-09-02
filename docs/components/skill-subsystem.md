@@ -9,7 +9,10 @@
 > **Phase 2** (recording): `skill_candidates` table (migration `015`),
 > `skills/record.py` `RecordSkillOutcome` — writes the candidate + EMA-updates
 > composed procedures' `confidence` / `trigger_embedding`, dispatched as a
-> detached child (`RecordSkillOutcomeWorkflow`) from `turn.go`.
+> detached child (`RecordSkillOutcomeWorkflow`). **Episode-scoped since
+> 2026-09-01 ([`episode-lifecycle.md`](episode-lifecycle.md)): one candidate per
+> episode, over the whole multi-turn trajectory, dispatched when the episode
+> closes — not per turn.**
 > **Phase 3** (synthesis): `SkillSynthesisWorkflow` + `SkillSynthesize`
 > (`skills/synthesize.py` + `generalize.py`) — write-triggered from
 > `RecordSkillOutcomeWorkflow`, debounced by the fixed `"skill-synthesis"`
@@ -225,30 +228,41 @@ One row per procedure *version*. Retrieval only sees `valid_to IS NULL`.
 
 ---
 
-### Recording — BUILT (phase 2)
+### Recording — BUILT (phase 2), episode-scoped since 2026-09-01
+
+> **[`episode-lifecycle.md`](episode-lifecycle.md):**
+> recording is now **episode-scoped**, not per-turn. `RecordSkillOutcome` fires
+> **once, when an episode closes** — plan complete, a new task supersedes it,
+> the coordinator idle-exits, or (subagent) its turn ends — over the *whole
+> multi-turn trajectory*. Input is `episode_id`. Before this, it fired per turn,
+> so a multi-turn task (brainstorming needs several) produced N fragmented
+> candidates instead of one. `skill_candidates.turn_id` now holds the episode's
+> anchor turn_id.
 
 `RecordSkillOutcomeWorkflow` → `RecordSkillOutcome` (`skills/record.py`),
-dispatched detached (`ABANDON`, same shape as `WriteMemoryWorkflow`) from
-`turn.go`'s end-of-turn block when step 2 classified `intent == "task"` **and
-`complexity` is `moderate` or `complex`**. Best-effort — the response is already
-delivered. Trivial and simple tasks are skipped; a classification failure
-(empty `taskRep`) also skips it.
+dispatched detached (`ABANDON`, same shape as `WriteMemoryWorkflow`) by whoever
+closes the episode (`turn.go` on plan-complete / subagent-turn-end;
+`CloseSessionEpisodesWorkflow` on idle-exit; `turn.go` again when a new task
+supersedes an open one). The activity reads the episode row
+(`intent`/`complexity`/`close_reason`/`last_stop_reason`) and gates itself:
+`intent == "task"` **and `complexity` `moderate`|`complex`** — same bar as the
+old per-turn gate, now on the episode's anchor classification.
 
-The activity reads the turn's `messages`, `tool_calls`, and staged `skill` rows
-from Postgres itself; the workflow supplies only `turn_id` and the loop's
-`stop_reason`. It writes one `skill_candidates` row (transcript = the messages in
-order, each assistant message's tool calls listed after it) and, for every
-procedure that was composed into the turn, runs the EMA update ("Confidence" /
-"EMA updates"). Idempotent per turn (delete-then-insert the unsynthesized row).
+The activity reads every turn in the episode (`messages` / `tool_calls` joined
+on `turns.episode_id`), the staged `skill` rows, and the final `turn_plan`
+ledger from Postgres itself. It writes one `skill_candidates` row (transcript =
+`plan.render_final` + the messages in order, each assistant message's tool calls
+after it) and, for every procedure composed into the episode, runs the EMA
+update. Idempotent per episode (delete-then-insert the unsynthesized row).
 
 Terminal reward (phase-2 approximations — refined later):
-- **success** — `stop_reason == "no_tool_calls"` and no `tool_calls` row ended
-  `error`.
-- **failure** — otherwise (`max_iterations` / `max_retries` / `budget_exhausted`,
-  or a tool call that errored).
-- **`required_correction`** — more than one `user` message in the turn (a
-  follow-up folded in mid-loop). A cheap classifier to distinguish "correction"
-  from "extra info" is future work. `reward` is `1.0` on plain success, `0.5` on
+- **success** — `close_reason == "plan_complete"`, or (`idle`/`turn_end`) with
+  the last turn's `stop_reason == "no_tool_calls"` and no errored tool call.
+- **failure** — otherwise, and always for `superseded` (the user pivoted away
+  before the plan finished).
+- **`required_correction`** — more than one `user` message across the episode
+  (clarifying dialogue or a correction). Distinguishing the two is future work
+  (episode-lifecycle.md, Deferred). `reward` is `1.0` on plain success, `0.5` on
   a corrected success, `0.0` on failure.
 
 Not yet: co-occurrence edge updates (phase 4); post-turn follow-up detection
@@ -598,7 +612,7 @@ Unchanged in shape from its earlier design. Reads the staged `skill` / `memory`
 |---|---|---|---|
 | `SkillDiscover` | activity | per turn (step 5, in `RoutingWorkflow`) | retrieval, stages `kind='skill'` |
 | `ComposeSkill` | activity | per turn (step 6, when candidates found) | composition, stages `kind='composed'` |
-| `RecordSkillOutcome` | activity + `RecordSkillOutcomeWorkflow` | end of every `moderate`/`complex` task turn, detached (`ABANDON`) | **built** — writes the candidate, EMA-updates each composed procedure's `confidence` + `trigger_embedding`, and updates co-occurrence edges (phase 4). |
+| `RecordSkillOutcome` | activity + `RecordSkillOutcomeWorkflow` | **once, when an episode closes** (`episode-lifecycle.md`), detached (`ABANDON`) | **built** — writes one candidate over the whole multi-turn trajectory, EMA-updates each composed procedure's `confidence` + `trigger_embedding`, updates co-occurrence edges (phase 4). |
 | `SkillSynthesisWorkflow` + `SkillSynthesize` | workflow + activity | **built** — write-triggered per recording, debounced by fixed workflow id (no schedule yet) | candidate assignment (per-procedure `cluster_radius`), creation / refinement / failure-annotation via the generalization pass, versioning |
 | `RebuildSkillIndexWorkflow` | workflow + schedule | nightly per tenant | **deferred** — re-clusters all trajectories → `skill_clusters`; builds only when the flat scan is profiled slow |
 

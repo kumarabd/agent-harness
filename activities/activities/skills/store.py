@@ -377,9 +377,9 @@ async def session_composed_procedure_ids(db, session_key: str, exclude_turn_id: 
     project scope wired, which isn't yet."""
     rows = await db.fetch(
         "SELECT DISTINCT tr.metadata->>'procedure_id' AS pid "
-        "FROM turn_retrieval tr JOIN turns t ON tr.turn_id = t.turn_id "
+        "FROM turn_retrieval tr JOIN turns t ON tr.episode_id = t.turn_id "
         "WHERE t.parent_id = $1 AND t.parent_type = 'session' AND tr.kind = 'skill' "
-        "  AND tr.turn_id <> $2 AND tr.metadata->>'procedure_id' IS NOT NULL",
+        "  AND tr.episode_id <> $2 AND tr.metadata->>'procedure_id' IS NOT NULL",
         session_key,
         exclude_turn_id,
     )

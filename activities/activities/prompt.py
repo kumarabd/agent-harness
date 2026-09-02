@@ -60,20 +60,27 @@ class _Section:
 
 
 async def assemble(
-    conn, turn_id: str, system_prompt: str, context_window: int = 0
+    conn, turn_id: str, episode_id: str, system_prompt: str, context_window: int = 0
 ) -> tuple[list[dict], int]:
     """Returns (conversation, context_tokens) — context_tokens is threaded back
     through ModelCallOutput to the workflow for the compression-gate check (see
-    lcm.assemble's own docstring for why it can't be accumulated workflow-side)."""
+    lcm.assemble's own docstring for why it can't be accumulated workflow-side).
+
+    The live conversation is keyed on the session (via turn_id); the enrichment
+    sections — composed skill, plan ledger, tools, memory — are keyed on
+    episode_id (docs/components/episode-lifecycle.md), so a continuation turn
+    renders the episode's one bundle. episode_id is empty for a conversational
+    fast-path turn — the enrichment reads all no-op then."""
     session_key = ids.session_key_of(turn_id)
     conversation, context_tokens = await lcm.assemble(conn, session_key, system_prompt)
 
     sections: list[_Section] = []
+    ep = episode_id or turn_id
     for name, text in (
-        ("composed_skill", await _composed_text(conn, turn_id)),
-        ("plan_progress", await _plan_text(conn, turn_id)),
-        ("capabilities", await _capabilities_text(conn, turn_id)),
-        ("memory", await _memory_text(conn, turn_id)),
+        ("composed_skill", await _composed_text(conn, ep)),
+        ("plan_progress", await _plan_text(conn, ep)),
+        ("capabilities", await _capabilities_text(conn, ep)),
+        ("memory", await _memory_text(conn, ep)),
     ):
         if text:
             sections.append(_Section(name, text, lcm.estimate_tokens(text)))
@@ -112,35 +119,35 @@ async def assemble(
     return conversation, context_tokens
 
 
-async def _composed_text(conn, turn_id: str) -> str | None:
+async def _composed_text(conn, episode_id: str) -> str | None:
     row = await conn.fetchrow(
-        "SELECT content FROM turn_retrieval WHERE turn_id = $1 AND kind = 'composed' ORDER BY seq LIMIT 1",
-        turn_id,
+        "SELECT content FROM turn_retrieval WHERE episode_id = $1 AND kind = 'composed' ORDER BY seq LIMIT 1",
+        episode_id,
     )
     if row is None or not row["content"].strip():
         return None
     return _COMPOSED_HEADER + row["content"]
 
 
-async def _plan_text(conn, turn_id: str) -> str | None:
-    checkpoints = await plan.read(conn, turn_id)
+async def _plan_text(conn, episode_id: str) -> str | None:
+    checkpoints = await plan.read(conn, episode_id)
     return plan.render_block(checkpoints) or None
 
 
-async def _capabilities_text(conn, turn_id: str) -> str | None:
+async def _capabilities_text(conn, episode_id: str) -> str | None:
     rows = await conn.fetch(
-        "SELECT content FROM turn_retrieval WHERE turn_id = $1 AND kind = 'tool' ORDER BY seq",
-        turn_id,
+        "SELECT content FROM turn_retrieval WHERE episode_id = $1 AND kind = 'tool' ORDER BY seq",
+        episode_id,
     )
     if not rows:
         return None
     return _CAPABILITIES_HEADER + "\n".join(f"- {r['content']}" for r in rows)
 
 
-async def _memory_text(conn, turn_id: str) -> str | None:
+async def _memory_text(conn, episode_id: str) -> str | None:
     rows = await conn.fetch(
-        "SELECT content FROM turn_retrieval WHERE turn_id = $1 AND kind = 'memory' ORDER BY seq",
-        turn_id,
+        "SELECT content FROM turn_retrieval WHERE episode_id = $1 AND kind = 'memory' ORDER BY seq",
+        episode_id,
     )
     if not rows:
         return None

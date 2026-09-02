@@ -132,6 +132,7 @@ func runForNamespace(ctx context.Context, address, namespace, taskQueue string, 
 	w.RegisterWorkflow(wf.WriteMemoryWorkflow)
 	w.RegisterWorkflow(wf.CompressContextWorkflow)
 	w.RegisterWorkflow(wf.RecordSkillOutcomeWorkflow)
+	w.RegisterWorkflow(wf.CloseSessionEpisodesWorkflow)
 	w.RegisterWorkflow(wf.SkillSynthesisWorkflow)
 	w.RegisterWorkflow(wf.UserInputRequestWorkflow)
 

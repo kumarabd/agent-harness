@@ -18,7 +18,7 @@ learned="$(pg "SELECT count(*) FROM skill_procedures WHERE provenance='learned' 
 [ "$(pg "SELECT status FROM turns WHERE turn_id='$ROOT_TURN_ID'")" = completed ] || fail "root turn not completed"
 ok "root turn completed"
 
-skills="$(pg "SELECT string_agg(metadata->>'procedure_id', ',' ORDER BY seq) FROM turn_retrieval WHERE turn_id='$ROOT_TURN_ID' AND kind='skill'")"
+skills="$(pg "SELECT string_agg(metadata->>'procedure_id', ',' ORDER BY seq) FROM turn_retrieval WHERE episode_id='$ROOT_TURN_ID' AND kind='skill'")"
 echo "  retrieved skills (by rank): $skills"
 [ -n "$skills" ] || fail "no skills retrieved for a design task"
 
@@ -26,7 +26,7 @@ echo "$skills" | grep -q "learned:" \
   || fail "no learned:* procedure retrieved — the self-taught skill isn't being surfaced for a new design task (got: $skills)"
 ok "a learned:* procedure was retrieved for this design task"
 
-composed="$(pg "SELECT metadata->>'procedure_ids' FROM turn_retrieval WHERE turn_id='$ROOT_TURN_ID' AND kind='composed'")"
+composed="$(pg "SELECT metadata->>'procedure_ids' FROM turn_retrieval WHERE episode_id='$ROOT_TURN_ID' AND kind='composed'")"
 echo "  composed from: $composed"
 echo "$composed" | grep -q "learned:" && ok "ComposeSkill merged the learned procedure into the plan" \
   || warn "learned procedure retrieved but not in the composed set (check ComposeSkill logs)"

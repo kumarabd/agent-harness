@@ -86,17 +86,30 @@ _CLASSIFIER_SYSTEM_PROMPT = (
     '- "entities": array of short strings — named systems, tools, services, files, '
     'or people referenced (e.g. "Grafana", "Prometheus", "auth module"). Empty '
     "array if none.\n"
+    '- "continues_prior": boolean. If an "In-progress task" block is shown below, '
+    "true means this message continues that same task (an answer to the agent's "
+    "question, more detail, a correction, a next step of the same work); false "
+    "means it starts a different task. Always false when no in-progress task is "
+    "shown.\n"
     '- "confidence": number between 0.0 and 1.0 — your confidence in this analysis.'
 )
 
 
-def build_classifier_user_content(user_message: str, recent_context: str) -> str:
+def build_classifier_user_content(
+    user_message: str, recent_context: str, open_task: str = ""
+) -> str:
     """The user-role content for the classifier call — the latest message
     plus a short recent transcript so `retrieval_query` can resolve
-    follow-up references. Pure, separately testable."""
+    follow-up references, plus (when one is open) a one-line summary of the
+    task the agent is mid-way through, so `continues_prior` can be judged.
+    Pure, separately testable."""
     message = _truncate(user_message.strip(), _MAX_MESSAGE_CHARS)
     recent = recent_context.strip() or "(none — this is the first message in the session)"
-    return f"Recent conversation (oldest to newest):\n{recent}\n\nLatest message:\n{message}"
+    parts = [f"Recent conversation (oldest to newest):\n{recent}"]
+    if open_task.strip():
+        parts.append(f"In-progress task the agent is working on:\n{open_task.strip()}")
+    parts.append(f"Latest message:\n{message}")
+    return "\n\n".join(parts)
 
 
 def parse_task_representation(raw: str, user_message: str) -> TaskRepresentation:
@@ -114,6 +127,7 @@ def parse_task_representation(raw: str, user_message: str) -> TaskRepresentation
         confidence=_coerce_confidence(obj.get("confidence")),
         retrieval_query=_coerce_query(obj.get("retrieval_query"), user_message),
         entities=_coerce_entities(obj.get("entities")),
+        continues_prior=bool(obj.get("continues_prior")) if isinstance(obj.get("continues_prior"), bool) else False,
     )
 
 
@@ -228,6 +242,7 @@ class ClassifyRequestActivity:
                 return _neutral("")
             user_message: str = seed["content"]
             recent_context = await self._recent_context(conn, ids.session_key_of(turn_id), seed["turn_seq"])
+            open_task = await self._open_task_summary(conn, ids.session_key_of(turn_id), turn_id)
 
         config = model_registry.resolve("language", _CLASSIFIER_TIER)
         if not config.model:
@@ -244,7 +259,7 @@ class ClassifyRequestActivity:
         try:
             result = await provider.summarize_text(
                 system_prompt=_CLASSIFIER_SYSTEM_PROMPT,
-                user_content=build_classifier_user_content(user_message, recent_context),
+                user_content=build_classifier_user_content(user_message, recent_context, open_task),
                 model=config.model,
                 max_tokens=_CLASSIFIER_MAX_TOKENS,
             )
@@ -263,6 +278,32 @@ class ClassifyRequestActivity:
             representation.entities,
         )
         return representation
+
+    async def _open_task_summary(self, conn, session_key: str, turn_id: str) -> str:
+        """One line describing the top-level episode the agent is currently
+        mid-way through (docs/components/episode-lifecycle.md), for the
+        `continues_prior` judgement. Empty when none is open, or when the open
+        one IS this turn's own episode (a mid-turn re-classify — shouldn't
+        happen, but harmless)."""
+        row = await conn.fetchrow(
+            "SELECT e.episode_id, e.retrieval_query FROM episodes e "
+            "JOIN turns t ON t.turn_id = e.episode_id "
+            "WHERE e.session_key = $1 AND e.status = 'open' AND t.parent_type = 'session' "
+            "ORDER BY e.opened_at DESC LIMIT 1",
+            session_key,
+        )
+        if row is None or row["episode_id"] == turn_id:
+            return ""
+        last_assistant = await conn.fetchrow(
+            "SELECT m.content FROM messages m JOIN turns t ON m.parent_id = t.turn_id "
+            "WHERE t.episode_id = $1 AND m.role = 'assistant' AND m.content IS NOT NULL "
+            "ORDER BY t.turn_seq DESC, m.seq DESC LIMIT 1",
+            row["episode_id"],
+        )
+        line = (row["retrieval_query"] or "").strip() or "(task in progress)"
+        if last_assistant and last_assistant["content"]:
+            line += f"\nagent's last message: {_truncate(last_assistant['content'].strip(), _MAX_RECENT_MESSAGE_CHARS)}"
+        return line
 
     async def _recent_context(self, conn, session_key: str, turn_seq: int | None) -> str:
         """A short tail of the prior conversation in this session — user and

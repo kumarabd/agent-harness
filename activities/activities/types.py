@@ -36,6 +36,12 @@ class Message:
 @dataclass
 class ModelCallInput:
     turn_id: str = ""
+    # docs/components/episode-lifecycle.md — the episode this turn belongs to
+    # (== the anchor turn_id). Prompt assembly reads the staged retrieval + the
+    # plan ledger by this, and plan_progress updates are applied against it, so a
+    # continuation turn advances the episode's one ledger rather than a new one.
+    # Empty for a conversational fast-path turn (no episode).
+    episode_id: str = ""
     context_seq: int = 0
     # docs/components/model-registry.md, "Resolved: Selection Mechanism" —
     # the PREVIOUS step's self-declared hint for THIS step, threaded through
@@ -80,6 +86,12 @@ class TaskRepresentation:
     confidence: float = 0.0
     retrieval_query: str = ""
     entities: list[str] = field(default_factory=list)
+    # docs/components/episode-lifecycle.md — whether this message continues the
+    # session's currently-open episode (the task the agent is mid-way through)
+    # or starts a new one. Only meaningful when an episode is actually open;
+    # `turn.go` passes it to OpenEpisode. False on the classifier fallback (the
+    # degraded path there falls back to an embedding-similarity check).
+    continues_prior: bool = False
 
 
 @dataclass
@@ -89,26 +101,33 @@ class MemoryRetrieveInput:
     2's TaskRepresentation, a small derived signal passed straight in by
     RoutingWorkflow (not read from Postgres).
 
-    parent_turn_id is set only for a subagent turn (request-pipeline/
-    08-planning.md, "Subagents are full agents"): when present, the activity
-    copies the parent's staged kind='memory' rows into this turn's
-    turn_retrieval instead of calling agent-brain."""
+    episode_id (docs/components/episode-lifecycle.md) is the staging key — rows
+    go to turn_retrieval keyed by it, so every turn of the episode reads the
+    same bundle. turn_id is the current turn, used only for the reconcile-mode
+    "latest user message" lookup (a continuation turn's new message lives under
+    turn_id, not the anchor episode_id).
 
+    parent_turn_id is set only for a subagent turn ("Subagents are full
+    agents"): when present, the activity resolves the parent turn's episode and
+    copies its staged kind='memory' rows instead of calling agent-brain."""
+
+    episode_id: str = ""
     turn_id: str = ""
     retrieval_query: str = ""
     parent_turn_id: str = ""
     # request-pipeline/08-planning.md, "Reconciliation trigger" — when true the
-    # activity re-keys on the turn's latest user message (the correction) and
-    # replaces its staged rows rather than appending.
+    # activity re-keys on the current turn's latest user message and replaces
+    # the episode's staged rows rather than appending.
     reconcile: bool = False
 
 
 @dataclass
 class ToolDiscoverInput:
     """ToolDiscover's input — docs/components/request-pipeline/
-    07-tool-discovery.md."""
+    07-tool-discovery.md. Runs once per episode (the opening turn); staged by
+    episode_id."""
 
-    turn_id: str = ""
+    episode_id: str = ""
     retrieval_query: str = ""
     entities: list[str] = field(default_factory=list)
 
@@ -116,11 +135,12 @@ class ToolDiscoverInput:
 @dataclass
 class SkillDiscoverInput:
     """SkillDiscover's input — docs/components/request-pipeline/
-    05-skill-discovery.md."""
+    05-skill-discovery.md. See MemoryRetrieveInput for the episode_id / turn_id
+    split."""
 
+    episode_id: str = ""
     turn_id: str = ""
     retrieval_query: str = ""
-    # See MemoryRetrieveInput.reconcile.
     reconcile: bool = False
 
 
@@ -128,25 +148,81 @@ class SkillDiscoverInput:
 class ComposeSkillInput:
     """ComposeSkill's input — docs/components/request-pipeline/
     06-skill-composition.md. Reads the staged memory / tool / skill rows from
-    turn_retrieval by turn_id itself."""
+    turn_retrieval by episode_id itself."""
 
-    turn_id: str = ""
+    episode_id: str = ""
     # request-pipeline/08-planning.md — a reconcile-mode compose regenerates the
     # kind='composed' block but does NOT re-seed turn_plan (the model has been
-    # tracking checkpoints; blindly overwriting intents/positions mid-turn would
-    # desync its plan_progress reports).
+    # tracking checkpoints; blindly overwriting intents/positions mid-episode
+    # would desync its plan_progress reports).
     reconcile: bool = False
 
 
 @dataclass
 class RecordSkillOutcomeInput:
     """RecordSkillOutcome's input — docs/components/skill-subsystem.md,
-    "Recording". The activity reads the turn's transcript, tool calls, and
-    staged skill rows from Postgres itself; the workflow only supplies the
-    turn_id and the loop's stop reason (which it can't persist cleanly)."""
+    "Recording" + docs/components/episode-lifecycle.md. Fires ONCE when an
+    episode closes. The activity reads the whole multi-turn trajectory, the
+    tool calls, the staged skill rows, the plan ledger, and the episode row
+    (intent/complexity/close_reason/last_stop_reason) from Postgres itself."""
+
+    episode_id: str = ""
+    stop_reason: str = ""
+
+
+@dataclass
+class OpenEpisodeInput:
+    """OpenEpisode's input — docs/components/episode-lifecycle.md. The activity
+    reads the turn's parent_type / seed message / session from Postgres itself;
+    the workflow supplies the turn_id and step 2's task representation (for
+    intent/complexity/query/confidence/continues_prior)."""
 
     turn_id: str = ""
+    task: TaskRepresentation = field(default_factory=TaskRepresentation)
+
+
+@dataclass
+class OpenEpisodeResult:
+    """What OpenEpisode returns. episode_id is what to stage/key the turn under.
+    attached=True means this turn joined an already-open episode (skip the full
+    pipeline, reconcile-refresh only). superseded_episode_id is non-empty when a
+    previously-open episode was closed to make room — the workflow dispatches
+    its RecordSkillOutcome."""
+
+    episode_id: str = ""
+    attached: bool = False
+    superseded_episode_id: str = ""
+
+
+@dataclass
+class CompleteEpisodeInput:
+    """CompleteEpisode's input — docs/components/episode-lifecycle.md. Called at
+    every turn end for a turn that belongs to an episode: records the turn's
+    stop_reason on the episode and, if the plan ledger is now all-terminal,
+    closes the episode as complete."""
+
+    episode_id: str = ""
     stop_reason: str = ""
+
+
+@dataclass
+class CompleteEpisodeResult:
+    completed: bool = False
+
+
+@dataclass
+class CloseSessionEpisodesInput:
+    """CloseSessionEpisodes' input — docs/components/episode-lifecycle.md.
+    Dispatched on the coordinator's idle-exit: closes every still-open
+    top-level episode for the session and returns their ids so the caller can
+    record each."""
+
+    session_key: str = ""
+
+
+@dataclass
+class CloseSessionEpisodesResult:
+    episode_ids: list[str] = field(default_factory=list)
 
 
 @dataclass

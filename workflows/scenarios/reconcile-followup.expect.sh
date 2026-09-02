@@ -51,7 +51,7 @@ ok "reconcile-mode routing ran to completion (Memory + Skill re-key, no Route() 
 # reconcile-mode compose must NOT re-seed turn_plan: whatever ComposeSkill
 # seeded at turn start is still all there is (row count unchanged, no new
 # updated_at burst from the reconcile pass).
-plan_rows="$(pg_query "SELECT count(*) FROM turn_plan WHERE turn_id = '$ROOT_TURN_ID'")"
+plan_rows="$(pg_query "SELECT count(*) FROM turn_plan WHERE episode_id = '$ROOT_TURN_ID'")"
 echo "  (turn_plan rows for the turn: ${plan_rows:-0} — seeded once at turn start, not re-seeded by reconcile)"
 
 exit 0

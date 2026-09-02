@@ -67,6 +67,12 @@ func Route(task types.TaskRepresentation) RoutingPlan {
 // on the correction inside the activities, replacing the stale bundle;
 // ComposeSkill regenerates the composed block but leaves turn_plan alone.
 type RoutingWorkflowInput struct {
+	// EpisodeID (docs/components/episode-lifecycle.md) is the staging key —
+	// retrieval rows go to turn_retrieval keyed by it, so every turn of the
+	// episode shares one bundle. TurnID is the current turn (== EpisodeID for a
+	// new episode's opening turn; different for a continuation-turn reconcile,
+	// whose new message lives under TurnID).
+	EpisodeID    string                   `json:"episode_id"`
 	TurnID       string                   `json:"turn_id"`
 	Task         types.TaskRepresentation `json:"task"`
 	ParentTurnID string                   `json:"parent_turn_id,omitempty"`
@@ -110,7 +116,7 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 		Skills: types.SubsystemResult{Status: "skipped"},
 	}
 	if plan.FastPath {
-		logger.Info("routing: fast path — no enrichment", "turn_id", input.TurnID)
+		logger.Info("routing: fast path — no enrichment", "episode_id", input.EpisodeID)
 		return result, nil
 	}
 
@@ -132,6 +138,7 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 
 	if plan.Memory {
 		f := workflow.ExecuteActivity(actx, "MemoryRetrieve", types.MemoryRetrieveInput{
+			EpisodeID:      input.EpisodeID,
 			TurnID:         input.TurnID,
 			RetrievalQuery: input.Task.RetrievalQuery,
 			ParentTurnID:   input.ParentTurnID,
@@ -141,7 +148,7 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 	}
 	if plan.Tools {
 		f := workflow.ExecuteActivity(actx, "ToolDiscover", types.ToolDiscoverInput{
-			TurnID:         input.TurnID,
+			EpisodeID:      input.EpisodeID,
 			RetrievalQuery: input.Task.RetrievalQuery,
 			Entities:       input.Task.Entities,
 		})
@@ -149,6 +156,7 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 	}
 	if plan.Skills {
 		f := workflow.ExecuteActivity(actx, "SkillDiscover", types.SkillDiscoverInput{
+			EpisodeID:      input.EpisodeID,
 			TurnID:         input.TurnID,
 			RetrievalQuery: input.Task.RetrievalQuery,
 			Reconcile:      reconcile,
@@ -208,7 +216,7 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 	}
 	cancelRetrieval()
 
-	logger.Info("routing: retrieval fan-out complete", "turn_id", input.TurnID,
+	logger.Info("routing: retrieval fan-out complete", "episode_id", input.EpisodeID,
 		"memory", result.Memory.Status, "tools", result.Tools.Status, "skills", result.Skills.Status)
 
 	// --- step 6: compose a skill, only if discovery actually produced
@@ -220,8 +228,8 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
 		})
 		var cr types.SubsystemResult
-		if err := workflow.ExecuteActivity(cctx, "ComposeSkill", types.ComposeSkillInput{TurnID: input.TurnID, Reconcile: reconcile}).Get(cctx, &cr); err != nil {
-			logger.Warn("routing: ComposeSkill failed", "turn_id", input.TurnID, "error", err)
+		if err := workflow.ExecuteActivity(cctx, "ComposeSkill", types.ComposeSkillInput{EpisodeID: input.EpisodeID, Reconcile: reconcile}).Get(cctx, &cr); err != nil {
+			logger.Warn("routing: ComposeSkill failed", "episode_id", input.EpisodeID, "error", err)
 		} else {
 			result.ComposedSkill = cr.Status == "ok" && cr.Count > 0
 		}
@@ -237,7 +245,9 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 // and the turn proceeds un-enriched rather than making them wait for
 // enrichment they've already superseded. Returns the RoutingResult (zero
 // value if routing failed or was interrupted — always safe to read).
-func startRouting(ctx workflow.Context, turnID, parentTurnID string, task types.TaskRepresentation, pendingMessages *[]types.SignalPayload) RoutingResult {
+// episodeID is the retrieval staging key (== turnID for a new episode's opening
+// turn); turnID is the current turn.
+func startRouting(ctx workflow.Context, episodeID, turnID, parentTurnID string, task types.TaskRepresentation, pendingMessages *[]types.SignalPayload) RoutingResult {
 	logger := workflow.GetLogger(ctx)
 
 	routingCtx, cancelRouting := workflow.WithCancel(ctx)
@@ -246,6 +256,7 @@ func startRouting(ctx workflow.Context, turnID, parentTurnID string, task types.
 		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
 	}
 	future := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(routingCtx, cwo), RoutingWorkflow, RoutingWorkflowInput{
+		EpisodeID:    episodeID,
 		TurnID:       turnID,
 		Task:         task,
 		ParentTurnID: parentTurnID,

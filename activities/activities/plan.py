@@ -1,12 +1,16 @@
 """The living checkpoint ledger — request pipeline step 8
-(docs/components/request-pipeline/08-planning.md).
+(docs/components/request-pipeline/08-planning.md), episode-scoped
+(docs/components/episode-lifecycle.md).
 
-`ComposeSkill` seeds a `turn_plan` from the merged procedure's ordered steps.
-The model reports advancement through the `plan_progress` meta-tool; `ModelCall`
-peels those calls off the response and applies them here (no separate activity —
-same shape as `declare_next_step_hint`, which the providers strip inline).
+`ComposeSkill` seeds a `turn_plan` (keyed by `episode_id`) from the merged
+procedure's ordered steps, ONCE when the episode opens. The model reports
+advancement through the `plan_progress` meta-tool; `ModelCall` peels those
+calls off the response and applies them here (no separate activity — same
+shape as `declare_next_step_hint`, which the providers strip inline).
 `build_conversation` renders the current state into a compact progress block
-every `ModelCall`. `RecordSkillOutcome` reads the final state for synthesis.
+every `ModelCall`. `RecordSkillOutcome` reads the final state for synthesis
+when the episode closes. The ledger persists across every turn of the episode
+— a follow-up turn advances the same checkpoints rather than seeding new ones.
 
 No I/O helpers beyond the four below; every read/write takes an open
 connection so the caller controls the transaction.
@@ -34,22 +38,23 @@ class Checkpoint:
     note: str | None
 
 
-async def seed(conn, turn_id: str, checkpoints: list[dict]) -> int:
+async def seed(conn, episode_id: str, checkpoints: list[dict]) -> int:
     """Write the initial ledger. `checkpoints` is an ordered list of
-    `{intent, done_when?}`. Idempotent per (turn_id, cp_id) so a ComposeSkill
+    `{intent, done_when?}`. Idempotent per (episode_id, cp_id) so a ComposeSkill
     retry re-writes rather than colliding; a re-seed after progress was recorded
-    would clobber status, so callers only seed once (ComposeSkill runs once)."""
+    would clobber status, so callers only seed once (ComposeSkill runs once per
+    episode, on the opening turn)."""
     rows = [
-        (turn_id, f"cp{i}", i, str(cp.get("intent", "")).strip(), str(cp.get("done_when", "") or "").strip())
+        (episode_id, f"cp{i}", i, str(cp.get("intent", "")).strip(), str(cp.get("done_when", "") or "").strip())
         for i, cp in enumerate(checkpoints, start=1)
         if str(cp.get("intent", "")).strip()
     ]
     if not rows:
         return 0
     await conn.executemany(
-        "INSERT INTO turn_plan (turn_id, cp_id, checkpoint, intent, done_when) "
+        "INSERT INTO turn_plan (episode_id, cp_id, checkpoint, intent, done_when) "
         "VALUES ($1, $2, $3, $4, $5) "
-        "ON CONFLICT (turn_id, cp_id) DO UPDATE SET "
+        "ON CONFLICT (episode_id, cp_id) DO UPDATE SET "
         "  checkpoint = EXCLUDED.checkpoint, intent = EXCLUDED.intent, "
         "  done_when = EXCLUDED.done_when, updated_at = now()",
         rows,
@@ -57,7 +62,7 @@ async def seed(conn, turn_id: str, checkpoints: list[dict]) -> int:
     return len(rows)
 
 
-async def apply_progress(conn, turn_id: str, updates: list[dict]) -> int:
+async def apply_progress(conn, episode_id: str, updates: list[dict]) -> int:
     """Apply the model's `plan_progress` reports. Each update is
     `{checkpoint_id, status, note?}` for an existing checkpoint, or
     `{checkpoint_id, intent, status?, note?}` to append a step the model added
@@ -67,7 +72,7 @@ async def apply_progress(conn, turn_id: str, updates: list[dict]) -> int:
         return 0
     existing = {
         r["cp_id"]: r["checkpoint"]
-        for r in await conn.fetch("SELECT cp_id, checkpoint FROM turn_plan WHERE turn_id = $1", turn_id)
+        for r in await conn.fetch("SELECT cp_id, checkpoint FROM turn_plan WHERE episode_id = $1", episode_id)
     }
     next_ord = (max(existing.values()) + 1) if existing else 1
     applied = 0
@@ -82,8 +87,8 @@ async def apply_progress(conn, turn_id: str, updates: list[dict]) -> int:
                 continue
             await conn.execute(
                 "UPDATE turn_plan SET status = $3, note = COALESCE($4, note), updated_at = now() "
-                "WHERE turn_id = $1 AND cp_id = $2",
-                turn_id,
+                "WHERE episode_id = $1 AND cp_id = $2",
+                episode_id,
                 cp_id,
                 status,
                 note,
@@ -94,10 +99,10 @@ async def apply_progress(conn, turn_id: str, updates: list[dict]) -> int:
             if not intent:
                 continue
             await conn.execute(
-                "INSERT INTO turn_plan (turn_id, cp_id, checkpoint, intent, status, note) "
+                "INSERT INTO turn_plan (episode_id, cp_id, checkpoint, intent, status, note) "
                 "VALUES ($1, $2, $3, $4, $5, $6) "
-                "ON CONFLICT (turn_id, cp_id) DO NOTHING",
-                turn_id,
+                "ON CONFLICT (episode_id, cp_id) DO NOTHING",
+                episode_id,
                 cp_id,
                 next_ord,
                 intent,
@@ -110,11 +115,11 @@ async def apply_progress(conn, turn_id: str, updates: list[dict]) -> int:
     return applied
 
 
-async def read(conn, turn_id: str) -> list[Checkpoint]:
+async def read(conn, episode_id: str) -> list[Checkpoint]:
     rows = await conn.fetch(
         "SELECT cp_id, checkpoint, intent, done_when, status, note FROM turn_plan "
-        "WHERE turn_id = $1 ORDER BY checkpoint, cp_id",
-        turn_id,
+        "WHERE episode_id = $1 ORDER BY checkpoint, cp_id",
+        episode_id,
     )
     return [
         Checkpoint(
@@ -127,6 +132,13 @@ async def read(conn, turn_id: str) -> list[Checkpoint]:
         )
         for r in rows
     ]
+
+
+def all_terminal(checkpoints: list[Checkpoint]) -> bool:
+    """True when the ledger has at least one checkpoint and every one is
+    done/skipped — the episode's plan is finished (episode-lifecycle.md, the
+    `plan_complete` close trigger)."""
+    return bool(checkpoints) and all(cp.status in _TERMINAL for cp in checkpoints)
 
 
 _MARK = {"done": "[x]", "skipped": "[-]", "revised": "[~]"}

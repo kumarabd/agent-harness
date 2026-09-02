@@ -1,5 +1,17 @@
 # Request Pipeline — Step 8: Planning
 
+> **SUPERSEDED IN PART by [`../episode-lifecycle.md`](../episode-lifecycle.md)
+> (2026-09-01):** the plan ledger is now **episode-scoped**, not turn-scoped.
+> `turn_plan` keys on `episode_id` (the anchor turn_id — migration `018`
+> renamed the column), is seeded ONCE when the episode opens, and persists
+> across every turn of the episode; `plan_progress` advances that one ledger.
+> `RecordSkillOutcome` fires once when the episode closes, not per turn. The
+> "Reconciliation trigger" below now has two callers — a mid-turn follow-up
+> and a between-turn continuation — both re-keyed on `episode_id`. Everything
+> else in this doc (the living-ledger decision, `plan_progress` mechanics,
+> subagents-as-full-agents, degradation posture) stands as written; mentally
+> substitute "episode" for "turn" wherever the ledger's lifetime is discussed.
+>
 > STATUS: DESIGN (2026-08-31). Resolves the "step 8 not designed" open question
 > in [`../request-pipeline.md`](../request-pipeline.md).
 > **Built:** (1) the subagent gate fix — steps 2 + 3 (`ClassifyRequest`,

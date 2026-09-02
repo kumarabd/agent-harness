@@ -24,12 +24,12 @@ root_status="$(pg_query "SELECT status FROM turns WHERE turn_id = '$ROOT_TURN_ID
 ok "root turn completed (real ModelCall via prompt.assemble succeeded)"
 
 for kind in skill composed memory tool; do
-  n="$(pg_query "SELECT count(*) FROM turn_retrieval WHERE turn_id = '$ROOT_TURN_ID' AND kind = '$kind'")"
+  n="$(pg_query "SELECT count(*) FROM turn_retrieval WHERE episode_id = '$ROOT_TURN_ID' AND kind = '$kind'")"
   [ "${n:-0}" -ge 1 ] && ok "enrichment source present: kind='$kind' ($n rows)" \
     || echo "  NOTE: no kind='$kind' rows — that section was absent from the assembled prompt this run"
 done
 
-plan_n="$(pg_query "SELECT count(*) FROM turn_plan WHERE turn_id = '$ROOT_TURN_ID'")"
+plan_n="$(pg_query "SELECT count(*) FROM turn_plan WHERE episode_id = '$ROOT_TURN_ID'")"
 [ "${plan_n:-0}" -ge 1 ] && ok "turn_plan seeded ($plan_n checkpoints) — plan-progress section had content" \
   || echo "  NOTE: turn_plan empty — no composed skill produced checkpoints this run"
 

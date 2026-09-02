@@ -18,6 +18,7 @@
 > - [`07-tool-discovery.md`](request-pipeline/07-tool-discovery.md)
 > - [`08-planning.md`](request-pipeline/08-planning.md) — **built**; the living checkpoint ledger + subagents-as-full-agents + reconciliation trigger
 > - [`09-prompt-assembly.md`](request-pipeline/09-prompt-assembly.md) — **built**; the section model + budget arbitration
+> - [`../episode-lifecycle.md`](episode-lifecycle.md) — **built**; the episode as the unit of work — plan ledger, staged retrieval, and skill recording are episode-scoped, not per-turn
 
 ### Role (one line)
 
@@ -92,7 +93,7 @@ behavior when its inputs are absent.**
 | 5 | Skill discovery | `05` + `skill-subsystem.md` | **built** (phases 1–5: flat-cosine + full scoring incl. recency → `kind='skill'`; cluster hierarchy deferred) |
 | 6 | Skill composition | `06` + `skill-subsystem.md` | **built** (merge → `kind='composed'` → into the prompt) |
 | 7 | Tool discovery | `07-tool-discovery.md` | **implemented** (`ToolDiscover` → `discover_tools`, stages `kind='tool'`) |
-| 8 | Planning | `08-planning.md` | **built** — `turn_plan` ledger (migration `017`) seeded by `ComposeSkill`, `plan_progress` meta-tool applied in `ModelCall`, progress block in `build_conversation`, final state → synthesis. Subagents run steps 2–3 + skill recording. Mid-turn follow-up → detached `RoutingWorkflow` `Mode="reconcile"`. Failure-run reconciliation + DAG deferred. |
+| 8 | Planning | `08-planning.md`, `episode-lifecycle.md` | **built** — `turn_plan` ledger (migration `017`) seeded by `ComposeSkill`, `plan_progress` meta-tool applied in `ModelCall`, progress block in `build_conversation`, final state → synthesis. **Episode-scoped since 2026-09-01 (`episode-lifecycle.md`, migration `018`): the ledger + staged retrieval key on `episode_id` and persist across a task's turns; the pipeline runs once per episode, not per turn.** Subagents run steps 2–3 + skill recording. Follow-up → detached `RoutingWorkflow` `Mode="reconcile"` (mid-turn *and* between-turn continuation). Failure-run reconciliation + DAG deferred. |
 | 9 | Prompt assembly | `09-prompt-assembly.md` | **built** — `prompt.py`'s section model (composed skill, plan progress, capabilities hint, memory, in that order) + budget arbitration (sheds capabilities then memory). `llm.build_conversation` now a thin call-through. |
 | 10 | Model execution | `components/temporal-workflow.md` | done |
 | 11 | Memory write-back | `components/memory-slot.md` | partial |
@@ -147,6 +148,21 @@ for any misroute or missing backend is the current, un-enriched harness.
 
 ### Notes Log
 
+- 2026-09-01: **Episodes — `episode-lifecycle.md`. Fixes multi-turn synthesis
+  fragmentation.** The plan ledger + staged retrieval (`turn_plan` /
+  `turn_retrieval`, key column renamed `turn_id` → `episode_id`, migration
+  `018`) and `RecordSkillOutcome` become **episode-scoped**: one episode = one
+  task from first message to completion. New `episodes` table + `turns.episode_id`;
+  `activities/episode.py` + `OpenEpisode` / `CompleteEpisode` /
+  `CloseSubagentEpisode` / `CloseSessionEpisodes` activities;
+  `CloseSessionEpisodesWorkflow` dispatched on the coordinator's idle-exit.
+  `turn.go`: after classify, a non-conversational turn opens a new episode or
+  attaches to the session's open one (`ClassifyRequest` gains `continues_prior`;
+  degraded path uses embedding similarity). A new-episode turn runs the full
+  pipeline once; a continuation turn only fires a reconcile refresh.
+  `RecordSkillOutcome` fires once, at episode close, over the whole multi-turn
+  trajectory. `08-planning.md` partly superseded; `skill-subsystem.md`
+  "Recording" updated.
 - 2026-09-01: **Step 9 built — `09-prompt-assembly.md`. All 9 pre-LLM phases
   now built.** New `activities/activities/prompt.py`: `assemble(conn, turn_id,
   system_prompt, context_window)` — explicit section model (composed skill,

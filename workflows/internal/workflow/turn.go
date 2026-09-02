@@ -78,8 +78,9 @@ func CompressContextWorkflow(ctx workflow.Context, turnID string) error {
 // (docs/components/skill-subsystem.md, "Recording"). Same thin-wrapper
 // reasoning as WriteMemoryWorkflow: a detached child so the activity's
 // completion is recorded against a still-open history, not the turn's
-// already-closed one. Dispatched from TurnWorkflow's end-of-turn block for
-// top-level task turns of moderate/complex complexity.
+// already-closed one. Dispatched when an episode closes
+// (docs/components/episode-lifecycle.md) — once, over the whole multi-turn
+// trajectory; the activity itself gates on the episode's intent/complexity.
 func RecordSkillOutcomeWorkflow(ctx workflow.Context, input types.RecordSkillOutcomeInput) error {
 	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 	actx := workflow.WithActivityOptions(ctx, ao)
@@ -97,12 +98,31 @@ func RecordSkillOutcomeWorkflow(ctx workflow.Context, input types.RecordSkillOut
 	}
 	scctx := workflow.WithChildOptions(ctx, scwo)
 	sf := workflow.ExecuteChildWorkflow(scctx, SkillSynthesisWorkflow, types.SkillSynthesizeInput{
-		TriggerTurnID: input.TurnID,
+		TriggerTurnID: input.EpisodeID,
 	})
 	if err := sf.GetChildWorkflowExecution().Get(ctx, nil); err != nil {
 		workflow.GetLogger(ctx).Info("skill synthesis not started (already running or start failed)", "error", err)
 	}
 	return recordErr
+}
+
+// CloseSessionEpisodesWorkflow — docs/components/episode-lifecycle.md. Dispatched
+// detached (ABANDON) by the coordinator on its idle-exit: closes every still-open
+// top-level episode for the session (the model may never have marked the last
+// checkpoint; or the episode had no plan) and records each. Thin wrapper — the
+// activity does the closing and returns the ids, the workflow fans out the
+// detached RecordSkillOutcomeWorkflow children.
+func CloseSessionEpisodesWorkflow(ctx workflow.Context, sessionKey string) error {
+	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+	actx := workflow.WithActivityOptions(ctx, ao)
+	var res types.CloseSessionEpisodesResult
+	if err := workflow.ExecuteActivity(actx, "CloseSessionEpisodes", types.CloseSessionEpisodesInput{SessionKey: sessionKey}).Get(actx, &res); err != nil {
+		return err
+	}
+	for _, episodeID := range res.EpisodeIDs {
+		dispatchRecordSkillOutcome(ctx, episodeID, "")
+	}
+	return nil
 }
 
 // SkillSynthesisWorkflow — skill subsystem phase 3
@@ -636,24 +656,56 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 		}
 	}
 
-	// --- Step 3: routing + retrieval orchestration
-	// (docs/components/request-pipeline/03-routing.md). RoutingWorkflow (child,
-	// awaited) decides which retrieval subsystems this turn needs and runs the
-	// active subset in parallel under a phase deadline, staging results to
-	// turn_retrieval. Raced against an incoming message: a follow-up
-	// mid-routing cancels routing and the turn proceeds un-enriched — see
-	// startRouting. Best-effort like step 2. Held for the pipeline steps that
-	// consume it (planner, prompt assembly).
-	//
-	// For a subagent, parentTurnID is passed through so RoutingWorkflow inherits
-	// the parent's staged kind='memory' rows instead of re-querying agent-brain
-	// (skill + tool discovery still run fresh — the sub-task differs).
+	// --- Episode open / attach (docs/components/episode-lifecycle.md). A
+	// non-conversational turn either opens a new episode or attaches to the
+	// session's already-open one (the task the agent is mid-way through). The
+	// pipeline (routing, discovery, compose, plan seed) runs ONCE per episode,
+	// on the opening turn; a continuation turn only reconcile-refreshes. Empty
+	// episodeID == a conversational fast-path turn or a failed OpenEpisode
+	// (degrades to a single-turn, un-linked episode).
 	parentTurnID := ""
 	if input.ParentType == "turn" {
 		parentTurnID = input.ParentID
 	}
-	routing := startRouting(ctx, input.TurnID, parentTurnID, taskRep, &pendingMessages)
-	_ = routing
+	episodeID := ""
+	attached := false
+	if taskRep.Intent != "conversational" {
+		eao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+		eactx := workflow.WithActivityOptions(ctx, eao)
+		var openRes types.OpenEpisodeResult
+		if err := workflow.ExecuteActivity(eactx, "OpenEpisode", types.OpenEpisodeInput{TurnID: input.TurnID, Task: taskRep}).Get(eactx, &openRes); err != nil {
+			logger.Error("OpenEpisode failed, treating this turn as its own episode", "turn_id", input.TurnID, "error", err)
+			episodeID = input.TurnID
+		} else {
+			episodeID = openRes.EpisodeID
+			attached = openRes.Attached
+			logger.Info("episode resolved", "turn_id", input.TurnID, "episode_id", episodeID, "attached", attached, "superseded", openRes.SupersededEpisodeID)
+			if openRes.SupersededEpisodeID != "" {
+				dispatchRecordSkillOutcome(ctx, openRes.SupersededEpisodeID, "")
+			}
+		}
+	}
+
+	// --- Step 3: routing + retrieval orchestration
+	// (docs/components/request-pipeline/03-routing.md). For a NEW episode:
+	// RoutingWorkflow (child, awaited) decides which retrieval subsystems this
+	// turn needs, runs them in parallel, and seeds the plan ledger — all keyed
+	// on episodeID. For a CONTINUATION turn (attached): a detached reconcile
+	// pass refreshes the episode's memory + skill rows and the composed block
+	// against the new message, but does NOT re-run tool discovery or re-seed
+	// the plan (episode-lifecycle.md). For a subagent, parentTurnID lets
+	// MemoryRetrieve inherit the parent episode's kind='memory' rows.
+	switch {
+	case episodeID == "":
+		// conversational — no enrichment, as before.
+	case attached:
+		dispatchReconcileRouting(ctx, episodeID, input.TurnID, taskRep, "attach")
+	default:
+		// startRouting races its own completion against a follow-up message and
+		// stages everything to Postgres; its return value is no longer read
+		// (the reconcile-trigger gate is episodeID != "" now).
+		startRouting(ctx, episodeID, input.TurnID, parentTurnID, taskRep, &pendingMessages)
+	}
 
 	var stopReason string
 
@@ -691,6 +743,7 @@ loop:
 		mctx := workflow.WithActivityOptions(cancelCtx, mao)
 		modelInput := types.ModelCallInput{
 			TurnID:       input.TurnID,
+			EpisodeID:    episodeID,
 			ContextSeq:   contextSeq,
 			HintModality: hintModality,
 			HintTier:     hintTier,
@@ -930,26 +983,15 @@ loop:
 				return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
 			}
 
-			// --- request-pipeline/08-planning.md, "Reconciliation trigger":
-			// a mid-turn follow-up is a course correction. Re-run retrieval
-			// (memory + skills only, re-keyed on the follow-up, replacing the
-			// stale bundle; ComposeSkill regenerates the composed block but not
-			// the plan ledger). Detached (ABANDON) and best-effort — the next
-			// ModelCall picks up whatever landed by the time it assembles
-			// context; there's no benefit to blocking the correction on it.
-			// Skipped when routing never enriched this turn (fast path).
-			if !routing.Plan.FastPath {
-				rcwo := workflow.ChildWorkflowOptions{
-					WorkflowID:        input.TurnID + ":reconcile:" + strconv.Itoa(iterations),
-					ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
-				}
-				rcctx := workflow.WithChildOptions(ctx, rcwo)
-				rf := workflow.ExecuteChildWorkflow(rcctx, RoutingWorkflow, RoutingWorkflowInput{
-					TurnID: input.TurnID,
-					Task:   taskRep,
-					Mode:   "reconcile",
-				})
-				_ = rf.GetChildWorkflowExecution().Get(ctx, nil) // wait for start only
+			// --- request-pipeline/08-planning.md + episode-lifecycle.md,
+			// "Reconciliation trigger": a mid-turn follow-up is a course
+			// correction. Re-run retrieval (memory + skills only, re-keyed on
+			// the follow-up, replacing the episode's stale bundle; ComposeSkill
+			// regenerates the composed block but not the plan ledger). Detached
+			// (ABANDON) and best-effort — the next ModelCall picks up whatever
+			// landed. Skipped when this turn has no episode (conversational).
+			if episodeID != "" {
+				dispatchReconcileRouting(ctx, episodeID, input.TurnID, taskRep, "iter"+strconv.Itoa(iterations))
 			}
 			continue loop
 		}
@@ -1006,31 +1048,72 @@ loop:
 		interruptedPayload = deliverConnectionBased(ctx, interrupts, input.SessionKey, input.ConnectionID, input.TurnID)
 	}
 
-	// --- Skill subsystem phase 2 (docs/components/skill-subsystem.md,
-	// "Recording"). Detached child (ABANDON), same reasoning as
-	// WriteMemoryWorkflow. Any task turn — top-level or subagent — of
-	// moderate/complex complexity: a trivial task has no procedure worth
-	// learning, but a subagent's task is self-contained by construction and is
-	// prime procedural material (request-pipeline/08-planning.md). A
-	// classification failure (empty taskRep) still skips it. Subagent
-	// procedures join the same-session co-occurrence graph — session_key_of
-	// resolves a subagent turn_id to its session (ids.py).
-	if (input.ParentType == "session" || input.ParentType == "turn") && taskRep.Intent == "task" &&
-		(taskRep.Complexity == "moderate" || taskRep.Complexity == "complex") {
-		rcwo := workflow.ChildWorkflowOptions{
-			WorkflowID:        input.TurnID + ":record-skill",
-			ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
+	// --- Episode close / recording (docs/components/episode-lifecycle.md).
+	// Recording is episode-scoped now: it fires ONCE, when the episode closes,
+	// over the whole multi-turn trajectory — not per turn.
+	//   - A subagent's episode is its single turn: close it here and record
+	//     (record.py itself gates on the episode's intent/complexity).
+	//   - A top-level episode: record only when its plan ledger just went
+	//     all-terminal (CompleteEpisode reports that). Otherwise it stays open
+	//     and closes later — when the next task supersedes it, or on the
+	//     coordinator's idle-exit (CloseSessionEpisodes).
+	if episodeID != "" {
+		eao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+		eactx := workflow.WithActivityOptions(ctx, eao)
+		if input.ParentType == "turn" {
+			_ = workflow.ExecuteActivity(eactx, "CloseSubagentEpisode", types.CompleteEpisodeInput{EpisodeID: episodeID, StopReason: stopReason}).Get(eactx, nil)
+			dispatchRecordSkillOutcome(ctx, episodeID, stopReason)
+		} else {
+			var cr types.CompleteEpisodeResult
+			if err := workflow.ExecuteActivity(eactx, "CompleteEpisode", types.CompleteEpisodeInput{EpisodeID: episodeID, StopReason: stopReason}).Get(eactx, &cr); err != nil {
+				logger.Warn("CompleteEpisode failed", "episode_id", episodeID, "error", err)
+			} else if cr.Completed {
+				dispatchRecordSkillOutcome(ctx, episodeID, stopReason)
+			}
 		}
-		rcctx := workflow.WithChildOptions(ctx, rcwo)
-		rf := workflow.ExecuteChildWorkflow(rcctx, RecordSkillOutcomeWorkflow, types.RecordSkillOutcomeInput{
-			TurnID:     input.TurnID,
-			StopReason: stopReason,
-		})
-		_ = rf.GetChildWorkflowExecution().Get(ctx, nil) // wait for start only
 	}
 
 	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "interrupted_during_delivery", interruptedPayload != nil)
 	return types.TurnResult{TurnID: input.TurnID, StopReason: stopReason, Iterations: iterations, InterruptedDuringDelivery: interruptedPayload}, nil
+}
+
+// dispatchRecordSkillOutcome starts the detached RecordSkillOutcomeWorkflow for
+// a just-closed episode (docs/components/episode-lifecycle.md). ABANDON so it
+// outlives this turn; ALLOW_DUPLICATE so a later close path can re-attempt if an
+// earlier dispatch's activity failed. Waits only for the child to be accepted.
+func dispatchRecordSkillOutcome(ctx workflow.Context, episodeID, stopReason string) {
+	rcwo := workflow.ChildWorkflowOptions{
+		WorkflowID:            episodeID + ":record-skill",
+		ParentClosePolicy:     enumspb.PARENT_CLOSE_POLICY_ABANDON,
+		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+	}
+	rcctx := workflow.WithChildOptions(ctx, rcwo)
+	rf := workflow.ExecuteChildWorkflow(rcctx, RecordSkillOutcomeWorkflow, types.RecordSkillOutcomeInput{
+		EpisodeID:  episodeID,
+		StopReason: stopReason,
+	})
+	_ = rf.GetChildWorkflowExecution().Get(ctx, nil)
+}
+
+// dispatchReconcileRouting starts a detached reconcile-mode RoutingWorkflow —
+// refresh the episode's memory + skill rows and the composed block against the
+// latest message, leaving the plan ledger and tool discovery alone
+// (docs/components/episode-lifecycle.md, "Reconciliation, unified"). Fired both
+// on a between-turn continuation (tag "attach") and a mid-turn follow-up (tag
+// "iterN"). ABANDON, best-effort — the next ModelCall uses whatever landed.
+func dispatchReconcileRouting(ctx workflow.Context, episodeID, turnID string, task types.TaskRepresentation, tag string) {
+	rcwo := workflow.ChildWorkflowOptions{
+		WorkflowID:        turnID + ":reconcile:" + tag,
+		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
+	}
+	rcctx := workflow.WithChildOptions(ctx, rcwo)
+	rf := workflow.ExecuteChildWorkflow(rcctx, RoutingWorkflow, RoutingWorkflowInput{
+		EpisodeID: episodeID,
+		TurnID:    turnID,
+		Task:      task,
+		Mode:      "reconcile",
+	})
+	_ = rf.GetChildWorkflowExecution().Get(ctx, nil) // wait for start only
 }
 
 // dispatchSubagentManifests fans out one SubagentManifest activity per

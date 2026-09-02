@@ -533,16 +533,17 @@ class RealModelResult:
 
 
 async def build_conversation(
-    conn, turn_id: str, system_prompt: str, context_window: int = 0
+    conn, turn_id: str, episode_id: str, system_prompt: str, context_window: int = 0
 ) -> tuple[list[dict], int]:
     """Thin call-through to `prompt.assemble` — request pipeline step 9
     (docs/components/request-pipeline/09-prompt-assembly.md) owns the section
     model, ordering, and budget arbitration; this stays the stable call site
-    model_call.py already uses. `context_window` (0 if unknown, e.g. the
-    fixture path) bounds how much of it enrichment may consume before
-    `prompt.assemble` starts shedding sections.
+    model_call.py already uses. `episode_id` (docs/components/episode-lifecycle.md)
+    keys the enrichment sections; empty for a conversational fast-path turn.
+    `context_window` (0 if unknown, e.g. the fixture path) bounds how much of it
+    enrichment may consume before `prompt.assemble` starts shedding sections.
     """
-    return await prompt.assemble(conn, turn_id, system_prompt, context_window)
+    return await prompt.assemble(conn, turn_id, episode_id, system_prompt, context_window)
 
 
 # call_model / call_model_streaming moved to

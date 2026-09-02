@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Expectations for plan-progress-lifecycle.json — request-pipeline/08-planning.md.
 #
-# The three scripted plan_progress updates must land in turn_plan under the
-# ids this fixture chose (c1/c2/c3 — none of which ComposeSkill's cp1..cpN
-# seeding uses), regardless of whether the pipeline also seeded a plan from a
-# matched skill (it usually does — even a short question routes to skills on
-# this deploy):
+# The three scripted plan_progress updates must land in turn_plan keyed by the
+# turn's episode_id (episode-lifecycle.md — == the root turn_id for a
+# single-turn scenario) under the ids this fixture chose (c1/c2/c3 — none of
+# which ComposeSkill's cp1..cpN seeding uses), regardless of whether the
+# pipeline also seeded a plan from a matched skill:
 #   c1 -> appended (unknown id + intent), status done
 #   c2 -> appended in step 1 with NO status (-> pending), updated to done in step 2
 #   c3 -> appended in step 2 with status skipped
@@ -27,7 +27,11 @@ root_status="$(pg_query "SELECT status FROM turns WHERE turn_id = '$ROOT_TURN_ID
 [ "$root_status" = "completed" ] || fail "root turn status = '$root_status', expected 'completed'"
 ok "root turn completed"
 
-row() { pg_query "SELECT checkpoint || '|' || status || '|' || intent FROM turn_plan WHERE turn_id = '$ROOT_TURN_ID' AND cp_id = '$1'"; }
+ep="$(pg_query "SELECT episode_id FROM turns WHERE turn_id = '$ROOT_TURN_ID'")"
+[ "$ep" = "$ROOT_TURN_ID" ] || fail "turns.episode_id = '$ep', expected the root turn id (OpenEpisode should have opened one for this task turn)"
+ok "episode opened, episode_id == root turn id"
+
+row() { pg_query "SELECT checkpoint || '|' || status || '|' || intent FROM turn_plan WHERE episode_id = '$ROOT_TURN_ID' AND cp_id = '$1'"; }
 
 c1="$(row c1)"; c2="$(row c2)"; c3="$(row c3)"
 [ -n "$c1" ] || fail "c1 missing from turn_plan — plan_progress append path did not run"
@@ -52,7 +56,7 @@ n1="${c1%%|*}"; n2="${c2%%|*}"; n3="${c3%%|*}"
 ok "the three were appended in order (ordinals $n1 < $n2 < $n3)"
 
 # any pipeline-seeded checkpoints sit below the appended ones
-seeded="$(pg_query "SELECT count(*) FROM turn_plan WHERE turn_id = '$ROOT_TURN_ID' AND cp_id LIKE 'cp%'")"
+seeded="$(pg_query "SELECT count(*) FROM turn_plan WHERE episode_id = '$ROOT_TURN_ID' AND cp_id LIKE 'cp%'")"
 echo "  (pipeline also seeded $seeded checkpoint(s) from a matched skill — appended ids start above them)"
 
 exit 0

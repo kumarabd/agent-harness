@@ -6,7 +6,7 @@
 #   - RoutingWorkflow child ({subagent}:routing) executes
 #   - RecordSkillOutcome fires -> a skill_candidates row keyed to the subagent
 #     turn_id (this NEVER happened for subagents before the gate removal)
-#   - the scripted plan_progress lands in turn_plan under the subagent turn_id
+#   - the scripted plan_progress lands in turn_plan under the subagent episode_id
 #
 # The RoutingWorkflow check uses `temporal workflow describe` against the
 # port-forward run_scenario.sh already set up on localhost:17233.
@@ -58,7 +58,7 @@ sub_cand="$(pg_query "SELECT outcome || '|' || (task_embedding IS NOT NULL) FROM
 echo "  (subagent candidate: outcome|has_embedding = $sub_cand)"
 
 # --- plan_progress landed on the subagent turn ---
-sub_cp="$(pg_query "SELECT checkpoint || '|' || status FROM turn_plan WHERE turn_id = '$SUB_TURN_ID' AND cp_id = 'audit-1'")"
+sub_cp="$(pg_query "SELECT checkpoint || '|' || status FROM turn_plan WHERE episode_id = '$SUB_TURN_ID' AND cp_id = 'audit-1'")"
 [ -n "$sub_cp" ] || fail "no turn_plan row 'audit-1' for the subagent turn — plan_progress not applied on a non-root turn"
 echo "$sub_cp" | grep -q "|done$" || fail "subagent's audit-1 = '$sub_cp', expected status done"
 ok "plan_progress applied on the subagent turn (audit-1 -> $sub_cp)"

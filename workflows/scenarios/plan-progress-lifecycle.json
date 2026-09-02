@@ -1,8 +1,8 @@
 {
-  "_comment": "request-pipeline/08-planning.md — the plan_progress meta-tool, on a turn that has NO composed skill (so turn_plan is never auto-seeded by ComposeSkill). This isolates the fixture-path handling: ModelCall.split_progress_calls peels plan_progress out of the tool stream, plan.apply_progress applies it — appending a new checkpoint when the id is unknown + an intent is given, updating status when it exists. Exercises done / skipped / (implicit) active across three steps. A 'thanks, quick question' style message keeps the real classifier off the task/skills path.",
+  "_comment": "request-pipeline/08-planning.md + episode-lifecycle.md — the plan_progress meta-tool. A task-shaped message opens an episode (episode_id set on ModelCallInput), but one obscure enough that SkillDiscover matches no seed -> ComposeSkill never runs -> turn_plan is never auto-seeded. That isolates the fixture-path append handling: ModelCall.split_progress_calls peels plan_progress out of the tool stream, plan.apply_progress applies it against episode_id — appending a new checkpoint when the id is unknown + an intent is given, updating status when it exists. Exercises done / skipped / (implicit) active across three steps.",
   "message": {
     "role": "user",
-    "content": "quick one — remind me what you said a checkpoint ledger is, then note that we covered it"
+    "content": "Write up how our checkpoint ledger works: pull the definition back up, restate it in plain terms, and note the mutation edge case."
   },
   "scripted_model_responses": [
     {

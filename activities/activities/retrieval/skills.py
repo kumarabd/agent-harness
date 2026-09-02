@@ -38,7 +38,7 @@ def _days_since(last_used_at, now: datetime) -> float | None:
     return max(0.0, (now - last_used_at).total_seconds() / 86400.0)
 
 
-def _applicable_scopes(turn_id: str) -> tuple[str, ...]:
+def _applicable_scopes(episode_id: str) -> tuple[str, ...]:
     # Phase 1: global only. project:/user: scoping lands once the session
     # carries that context (skill-subsystem.md, "scope shadowing").
     return ("global",)
@@ -58,10 +58,10 @@ class SkillDiscoverActivity:
 
         query_embedding = await embedding.embed(query)
         if query_embedding is None:
-            logger.info("SkillDiscover[%s]: embeddings unavailable — no skill retrieval", input.turn_id)
+            logger.info("SkillDiscover[%s]: embeddings unavailable — no skill retrieval", input.episode_id)
             return SubsystemResult(status="empty", count=0)
 
-        procedures = await store.current_procedures(self._pool, _applicable_scopes(input.turn_id))
+        procedures = await store.current_procedures(self._pool, _applicable_scopes(input.episode_id))
         if not procedures:
             return SubsystemResult(status="empty", count=0)
 
@@ -82,7 +82,7 @@ class SkillDiscoverActivity:
         chosen = skill_select.select(query_embedding, candidates, edges)
         if not chosen:
             logger.info(
-                "SkillDiscover[%s]: no procedure over the score floor (query=%r)", input.turn_id, query
+                "SkillDiscover[%s]: no procedure over the score floor (query=%r)", input.episode_id, query
             )
             return SubsystemResult(status="empty", count=0)
 
@@ -103,12 +103,12 @@ class SkillDiscoverActivity:
             for i, s in enumerate(chosen)
         ]
         if input.reconcile:
-            written = await replace_rows(self._pool, input.turn_id, "skill", rows)
+            written = await replace_rows(self._pool, input.episode_id, "skill", rows)
         else:
-            written = await write_rows(self._pool, input.turn_id, rows)
+            written = await write_rows(self._pool, input.episode_id, rows)
         logger.info(
             "SkillDiscover[%s]: staged %d skill row(s): %s",
-            input.turn_id,
+            input.episode_id,
             written,
             [s.id for s in chosen],
         )

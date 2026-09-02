@@ -156,6 +156,19 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			wmFuture := workflow.ExecuteChildWorkflow(wcctx, WriteMemoryWorkflow, input.SessionKey)
 			_ = wmFuture.GetChildWorkflowExecution().Get(wcctx, nil)
 
+			// docs/components/episode-lifecycle.md — session completion is also
+			// the catch-all episode-close boundary: any top-level episode still
+			// open (the model never marked the last checkpoint, or it had no
+			// plan) is closed and recorded here. Detached, same ABANDON
+			// reasoning as the WriteMemory dispatch above.
+			ecwo := workflow.ChildWorkflowOptions{
+				WorkflowID:        input.SessionKey + ":close-episodes:" + workflow.GetInfo(ctx).WorkflowExecution.RunID,
+				ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
+			}
+			ecctx := workflow.WithChildOptions(ctx, ecwo)
+			ecFuture := workflow.ExecuteChildWorkflow(ecctx, CloseSessionEpisodesWorkflow, input.SessionKey)
+			_ = ecFuture.GetChildWorkflowExecution().Get(ecctx, nil)
+
 			return nil
 		}
 

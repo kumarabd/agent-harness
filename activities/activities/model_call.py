@@ -147,7 +147,7 @@ class ModelCallActivity:
                 system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
                 platform = session_row["platform"] if session_row else None
                 conversation, context_tokens = await llm.build_conversation(
-                    conn, input.turn_id, system_prompt, context_window
+                    conn, input.turn_id, input.episode_id, system_prompt, context_window
                 )
 
                 # docs/components/context-slot.md's Memory-Access Tools —
@@ -211,10 +211,10 @@ class ModelCallActivity:
             # own transaction, before the message/tool_calls write below, so a
             # plan-bookkeeping failure can't poison that write.
             plan_updates, raw_tool_calls = plan.split_progress_calls(raw_tool_calls)
-            if plan_updates:
+            if plan_updates and input.episode_id:
                 try:
                     async with conn.transaction():
-                        applied = await plan.apply_progress(conn, input.turn_id, plan_updates)
+                        applied = await plan.apply_progress(conn, input.episode_id, plan_updates)
                     logger.info(
                         "ModelCall[%s:%d]: applied %d/%d plan update(s)",
                         input.turn_id, input.context_seq, applied, len(plan_updates),
