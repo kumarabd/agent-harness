@@ -58,7 +58,7 @@ func TestRoute(t *testing.T) {
 			RoutingPlan{Memory: true, Skills: true, Tools: true},
 		},
 		{
-			"zero confidence (step-2 fallback) takes the full path",
+			"very low confidence takes the full path",
 			types.TaskRepresentation{Intent: "task", Complexity: "moderate", Confidence: 0.0},
 			RoutingPlan{Memory: true, Skills: true, Tools: true},
 		},
@@ -92,7 +92,7 @@ func TestLaneIsDeliberate(t *testing.T) {
 		{types.TaskRepresentation{Intent: "question", Complexity: "moderate", Confidence: 0.9}, false},
 		{types.TaskRepresentation{Intent: "meta", Complexity: "complex", Confidence: 0.9}, false},
 		{types.TaskRepresentation{Intent: "conversational", Complexity: "trivial", Confidence: 0.9}, false},
-		{types.TaskRepresentation{Intent: "task", Complexity: "simple", Confidence: 0.3}, true}, // low-confidence fallback
+		{types.TaskRepresentation{Intent: "task", Complexity: "simple", Confidence: 0.3}, true}, // low-confidence override
 		{types.TaskRepresentation{Intent: "??", Complexity: "simple", Confidence: 0.9}, true},   // unknown intent
 	}
 	for _, c := range cases {
