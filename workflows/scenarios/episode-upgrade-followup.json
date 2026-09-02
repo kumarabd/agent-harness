@@ -1,0 +1,21 @@
+{
+  "_comment": "Second half — run against the SAME session key right after episode-upgrade-initial's turn:1 completes. Continues the locking topic but now asks for the work to be done: ClassifyRequest should return intent='task', continues_prior=true. OpenEpisode attaches turn:2 to turn:1's episode and calls _upgrade_classification, bumping the episode intent from 'question' to 'task'. episode-upgrade-followup.expect.sh checks the episode intent upgraded and that a skill_candidates row is written (it would NOT be if the intent had stayed 'question').",
+  "message": {
+    "role": "user",
+    "content": "Good — go implement the optimistic-locking approach in the orders service: add the version column, guard the update, and retry once on a version conflict."
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Checking how the orders service currently issues its updates.",
+      "tool_calls": [
+        { "name": "search", "is_subagent": false, "arguments": { "query": "orders service update statement data access layer" } }
+      ],
+      "usage": { "input_tokens": 110, "output_tokens": 30 }
+    },
+    {
+      "content": "Done: added a `version` integer column, changed the update to `WHERE id = ? AND version = ?` bumping version, and wrapped the call in a single retry that re-reads and re-applies on zero rows affected.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 130, "output_tokens": 70 }
+    }
+  ]
+}

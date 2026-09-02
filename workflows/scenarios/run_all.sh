@@ -86,6 +86,7 @@ SCENARIOS=(
   plan-progress-lifecycle
   skill-plan-integration
   subagent-full-agent
+  episode-plan-complete
 )
 
 PASSED=()

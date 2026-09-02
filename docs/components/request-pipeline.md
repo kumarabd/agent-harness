@@ -19,6 +19,7 @@
 > - [`08-planning.md`](request-pipeline/08-planning.md) — **built**; the living checkpoint ledger + subagents-as-full-agents + reconciliation trigger
 > - [`09-prompt-assembly.md`](request-pipeline/09-prompt-assembly.md) — **built**; the section model + budget arbitration
 > - [`../episode-lifecycle.md`](episode-lifecycle.md) — **built**; the episode as the unit of work — plan ledger, staged retrieval, and skill recording are episode-scoped, not per-turn
+> - [`../lane-model.md`](lane-model.md) — **design**; two lanes — **Lite** (memory only) and **Deliberate** (full pipeline + episode + RL). Skills / tools / plan ledger / episodes / RL recording are all Deliberate-only; Deliberate is `(task, moderate|complex)` + `(question, complex)` + `conf<0.5`
 
 ### Role (one line)
 

@@ -27,32 +27,43 @@ type RoutingPlan struct {
 	Tools    bool `json:"tools"`
 }
 
-// Route decides the RoutingPlan purely from step 2's task representation —
-// no I/O, deterministic, replay-safe, unit-testable without Temporal.
-// Conservative: it only skips a subsystem when the classification is confident
-// enough to justify it. A low-confidence or fallback classification
-// (Confidence < 0.5, which includes the Confidence == 0 neutral fallback)
-// takes the full path so nothing downstream is under-provisioned.
-func Route(task types.TaskRepresentation) RoutingPlan {
-	full := RoutingPlan{Memory: true, Skills: true, Tools: true}
+// laneIsDeliberate reports whether a turn takes the Deliberate lane
+// (docs/components/lane-model.md) — the full retrieval pipeline plus an episode
+// and RL recording. Everything else is the Lite lane: memory-only retrieval
+// (or nothing, for conversational), no episode, no skills/tools/plan/recording.
+// Pure, deterministic, replay-safe — the single source of truth for the lane
+// split, consumed by both Route() here and turn.go's OpenEpisode / recording
+// gates. Deliberate is exactly (task, moderate|complex), (question, complex),
+// plus the Confidence < 0.5 fallback (a misclassified real task must not be
+// under-provisioned) and any unrecognised intent.
+func laneIsDeliberate(task types.TaskRepresentation) bool {
 	if task.Confidence < 0.5 {
-		return full
+		return true
 	}
 	switch task.Intent {
-	case "conversational":
-		return RoutingPlan{FastPath: true}
-	case "meta":
-		return RoutingPlan{Memory: true}
+	case "conversational", "meta":
+		return false
 	case "question":
-		if task.Complexity == "trivial" || task.Complexity == "simple" {
-			return RoutingPlan{Memory: true}
-		}
-		return RoutingPlan{Memory: true, Skills: true}
+		return task.Complexity == "complex"
 	case "task":
-		return full
+		return task.Complexity == "moderate" || task.Complexity == "complex"
 	default:
-		return full
+		return true
 	}
+}
+
+// Route decides the RoutingPlan purely from step 2's task representation —
+// no I/O, deterministic, replay-safe, unit-testable without Temporal.
+// docs/components/lane-model.md: a Deliberate turn gets the full fan-out; a
+// Lite turn gets memory only, except pure chit-chat which needs nothing.
+func Route(task types.TaskRepresentation) RoutingPlan {
+	if laneIsDeliberate(task) {
+		return RoutingPlan{Memory: true, Skills: true, Tools: true}
+	}
+	if task.Intent == "conversational" {
+		return RoutingPlan{FastPath: true}
+	}
+	return RoutingPlan{Memory: true}
 }
 
 // RoutingWorkflowInput is RoutingWorkflow's input — a turn_id plus step 2's

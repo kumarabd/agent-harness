@@ -43,6 +43,15 @@ neutral fallback) takes the full path so nothing downstream is
 under-provisioned. Promote to per-subsystem `ShouldActivate(task)` predicates
 only when step 2 carries richer inputs.
 
+> **Being reworked by [`../lane-model.md`](../lane-model.md) (DESIGN, 2026-09-01):**
+> the rule table below collapses into two lanes — **Lite** (memory only, or
+> nothing for `conversational`) and **Deliberate** (the full pipeline + episode
+> + RL). Deliberate is exactly `(task, moderate)`, `(task, complex)`,
+> `(question, complex)`, plus the `confidence < 0.5` override; everything else
+> is Lite. Headline change: a `simple`/`trivial` `task` and a `moderate`
+> `question` drop to **memory only** (no skills, no tools, no plan ledger), and
+> only Deliberate opens an episode.
+
 **Rule table (v1 — `intent` + `complexity`):**
 
 | `intent` | `complexity` | Route |

@@ -218,11 +218,15 @@ type RecordSkillOutcomeInput struct {
 // --- docs/components/episode-lifecycle.md ---
 
 // OpenEpisodeInput — the activity reads the turn's parent_type / seed message /
-// session from Postgres; the workflow supplies the turn_id and step 2's task
-// representation.
+// session from Postgres; the workflow supplies the turn_id, step 2's task
+// representation, and WantNewEpisode (the Go-side laneIsDeliberate verdict —
+// docs/components/lane-model.md). WantNewEpisode only governs the no-open-episode
+// case: a Lite turn with nothing to attach to gets EpisodeID "" back. A turn
+// continuing an open episode always attaches regardless.
 type OpenEpisodeInput struct {
-	TurnID string             `json:"turn_id"`
-	Task   TaskRepresentation `json:"task"`
+	TurnID         string             `json:"turn_id"`
+	Task           TaskRepresentation `json:"task"`
+	WantNewEpisode bool               `json:"want_new_episode"`
 }
 
 // OpenEpisodeResult — EpisodeID is what to stage/key the turn under. Attached

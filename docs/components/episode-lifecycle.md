@@ -17,10 +17,21 @@
 > episode before a follow-up turn could attach. Fixed: a `wasIdle` guard so
 > the exit only triggers when the coordinator was genuinely idle-waiting —
 > giving a real post-turn grace window (`idleTTL`), which is what episode
-> attachment needs. The three scripted scenarios (`skill-plan-integration`,
-> `plan-progress-lifecycle`, `subagent-full-agent`) pass against the deploy;
-> the multi-turn attachment path is covered by the `episode-multiturn-*`
-> chained pair.
+> attachment needs.
+>
+> **Live-verified against the `agents` deploy (2026-09-01):** the scripted
+> scenarios (`skill-plan-integration`, `plan-progress-lifecycle`,
+> `subagent-full-agent`, `episode-plan-complete`) pass; the
+> `episode-multiturn` / `episode-supersede` / `episode-upgrade` chained pairs
+> pass (attach; supersede + record-as-failure; question→task upgrade + record);
+> `reconcile-followup` / `interrupt` still pass (coordinator-fix regression).
+> A **real ~4-turn teaching conversation** via the `starter` binary produced
+> **one episode → one `skill_candidates` row → one `learned:*` procedure**
+> (synthesis: `1 candidate → 1 created`), versus the pre-episode eval's 8-turn
+> conversation → 4 fragmented procedures. The synthesized procedure's *body*
+> captured the process shape, but its `trigger_text` was still topic-anchored
+> ("payments idempotency…") — the deferred `generalize.py` altitude fix (see
+> Deferred), not a regression.
 >
 > **Deviation from this doc as first written:** the tables were NOT renamed
 > (`turn_retrieval` / `turn_plan` keep their names) — only the key column
@@ -124,15 +135,24 @@ either.
 
 #### Open
 
+> **Refined by [`lane-model.md`](lane-model.md) (2026-09-01):** the trigger is
+> now *is this the Deliberate lane*, not just *is this non-conversational*. A
+> `simple`/`trivial` `task` and a non-`complex` `question` are Lite — they open
+> **no** episode. But a turn that *continues an open episode* always attaches,
+> even one that classifies Lite on its own ("yes, use Redis"). `OpenEpisode`
+> is the single decision point: `WantNewEpisode = laneIsDeliberate(task)`
+> governs only the no-open-episode case.
+
 A top-level turn arrives → `InsertMessage` (creates the `turns` row) →
 `ClassifyRequest`. Then:
 
 | classify result | episode action |
 |---|---|
-| `intent == conversational` | none — `turns.episode_id` stays null, fast path as today, the open episode is untouched |
-| non-conversational, **no open episode** | **open** — `episode_id = turn_id`, run the full pipeline |
-| non-conversational, **open episode exists**, classifier says this continues it | **attach** — `turns.episode_id = <open episode>`, skip route/discover/compose/**plan-seed**, refresh only (below) |
-| non-conversational, **open episode exists**, classifier says this is a new task | **supersede** the old (close + record it), then **open** a new one |
+| `intent == conversational` | none — `turns.episode_id` stays null, fast path, any open episode untouched |
+| Lite turn (see `lane-model.md`), **no open episode** | none — `episode_id == ""`, memory-only routing under `turn_id` |
+| Deliberate turn, **no open episode** | **open** — `episode_id = turn_id`, run the full pipeline |
+| **open episode exists**, classifier says this continues it | **attach** — `turns.episode_id = <open episode>`, refresh only (below); any lane |
+| **open episode exists**, classifier says this is a new task | **supersede** the old (close + record it); then open a fresh episode only if the new turn is itself Deliberate |
 
 **Continuation detection.** `ClassifyRequest` gains a `continues_prior` boolean.
 It already reads a recent-conversation tail and resolves follow-up references

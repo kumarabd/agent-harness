@@ -30,6 +30,11 @@ _MAX_TASK_TEXT_CHARS = 2_000
 # The loop stop reason that means the model chose to answer rather than being
 # cut off by a limit or a run of failures.
 _SUCCESS_STOP_REASONS = {"no_tool_calls"}
+# The Deliberate lane (docs/components/lane-model.md): only episodes of this
+# shape are worth learning a procedure from. Only Deliberate turns open an
+# episode at all, so in practice this always passes for an episode that exists
+# — kept as a defensive restatement of the lane rule.
+_RECORD_INTENTS = {"task", "question"}
 _RECORD_COMPLEXITIES = {"moderate", "complex"}
 
 
@@ -53,7 +58,7 @@ class RecordSkillOutcomeActivity:
             close_reason = (episode["close_reason"] if episode else "") or ""
             last_stop_reason = (episode["last_stop_reason"] if episode else "") or input.stop_reason
 
-            if intent != "task" or complexity not in _RECORD_COMPLEXITIES:
+            if intent not in _RECORD_INTENTS or complexity not in _RECORD_COMPLEXITIES:
                 logger.info(
                     "RecordSkillOutcome[%s]: intent=%s complexity=%s — nothing worth learning",
                     episode_id, intent, complexity,

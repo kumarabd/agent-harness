@@ -172,13 +172,22 @@ class RecordSkillOutcomeInput:
 
 @dataclass
 class OpenEpisodeInput:
-    """OpenEpisode's input — docs/components/episode-lifecycle.md. The activity
-    reads the turn's parent_type / seed message / session from Postgres itself;
-    the workflow supplies the turn_id and step 2's task representation (for
-    intent/complexity/query/confidence/continues_prior)."""
+    """OpenEpisode's input — docs/components/episode-lifecycle.md +
+    docs/components/lane-model.md. The activity reads the turn's parent_type /
+    seed message / session from Postgres itself; the workflow supplies the
+    turn_id, step 2's task representation, and whether the turn's own lane
+    wants a fresh episode.
+
+    want_new_episode is the Go-side `laneIsDeliberate(task)` result. It only
+    governs the *no open episode to attach to* case: a Lite turn with nothing
+    open gets `episode_id = ""` (no episode). A turn that continues an *open*
+    episode always attaches regardless — a "yes, use Redis" follow-up to an
+    in-progress design is part of that Deliberate task even though the message
+    alone looks trivial."""
 
     turn_id: str = ""
     task: TaskRepresentation = field(default_factory=TaskRepresentation)
+    want_new_episode: bool = False
 
 
 @dataclass

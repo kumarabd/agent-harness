@@ -15,7 +15,9 @@
 set -euo pipefail
 
 ROOT_TURN_ID="$2"
-RECONCILE_WF="${ROOT_TURN_ID}:reconcile:1"
+# The mid-turn reconcile child is keyed "{turn}:reconcile:{loop-iteration}"
+# (episode-lifecycle.md; a between-turn continuation uses ":reconcile:attach"
+# instead). Discover the exact id by prefix rather than hard-coding the suffix.
 
 pg_query() {
   kubectl exec -i -n "$NAMESPACE" "$PG_POD" -- sh -c \
@@ -31,19 +33,28 @@ root_status="$(pg_query "SELECT status FROM turns WHERE turn_id = '$ROOT_TURN_ID
 ok "root turn completed after the follow-up folded in"
 
 # poll: the reconcile child is detached (ABANDON), may still be finishing
+RECONCILE_WF=""
 wf_status=""
 for _ in $(seq 1 30); do
-  wf_status="$(TEMPORAL_ADDRESS=localhost:17233 temporal workflow describe \
-    --namespace abishekk --workflow-id "$RECONCILE_WF" -o json 2>/dev/null \
-    | python3 -c 'import sys,json; print(json.load(sys.stdin)["workflowExecutionInfo"]["status"])' 2>/dev/null || true)"
+  RECONCILE_WF="$(TEMPORAL_ADDRESS=localhost:17233 temporal workflow list \
+    --namespace abishekk --query "WorkflowId STARTS_WITH '${ROOT_TURN_ID}:reconcile:'" \
+    -o json 2>/dev/null \
+    | python3 -c 'import sys,json
+r=json.load(sys.stdin) or []
+ids=[w.get("execution",{}).get("workflowId","") for w in r]
+print(next((i for i in ids if i), ""))' 2>/dev/null || true)"
+  if [ -n "$RECONCILE_WF" ]; then
+    wf_status="$(TEMPORAL_ADDRESS=localhost:17233 temporal workflow describe \
+      --namespace abishekk --workflow-id "$RECONCILE_WF" -o json 2>/dev/null \
+      | python3 -c 'import sys,json; print(json.load(sys.stdin)["workflowExecutionInfo"]["status"])' 2>/dev/null || true)"
+  fi
   case "$wf_status" in
     WORKFLOW_EXECUTION_STATUS_COMPLETED) break ;;
-    WORKFLOW_EXECUTION_STATUS_RUNNING|"") sleep 1 ;;
-    *) break ;;
+    *) sleep 1 ;;
   esac
 done
 
-[ -n "$wf_status" ] || fail "no $RECONCILE_WF workflow — the mid-turn follow-up did not trigger reconciliation"
+[ -n "$RECONCILE_WF" ] || fail "no {turn}:reconcile:* workflow — the mid-turn follow-up did not trigger reconciliation"
 ok "reconciliation RoutingWorkflow was dispatched ($RECONCILE_WF)"
 [ "$wf_status" = "WORKFLOW_EXECUTION_STATUS_COMPLETED" ] || fail "$RECONCILE_WF ended '$wf_status', expected COMPLETED — reconcile-mode routing errored"
 ok "reconcile-mode routing ran to completion (Memory + Skill re-key, no Route() gate)"

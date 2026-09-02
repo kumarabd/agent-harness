@@ -1,0 +1,14 @@
+{
+  "_comment": "First half of a chained pair for docs/components/episode-lifecycle.md — the `superseded` close trigger. A task; the agent asks a clarifying question and stops, so the episode opens and stays OPEN with an unfinished plan. episode-supersede-followup then submits an unrelated task, which the classifier should mark continues_prior=false → OpenEpisode closes THIS episode as superseded (recording it, outcome=failure) and opens a fresh one. Run back-to-back, same session key, within idleTTL.",
+  "message": {
+    "role": "user",
+    "content": "Migrate the user-profile table from MySQL to Postgres, including the app's data-access layer. What's the first thing you need from me?"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "To plan the migration safely: is there an acceptable write-downtime window, or does this need to be zero-downtime with dual writes?",
+      "tool_calls": [],
+      "usage": { "input_tokens": 90, "output_tokens": 35 }
+    }
+  ]
+}

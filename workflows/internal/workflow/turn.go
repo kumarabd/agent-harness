@@ -656,13 +656,14 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 		}
 	}
 
-	// --- Episode open / attach (docs/components/episode-lifecycle.md). A
-	// non-conversational turn either opens a new episode or attaches to the
-	// session's already-open one (the task the agent is mid-way through). The
-	// pipeline (routing, discovery, compose, plan seed) runs ONCE per episode,
-	// on the opening turn; a continuation turn only reconcile-refreshes. Empty
-	// episodeID == a conversational fast-path turn or a failed OpenEpisode
-	// (degrades to a single-turn, un-linked episode).
+	// --- Lane split (docs/components/lane-model.md). `OpenEpisode` is the one
+	// decision point: it checks for an open episode and, given this turn's own
+	// Deliberate verdict (`laneIsDeliberate`), returns the episode to work
+	// under — attaching to an open one (any turn continuing an in-progress task
+	// is Deliberate, even a "yes, use Redis" one-liner), superseding + opening a
+	// fresh one, opening a fresh one when there's nothing open, or `""` for a
+	// Lite turn with nothing to attach to. `episodeID != ""` ⟺ Deliberate.
+	// A conversational turn skips it entirely — Route() fast-paths.
 	parentTurnID := ""
 	if input.ParentType == "turn" {
 		parentTurnID = input.ParentID
@@ -673,13 +674,16 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 		eao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 		eactx := workflow.WithActivityOptions(ctx, eao)
 		var openRes types.OpenEpisodeResult
-		if err := workflow.ExecuteActivity(eactx, "OpenEpisode", types.OpenEpisodeInput{TurnID: input.TurnID, Task: taskRep}).Get(eactx, &openRes); err != nil {
-			logger.Error("OpenEpisode failed, treating this turn as its own episode", "turn_id", input.TurnID, "error", err)
-			episodeID = input.TurnID
+		wantNew := laneIsDeliberate(taskRep)
+		if err := workflow.ExecuteActivity(eactx, "OpenEpisode", types.OpenEpisodeInput{TurnID: input.TurnID, Task: taskRep, WantNewEpisode: wantNew}).Get(eactx, &openRes); err != nil {
+			logger.Error("OpenEpisode failed", "turn_id", input.TurnID, "error", err)
+			if wantNew {
+				episodeID = input.TurnID // Deliberate turn — fall back to a lone, un-linked episode
+			}
 		} else {
 			episodeID = openRes.EpisodeID
 			attached = openRes.Attached
-			logger.Info("episode resolved", "turn_id", input.TurnID, "episode_id", episodeID, "attached", attached, "superseded", openRes.SupersededEpisodeID)
+			logger.Info("lane resolved", "turn_id", input.TurnID, "episode_id", episodeID, "attached", attached, "superseded", openRes.SupersededEpisodeID, "want_new", wantNew)
 			if openRes.SupersededEpisodeID != "" {
 				dispatchRecordSkillOutcome(ctx, openRes.SupersededEpisodeID, "")
 			}
@@ -687,24 +691,26 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	}
 
 	// --- Step 3: routing + retrieval orchestration
-	// (docs/components/request-pipeline/03-routing.md). For a NEW episode:
-	// RoutingWorkflow (child, awaited) decides which retrieval subsystems this
-	// turn needs, runs them in parallel, and seeds the plan ledger — all keyed
-	// on episodeID. For a CONTINUATION turn (attached): a detached reconcile
-	// pass refreshes the episode's memory + skill rows and the composed block
-	// against the new message, but does NOT re-run tool discovery or re-seed
-	// the plan (episode-lifecycle.md). For a subagent, parentTurnID lets
-	// MemoryRetrieve inherit the parent episode's kind='memory' rows.
+	// (docs/components/request-pipeline/03-routing.md). Deliberate NEW episode:
+	// RoutingWorkflow (child, awaited) runs the active subsystems and seeds the
+	// plan ledger, keyed on episodeID. Deliberate CONTINUATION (attached): a
+	// detached reconcile pass refreshes the episode's memory + skill rows, no
+	// tool discovery or plan re-seed. Lite non-conversational: the same
+	// RoutingWorkflow, but Route() returns {Memory} only, staged under the
+	// turn's own id. Lite conversational: nothing (Route() fast-paths).
+	stagingID := episodeID
+	if stagingID == "" && taskRep.Intent != "conversational" {
+		stagingID = input.TurnID
+	}
 	switch {
-	case episodeID == "":
-		// conversational — no enrichment, as before.
+	case stagingID == "":
+		// conversational — no enrichment.
 	case attached:
 		dispatchReconcileRouting(ctx, episodeID, input.TurnID, taskRep, "attach")
 	default:
 		// startRouting races its own completion against a follow-up message and
-		// stages everything to Postgres; its return value is no longer read
-		// (the reconcile-trigger gate is episodeID != "" now).
-		startRouting(ctx, episodeID, input.TurnID, parentTurnID, taskRep, &pendingMessages)
+		// stages everything to Postgres; its return value is no longer read.
+		startRouting(ctx, stagingID, input.TurnID, parentTurnID, taskRep, &pendingMessages)
 	}
 
 	var stopReason string
@@ -991,7 +997,7 @@ loop:
 			// (ABANDON) and best-effort — the next ModelCall picks up whatever
 			// landed. Skipped when this turn has no episode (conversational).
 			if episodeID != "" {
-				dispatchReconcileRouting(ctx, episodeID, input.TurnID, taskRep, "iter"+strconv.Itoa(iterations))
+				dispatchReconcileRouting(ctx, episodeID, input.TurnID, taskRep, strconv.Itoa(iterations))
 			}
 			continue loop
 		}
@@ -1099,8 +1105,9 @@ func dispatchRecordSkillOutcome(ctx workflow.Context, episodeID, stopReason stri
 // refresh the episode's memory + skill rows and the composed block against the
 // latest message, leaving the plan ledger and tool discovery alone
 // (docs/components/episode-lifecycle.md, "Reconciliation, unified"). Fired both
-// on a between-turn continuation (tag "attach") and a mid-turn follow-up (tag
-// "iterN"). ABANDON, best-effort — the next ModelCall uses whatever landed.
+// on a between-turn continuation (tag "attach") and a mid-turn follow-up (tag =
+// the loop iteration). ABANDON, best-effort — the next ModelCall uses whatever
+// landed.
 func dispatchReconcileRouting(ctx workflow.Context, episodeID, turnID string, task types.TaskRepresentation, tag string) {
 	rcwo := workflow.ChildWorkflowOptions{
 		WorkflowID:        turnID + ":reconcile:" + tag,

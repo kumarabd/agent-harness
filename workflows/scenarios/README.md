@@ -119,9 +119,49 @@ closes at its turn end (`CloseSubagentEpisode`), so `subagent-full-agent`
 records promptly. `cleanup_test_data.sh` also clears the new `episodes` table.
 
 The multi-turn episode → **single** candidate behaviour (the whole point of
-the change) is exercised by the **`superpowers-b/`** live eval, not a scripted
-case — chained multi-turn scripting isn't supported by this runner (see the
-chained-pairs note above).
+the change) has its own chained pair, **`episode-multiturn-initial.json` /
+`episode-multiturn-followup.json`** (run manually, same shape as `reconcile-*`
+— back to back, same session key, within `idleTTL` so the coordinator hasn't
+closed the episode):
+
+```
+KEY="test:episode-mt:$(date +%s)"
+workflows/scenarios/run_scenario.sh episode-multiturn-initial  "$KEY"
+workflows/scenarios/run_scenario.sh episode-multiturn-followup "$KEY"   # run_scenario waits on turn:1, so
+                                                                        # turn:2 may still be running when its
+                                                                        # expect.sh fires — re-run the expect
+                                                                        # by hand once turn:2 completes, or just
+                                                                        # read episode-multiturn-followup.expect.sh
+```
+
+`episode-multiturn-followup.expect.sh` asserts: both turns carry the **same**
+`episode_id`, exactly **one** `episodes` row, and exactly **one**
+`skill_candidates` row whose transcript spans both turns (after the ~`idleTTL`
+idle close records it). Verified 2026-09-01 against the `agents` deploy — one
+candidate, `outcome=success`, `required_correction=true`.
+
+`superpowers-b/` remains the broader live eval (a real teaching conversation,
+no scripting).
+
+### Episode close-trigger coverage (added 2026-09-01, verified against the deploy)
+
+- **`episode-plan-complete.json`** (in `run_all.sh` — single turn) — the
+  scripted `plan_progress` drives every seeded checkpoint terminal, so the
+  episode closes AT TURN END with `close_reason='plan_complete'` and the
+  candidate lands within seconds (not the ~`idleTTL` idle sweep).
+- **`episode-supersede-initial/-followup`** (run manually, chained) — turn:1 a
+  task with an unfinished plan, turn:2 an unrelated task. The classifier
+  returns `continues_prior=false` → OpenEpisode closes turn:1's episode
+  `superseded` (recording it, `outcome=failure`) and opens a fresh one.
+- **`episode-upgrade-initial/-followup`** (run manually, chained) — turn:1 a
+  pure question (episode `intent='question'`, not recordable), turn:2 an
+  actionable continuation of the topic. OpenEpisode attaches AND
+  `_upgrade_classification` bumps the episode `question→task`, so it records.
+
+Run the chained ones like `episode-multiturn` above; each `*-followup.expect.sh`
+carries its own manual invocation line. `reconcile-followup.expect.sh` now
+discovers the reconcile child by `{turn}:reconcile:` prefix rather than a
+hard-coded suffix.
 
 ## Coverage added 2026-09-01 — request pipeline steps 8 & 9
 

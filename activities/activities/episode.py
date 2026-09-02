@@ -102,20 +102,29 @@ def _should_continue(task, open_embedding, anchor_embedding) -> bool:
     return cosine([float(x) for x in open_embedding], anchor_embedding) >= _CONT_FLOOR
 
 
-async def open_or_attach(conn, turn_id: str, task, anchor_embedding) -> OpenEpisodeResult:
+async def open_or_attach(conn, turn_id: str, task, want_new_episode: bool, anchor_embedding) -> OpenEpisodeResult:
     """`anchor_embedding` is the embedding of this turn's seed message (computed
     outside the transaction by the caller) — stored as the new episode's
-    task_embedding and reused for the degraded continuation check."""
+    task_embedding and reused for the degraded continuation check.
+
+    `want_new_episode` is the turn's own Deliberate-lane verdict; it only
+    governs the no-open-episode case (docs/components/lane-model.md). A turn
+    that continues an *open* episode always attaches; a turn that supersedes
+    one always closes it, then opens a fresh episode only if want_new_episode."""
     session_key = ids.session_key_of(turn_id)
     turn_row = await conn.fetchrow("SELECT parent_type FROM turns WHERE turn_id = $1", turn_id)
     parent_type = turn_row["parent_type"] if turn_row else "session"
 
     # A subagent's episode is its single turn — no session open/attach concept.
+    # A Lite subagent (want_new_episode False) takes the Lite lane like any other.
     if parent_type == "turn":
+        if not want_new_episode:
+            return OpenEpisodeResult(episode_id="", attached=False, superseded_episode_id="")
         await _insert(conn, turn_id, session_key, task, anchor_embedding)
         return OpenEpisodeResult(episode_id=turn_id, attached=False, superseded_episode_id="")
 
     open_ep = await _open_top_level(conn, session_key)
+    superseded = ""
     if open_ep is not None:
         if _should_continue(task, open_ep["task_embedding"], anchor_embedding):
             await conn.execute("UPDATE turns SET episode_id = $2 WHERE turn_id = $1", turn_id, open_ep["episode_id"])
@@ -124,8 +133,12 @@ async def open_or_attach(conn, turn_id: str, task, anchor_embedding) -> OpenEpis
             return OpenEpisodeResult(episode_id=open_ep["episode_id"], attached=True, superseded_episode_id="")
         await _close(conn, open_ep["episode_id"], "superseded", "superseded")
         superseded = open_ep["episode_id"]
-    else:
-        superseded = ""
+
+    if not want_new_episode:
+        # Lite turn with nothing to attach to (or nothing left after a
+        # supersede) — no episode.
+        logger.info("episode: turn %s is Lite, no episode (superseded=%r)", turn_id, superseded)
+        return OpenEpisodeResult(episode_id="", attached=False, superseded_episode_id=superseded)
 
     await _insert(conn, turn_id, session_key, task, anchor_embedding)
     logger.info("episode: turn %s OPENED new episode (superseded=%r)", turn_id, superseded)
@@ -211,7 +224,7 @@ class EpisodeActivities:
         emb = await self._embed(text)  # outside the transaction — it's a network call
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                return await open_or_attach(conn, inp.turn_id, inp.task, emb)
+                return await open_or_attach(conn, inp.turn_id, inp.task, inp.want_new_episode, emb)
 
     @activity.defn(name="CompleteEpisode")
     async def complete_episode(self, inp: CompleteEpisodeInput) -> CompleteEpisodeResult:

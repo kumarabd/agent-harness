@@ -302,7 +302,20 @@ Simplifications vs. the design below:
   names its assigned procedure just forces refinement to fire immediately
   (instead of waiting for `N_REFINE = 3`), re-synthesizing from the current
   body + that trajectory.
-- **Explicit `/skill` signal** — not wired.
+- **Explicit `/skill` signal** — not wired. **DEFERRED (2026-09-01):**
+  user-dictated procedures ("when you deploy a microservice: 1. build the image
+  2. bundle the chart 3. `helm upgrade --install` 4. verify health") currently
+  have no ingestion path — they only become a skill after the agent executes
+  them once and the RL loop reverse-engineers one from the trajectory. A direct
+  path (classify detects a dictated procedure → parse steps → write
+  `skill_procedures` at `provenance='dictated'`, high starting confidence,
+  RL loop refines from there) was sketched and shelved as not worth the
+  complexity yet. It also needs a mining carve-out so agent-brain doesn't
+  smear the step sequence across memory as disconnected "preferences" — the
+  intended boundary is: **memory owns the parameters that fill a skill's slots
+  and generalize across many skills ("we use Helm", "images → gcr.io/X");
+  the skill owns the procedure-specific ordering and structure.** `ComposeSkill`
+  already recombines the two; the gap is purely at ingestion.
 - **Failure annotation** appends a raw "a previous attempt failed: <task>" note
   when the procedure isn't being refined this run; when it *is*, the failure
   transcripts feed the generalization pass as the `notes` source instead.
