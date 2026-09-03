@@ -1,0 +1,8 @@
+{
+  "_comment": "The one scenario that exercises request-pipeline step 9 (prompt.assemble -> lcm.assemble) for real. `scripted_model_responses` is empty, so ModelCall at seq 0 finds no fixture and takes the real path: it assembles the full conversation (system prompt + summary + verbatim window with tool-call/tool-result reconstruction) from the multi-turn history real-assembly.setup.sql seeds, then makes one real fast-tier model call. Every other scenario short-circuits this with fixtures, which is exactly why the assembly cost and the N+1 tool_calls fetch (assembly.py / migration 019) went unmeasured. This scenario is also the only one that produces prompt_assemble_latency_seconds. The question is answerable only from the seeded history — '14:12' from verbatim messages, the '0.4%' error rate from a reconstructed tool result.",
+  "message": {
+    "role": "user",
+    "content": "Quick follow-up on that incident from earlier: what time did the bad deploy go out, and what was the error rate when you checked it afterwards?"
+  },
+  "scripted_model_responses": []
+}

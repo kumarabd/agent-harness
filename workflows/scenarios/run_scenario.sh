@@ -3,10 +3,11 @@
 # ALREADY-DEPLOYED, live cluster workers (loop-worker + tenant-worker poll
 # `agent-loop` regardless of who submits work onto it). Deliberately NOT
 # deep-conversation/run.sh's heavier shape: no local worker binaries, no
-# scaling cluster Deployments to 0, no real-LLM API calls or cost — every
-# scenario this runs is a scripted (`_test_scripted_responses`) fixture, so
-# the only "real" thing exercised is genuine Temporal + Postgres + tool-call
-# dispatch logic, at zero marginal cost, safe to run as often as needed.
+# scaling cluster Deployments to 0. The reason-act loop is fixture-scripted
+# (`_test_scripted_responses`), but the pre-LLM pipeline (classify / route /
+# discover / compose) makes real fast/medium-tier calls per turn, and the
+# `real-assembly` scenario deliberately runs one real reason-act call too —
+# see README.md's "Not zero-cost any more". A few cents per suite run.
 #
 # Requires:
 #   - kubectl context pointed at the right cluster

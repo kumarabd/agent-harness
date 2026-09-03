@@ -76,11 +76,14 @@ async def assemble(
 
     sections: list[_Section] = []
     ep = episode_id or turn_id
+    # composed skill / tools / memory are all turn_retrieval rows for this
+    # episode — one query, split by kind. plan progress is its own table.
+    staged = await _staged_texts(conn, ep)
     for name, text in (
-        ("composed_skill", await _composed_text(conn, ep)),
+        ("composed_skill", staged["composed_skill"]),
         ("plan_progress", await _plan_text(conn, ep)),
-        ("capabilities", await _capabilities_text(conn, ep)),
-        ("memory", await _memory_text(conn, ep)),
+        ("capabilities", staged["capabilities"]),
+        ("memory", staged["memory"]),
     ):
         if text:
             sections.append(_Section(name, text, lcm.estimate_tokens(text)))
@@ -119,36 +122,30 @@ async def assemble(
     return conversation, context_tokens
 
 
-async def _composed_text(conn, episode_id: str) -> str | None:
-    row = await conn.fetchrow(
-        "SELECT content FROM turn_retrieval WHERE episode_id = $1 AND kind = 'composed' ORDER BY seq LIMIT 1",
+async def _staged_texts(conn, episode_id: str) -> dict[str, str | None]:
+    """The composed skill (step 6), discovered tools (step 7), and long-term
+    memory (step 4) for this episode — one query over turn_retrieval, split by
+    `kind`. Each renders to its section text, or None when nothing was staged
+    (or, for composed, when the staged row is blank)."""
+    by_kind: dict[str, list[str]] = {}
+    for r in await conn.fetch(
+        "SELECT kind, content FROM turn_retrieval "
+        "WHERE episode_id = $1 AND kind IN ('composed', 'tool', 'memory') "
+        "ORDER BY kind, seq",
         episode_id,
-    )
-    if row is None or not row["content"].strip():
-        return None
-    return _COMPOSED_HEADER + row["content"]
+    ):
+        by_kind.setdefault(r["kind"], []).append(r["content"])
+
+    composed = by_kind.get("composed", [])
+    tools = by_kind.get("tool", [])
+    memory = by_kind.get("memory", [])
+    return {
+        "composed_skill": (_COMPOSED_HEADER + composed[0]) if composed and composed[0].strip() else None,
+        "capabilities": (_CAPABILITIES_HEADER + "\n".join(f"- {c}" for c in tools)) if tools else None,
+        "memory": (_MEMORY_HEADER + "\n".join(f"- {c}" for c in memory)) if memory else None,
+    }
 
 
 async def _plan_text(conn, episode_id: str) -> str | None:
     checkpoints = await plan.read(conn, episode_id)
     return plan.render_block(checkpoints) or None
-
-
-async def _capabilities_text(conn, episode_id: str) -> str | None:
-    rows = await conn.fetch(
-        "SELECT content FROM turn_retrieval WHERE episode_id = $1 AND kind = 'tool' ORDER BY seq",
-        episode_id,
-    )
-    if not rows:
-        return None
-    return _CAPABILITIES_HEADER + "\n".join(f"- {r['content']}" for r in rows)
-
-
-async def _memory_text(conn, episode_id: str) -> str | None:
-    rows = await conn.fetch(
-        "SELECT content FROM turn_retrieval WHERE episode_id = $1 AND kind = 'memory' ORDER BY seq",
-        episode_id,
-    )
-    if not rows:
-        return None
-    return _MEMORY_HEADER + "\n".join(f"- {r['content']}" for r in rows)

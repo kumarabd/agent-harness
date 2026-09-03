@@ -61,17 +61,30 @@ async def assemble(conn, session_key: str, system_prompt: str) -> tuple[list[dic
     messages = await session_messages(conn, session_key)
     window = messages[-VERBATIM_WINDOW_MESSAGES:]
 
+    # One query for every assistant message's tool_calls in the window,
+    # bucketed by message_id — not one round-trip per message. assemble()
+    # runs on every real ModelCall, and the window is up to
+    # VERBATIM_WINDOW_MESSAGES messages, so the per-message fetch was up to
+    # that many serial round-trips (each a full seq scan before migration
+    # 019's index). Ordering within a message is preserved by the ORDER BY.
+    tool_calls_by_message: dict = {}
+    assistant_ids = [m["message_id"] for m in window if m["role"] == "assistant"]
+    if assistant_ids:
+        for row in await conn.fetch(
+            "SELECT message_id, tool_call_id, tool_name, arguments, status, result "
+            "FROM tool_calls WHERE message_id = ANY($1::uuid[]) "
+            "ORDER BY message_id, started_at",
+            assistant_ids,
+        ):
+            tool_calls_by_message.setdefault(row["message_id"], []).append(row)
+
     for msg in window:
         if msg["role"] != "assistant":
             conversation.append({"role": msg["role"], "content": msg["content"]})
             context_tokens += estimate_tokens(msg["content"])
             continue
 
-        tool_call_rows = await conn.fetch(
-            "SELECT tool_call_id, tool_name, arguments, status, result "
-            "FROM tool_calls WHERE message_id = $1 ORDER BY started_at",
-            msg["message_id"],
-        )
+        tool_call_rows = tool_calls_by_message.get(msg["message_id"], [])
         if not tool_call_rows:
             conversation.append({"role": "assistant", "content": msg["content"]})
             context_tokens += estimate_tokens(msg["content"])

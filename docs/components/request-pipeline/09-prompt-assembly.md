@@ -143,6 +143,25 @@ downstream depended on the old order.
   swallowed-and-degraded one (unlike the *retrieval* phase's activities, which
   are best-effort because they run outside the load-bearing model call).
 
+### DB access (2026-09-02)
+
+Assembly runs on **every real `ModelCall`** (the fixture path in `model_call.py`
+skips it entirely — which is why scenario runs showed a near-zero `ModelCall`
+and this cost was invisible; the `real-assembly` scenario now forces the real
+path). Reads, per call:
+
+- `lcm.assemble`: session summaries (1), the session-wide message list (1), and
+  — **batched** — every window assistant message's `tool_calls` in one
+  `WHERE message_id = ANY(...)` (was one round-trip per message, each a seq
+  scan before `migration 019` added `tool_calls(message_id)`).
+- `prompt.assemble`: the composed skill / discovered tools / long-term memory
+  in **one** `turn_retrieval` query split by `kind` (was three), plus
+  `turn_plan` for plan progress (its own table, 1).
+
+`prompt_assemble_latency_seconds` (histogram, seconds — `metrics.SECONDS_LATENCY_METRICS`)
+is recorded around the `build_conversation` call in `model_call.py`. Real path
+only, by construction.
+
 ### Open Questions
 
 - **`ENRICHMENT_BUDGET_FRACTION = 0.25`** — placeholder, numeric-tuning-deferred

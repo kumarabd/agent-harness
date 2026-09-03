@@ -162,6 +162,77 @@ def parse_task_representation(raw: str) -> TaskRepresentation:
     )
 
 
+# One round-trip for everything the classifier prompt needs: the seed user
+# message, a short tail of prior conversation, and a one-line summary of the
+# open episode (its query + the agent's last message). Was four sequential
+# fetchrow/fetch calls — ~1s on the critical path, all of it dead wait since
+# the queries are independent given `turn_id` + `session_key`.
+#   $1 = turn_id   $2 = session_key   $3 = recent-message cap
+_CONTEXT_SQL = """
+WITH seed AS (
+    SELECT t.turn_seq, m.content
+    FROM turns t JOIN messages m ON m.parent_id = t.turn_id
+    WHERE t.turn_id = $1 AND m.seq = 0 AND m.role = 'user'
+),
+recent AS (
+    SELECT role, content, ts, ms FROM (
+        SELECT m.role AS role, m.content AS content, t.turn_seq AS ts, m.seq AS ms
+        FROM messages m JOIN turns t ON m.parent_id = t.turn_id
+        WHERE t.parent_id = $2 AND t.parent_type = 'session'
+          AND t.turn_seq < (SELECT turn_seq FROM seed)
+          AND m.role IN ('user', 'assistant') AND m.content IS NOT NULL
+        ORDER BY t.turn_seq DESC, m.seq DESC
+        LIMIT $3
+    ) latest
+),
+open_ep AS (
+    SELECT e.episode_id, e.retrieval_query
+    FROM episodes e JOIN turns t ON t.turn_id = e.episode_id
+    WHERE e.session_key = $2 AND e.status = 'open' AND t.parent_type = 'session'
+    ORDER BY e.opened_at DESC LIMIT 1
+),
+open_last AS (
+    SELECT m.content
+    FROM messages m JOIN turns t ON m.parent_id = t.turn_id
+    WHERE t.episode_id = (SELECT episode_id FROM open_ep)
+      AND m.role = 'assistant' AND m.content IS NOT NULL
+    ORDER BY t.turn_seq DESC, m.seq DESC LIMIT 1
+)
+SELECT
+    (SELECT content FROM seed) AS seed_content,
+    (SELECT json_agg(json_build_object('role', role, 'content', content) ORDER BY ts ASC, ms ASC)
+       FROM recent) AS recent_msgs,
+    (SELECT episode_id FROM open_ep) AS open_episode_id,
+    (SELECT retrieval_query FROM open_ep) AS open_retrieval_query,
+    (SELECT content FROM open_last) AS open_last_assistant
+"""
+
+
+def _format_recent_context(recent_msgs: str | None) -> str:
+    """`recent_msgs` is the `json_agg` from `_CONTEXT_SQL` (oldest-first) or
+    NULL for the session's first turn. Same shape `_recent_context` produced."""
+    if not recent_msgs:
+        return ""
+    rows = json.loads(recent_msgs)
+    return "\n".join(
+        f"{r['role']}: {_truncate((r['content'] or '').strip(), _MAX_RECENT_MESSAGE_CHARS)}" for r in rows
+    )
+
+
+def _format_open_task(
+    episode_id: str | None, retrieval_query: str | None, last_assistant: str | None, turn_id: str
+) -> str:
+    """One line describing the open top-level episode for the `continues_prior`
+    judgement. Empty when none is open, or when the open one IS this turn's own
+    episode (a mid-turn re-classify — shouldn't happen, but harmless)."""
+    if not episode_id or episode_id == turn_id:
+        return ""
+    line = (retrieval_query or "").strip() or "(task in progress)"
+    if last_assistant:
+        line += f"\nagent's last message: {_truncate(last_assistant.strip(), _MAX_RECENT_MESSAGE_CHARS)}"
+    return line
+
+
 # --- small pure helpers -----------------------------------------------------
 
 
@@ -251,21 +322,18 @@ class ClassifyRequestActivity:
         return representation
 
     async def _classify(self, turn_id: str) -> TaskRepresentation:
+        session_key = ids.session_key_of(turn_id)
         async with self._pool.acquire() as conn:
-            seed = await conn.fetchrow(
-                "SELECT t.turn_seq, m.content "
-                "FROM turns t JOIN messages m ON m.parent_id = t.turn_id "
-                "WHERE t.turn_id = $1 AND m.seq = 0 AND m.role = 'user'",
-                turn_id,
-            )
-            if seed is None or not seed["content"]:
-                # InsertMessage runs before ClassifyRequest and creates this
-                # row — its absence is a broken invariant, not a case to
-                # smooth over.
-                raise ClassificationError(f"no seed user message for turn {turn_id}")
-            user_message: str = seed["content"]
-            recent_context = await self._recent_context(conn, ids.session_key_of(turn_id), seed["turn_seq"])
-            open_task = await self._open_task_summary(conn, ids.session_key_of(turn_id), turn_id)
+            row = await conn.fetchrow(_CONTEXT_SQL, turn_id, session_key, _MAX_RECENT_MESSAGES)
+        if row is None or not row["seed_content"]:
+            # InsertMessage runs before ClassifyRequest and creates this row —
+            # its absence is a broken invariant, not a case to smooth over.
+            raise ClassificationError(f"no seed user message for turn {turn_id}")
+        user_message: str = row["seed_content"]
+        recent_context = _format_recent_context(row["recent_msgs"])
+        open_task = _format_open_task(
+            row["open_episode_id"], row["open_retrieval_query"], row["open_last_assistant"], turn_id
+        )
 
         config = model_registry.resolve("language", _CLASSIFIER_TIER)
         if not config.model:
@@ -298,52 +366,3 @@ class ClassifyRequestActivity:
         )
         return representation
 
-    async def _open_task_summary(self, conn, session_key: str, turn_id: str) -> str:
-        """One line describing the top-level episode the agent is currently
-        mid-way through (docs/components/episode-lifecycle.md), for the
-        `continues_prior` judgement. Empty when none is open, or when the open
-        one IS this turn's own episode (a mid-turn re-classify — shouldn't
-        happen, but harmless)."""
-        row = await conn.fetchrow(
-            "SELECT e.episode_id, e.retrieval_query FROM episodes e "
-            "JOIN turns t ON t.turn_id = e.episode_id "
-            "WHERE e.session_key = $1 AND e.status = 'open' AND t.parent_type = 'session' "
-            "ORDER BY e.opened_at DESC LIMIT 1",
-            session_key,
-        )
-        if row is None or row["episode_id"] == turn_id:
-            return ""
-        last_assistant = await conn.fetchrow(
-            "SELECT m.content FROM messages m JOIN turns t ON m.parent_id = t.turn_id "
-            "WHERE t.episode_id = $1 AND m.role = 'assistant' AND m.content IS NOT NULL "
-            "ORDER BY t.turn_seq DESC, m.seq DESC LIMIT 1",
-            row["episode_id"],
-        )
-        line = (row["retrieval_query"] or "").strip() or "(task in progress)"
-        if last_assistant and last_assistant["content"]:
-            line += f"\nagent's last message: {_truncate(last_assistant['content'].strip(), _MAX_RECENT_MESSAGE_CHARS)}"
-        return line
-
-    async def _recent_context(self, conn, session_key: str, turn_seq: int | None) -> str:
-        """A short tail of the prior conversation in this session — user and
-        assistant messages from earlier top-level turns, chronological.
-        Empty for the session's first turn."""
-        if turn_seq is None or turn_seq <= 1:
-            return ""
-        rows = await conn.fetch(
-            "SELECT m.role, m.content "
-            "FROM messages m JOIN turns t ON m.parent_id = t.turn_id "
-            "WHERE t.parent_id = $1 AND t.parent_type = 'session' AND t.turn_seq < $2 "
-            "  AND m.role IN ('user', 'assistant') AND m.content IS NOT NULL "
-            "ORDER BY t.turn_seq DESC, m.seq DESC "
-            "LIMIT $3",
-            session_key,
-            turn_seq,
-            _MAX_RECENT_MESSAGES,
-        )
-        if not rows:
-            return ""
-        return "\n".join(
-            f"{row['role']}: {_truncate((row['content'] or '').strip(), _MAX_RECENT_MESSAGE_CHARS)}"
-            for row in reversed(rows)
-        )

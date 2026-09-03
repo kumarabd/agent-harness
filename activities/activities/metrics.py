@@ -58,6 +58,7 @@ SECONDS_LATENCY_METRICS: tuple[str, ...] = (
     "classify_request_latency_seconds",
     "model_call_latency_seconds",
     "tool_call_latency_seconds",
+    "prompt_assemble_latency_seconds",
 )
 
 

@@ -72,6 +72,16 @@ call, `max_tokens=1100`). Three gaps fixed:
   attributes its counter already had, so classify latency can be sliced by
   whether it fell back (a fallback both costs latency *and* forces the
   Deliberate lane).
+- **`prompt_assemble_latency_seconds`** (2026-09-02, second pass) — step 9's
+  full context assembly (`prompt.assemble` → `lcm.assemble`), recorded around
+  `build_conversation` in `model_call.py`. Only the real ModelCall path
+  assembles (the fixture path returns a scripted response without it), so this
+  had been unmeasured — and unmeasurable from scenario runs — even though it
+  fires on every real turn iteration. Same pass batched `lcm.assemble`'s
+  per-window-message `tool_calls` fetch (`migration 019` for the index) and
+  collapsed `prompt.assemble`'s three `turn_retrieval` reads into one. The
+  `real-assembly` scenario is the regression cover — it omits fixtures so its
+  ModelCall runs the real assembly against a seeded multi-turn history.
 
 ### Future Scope: Rule-Driven Controlled Stop
 Deliberately not addressed in this pass — parked, not designed:

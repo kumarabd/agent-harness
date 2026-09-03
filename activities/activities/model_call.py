@@ -68,29 +68,29 @@ class ModelCallActivity:
     @activity.defn(name="ModelCall")
     async def __call__(self, input: ModelCallInput) -> ModelCallOutput:
         async with self._pool.acquire() as conn:
-            fixture = await conn.fetchrow(
-                "SELECT content, tool_calls, usage FROM _test_scripted_responses "
-                "WHERE turn_id = $1 AND seq = $2",
+            # One round-trip for both start-of-call reads: the recursion-guard
+            # `parent_type` (docs/components/temporal-workflow.md — is the
+            # CALLER itself a subagent, checked by the tool_calls minting loop
+            # below on both the fixture and real paths) and the scripted
+            # fixture for this call index, if any. `turns` always has the row
+            # (InsertMessage created it); `_test_scripted_responses.content` is
+            # NOT NULL, so a NULL here means no fixture matched.
+            head = await conn.fetchrow(
+                "SELECT t.parent_type, s.content, s.tool_calls, s.usage "
+                "FROM turns t "
+                "LEFT JOIN _test_scripted_responses s ON s.turn_id = t.turn_id AND s.seq = $2 "
+                "WHERE t.turn_id = $1",
                 input.turn_id,
                 input.context_seq,
             )
-
-            # docs/components/temporal-workflow.md's recursion-termination
-            # guard needs to know whether the CALLER (this turn) is itself a
-            # subagent, regardless of whether this call is fixture-driven or
-            # real — the tool_calls minting loop below (shared by both
-            # paths) checks this for every tool call the response contains.
-            # Computed once, up front, rather than duplicated inside each
-            # branch — same cheap indexed-PK lookup pattern already used for
-            # offset_row/next_seq_row below.
-            turn_row = await conn.fetchrow("SELECT parent_type FROM turns WHERE turn_id = $1", input.turn_id)
             # Named caller_is_subagent, not is_subagent — the tool_calls
             # minting loop below has its own per-call is_subagent meaning
             # ("does THIS tool call request spawning a subagent"), a
             # genuinely different question from "is the turn making the
             # call itself a subagent." Reusing the same name would silently
             # shadow this one inside the loop.
-            caller_is_subagent = bool(turn_row and turn_row["parent_type"] == "turn")
+            caller_is_subagent = bool(head and head["parent_type"] == "turn")
+            fixture = head if (head and head["content"] is not None) else None
 
             if fixture is not None:
                 content: str = fixture["content"]
@@ -146,9 +146,19 @@ class ModelCallActivity:
                 )
                 system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
                 platform = session_row["platform"] if session_row else None
+                # prompt_assemble_latency_seconds — step 9 (docs/components/
+                # request-pipeline/09-prompt-assembly.md). Only the real path
+                # assembles; the fixture path above returns a scripted response
+                # without ever calling this, which is why scenario runs show a
+                # near-zero ModelCall and this cost stayed invisible. Bucketed
+                # in seconds (metrics.SECONDS_LATENCY_METRICS).
+                assemble_started = time.monotonic()
                 conversation, context_tokens = await llm.build_conversation(
                     conn, input.turn_id, input.episode_id, system_prompt, context_window
                 )
+                activity.metric_meter().create_histogram_float(
+                    "prompt_assemble_latency_seconds", unit="s"
+                ).record(time.monotonic() - assemble_started)
 
                 # docs/components/context-slot.md's Memory-Access Tools —
                 # lcm_expand's schema-level subagent-only restriction needs
@@ -240,19 +250,11 @@ class ModelCallActivity:
                 # coincidentally start at the same value; InsertMessage's own
                 # start-of-turn write already consumed seq=0, so relying on
                 # context_seq directly would collide.
-                next_seq_row = await conn.fetchrow(
-                    "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq FROM messages WHERE parent_id = $1",
-                    input.turn_id,
-                )
-                message_row = await conn.fetchrow(
-                    "INSERT INTO messages (parent_id, role, content, seq) "
-                    "VALUES ($1, 'assistant', $2, $3) RETURNING message_id",
-                    input.turn_id,
-                    content,
-                    next_seq_row["next_seq"],
-                )
-                message_id = message_row["message_id"]
-
+                # One round-trip: insert the assistant message (seq computed
+                # inline as MAX+1 — a pure ordering concern, decoupled from
+                # context_seq, and InsertMessage already consumed seq=0) and
+                # read back the tool-call offset in the same statement.
+                #
                 # n has to be unique across the WHOLE turn, not just this one
                 # response — tool_call_id is a flat Postgres primary key, and
                 # a turn's loop can call ModelCall many times (each producing
@@ -265,10 +267,21 @@ class ModelCallActivity:
                 # increasing turn-wide, matching the doc's "{turn_id}:act:{n}"
                 # format literally (n = this tool call's position across the
                 # whole turn, not within one reasoning step).
-                offset_row = await conn.fetchrow(
-                    "SELECT count(*) AS n FROM tool_calls WHERE parent_id = $1", input.turn_id
+                write_row = await conn.fetchrow(
+                    "WITH ins AS ("
+                    "  INSERT INTO messages (parent_id, role, content, seq) "
+                    "  VALUES ($1, 'assistant', $2, "
+                    "          (SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE parent_id = $1)) "
+                    "  RETURNING message_id"
+                    ") "
+                    "SELECT ins.message_id, "
+                    "       (SELECT count(*) FROM tool_calls WHERE parent_id = $1) AS n "
+                    "FROM ins",
+                    input.turn_id,
+                    content,
                 )
-                n_offset = offset_row["n"]
+                message_id = write_row["message_id"]
+                n_offset = write_row["n"]
 
                 refs: list[ToolCallRef] = []
                 for i, tc in enumerate(raw_tool_calls, start=1):

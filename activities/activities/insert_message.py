@@ -92,17 +92,15 @@ class InsertMessageActivity:
                 else:
                     role, content = input.message.role, input.message.content
 
-                next_seq_row = await conn.fetchrow(
-                    "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq FROM messages WHERE parent_id = $1",
-                    input.turn_id,
-                )
-                seq = next_seq_row["next_seq"]
-
+                # seq computed inline (MAX+1) — one round-trip, and no window
+                # between the read and the insert. Safe here: the transaction
+                # plus the fact that a turn's messages are written serially.
                 await conn.execute(
-                    "INSERT INTO messages (parent_id, role, content, seq) VALUES ($1, $2, $3, $4)",
+                    "INSERT INTO messages (parent_id, role, content, seq) "
+                    "VALUES ($1, $2, $3, "
+                    "        (SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE parent_id = $1))",
                     input.turn_id,
                     role,
                     content,
-                    seq,
                 )
         logger.info("InsertMessage[%s]: %s: %r", input.turn_id, role, content[:80])

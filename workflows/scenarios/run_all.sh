@@ -87,6 +87,7 @@ SCENARIOS=(
   skill-plan-integration
   subagent-full-agent
   episode-plan-complete
+  real-assembly
 )
 
 PASSED=()

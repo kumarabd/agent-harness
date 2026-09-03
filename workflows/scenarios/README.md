@@ -15,9 +15,14 @@ verification from scratch every time.
 > (embeddings), `ToolDiscover` (mcp-hub), `ComposeSkill` (medium tier). So
 > each scenario turn now spends a few cents of real fast/medium-tier LLM +
 > a handful of backend calls. Cheap, but real — this is deliberate: those
-> steps are exactly what the newer scenarios verify. Step 9
-> (`prompt.assemble`) and the reason-act model calls themselves are still
-> the only fully-scripted parts.
+> steps are exactly what the newer scenarios verify.
+>
+> The reason-act model calls are still fixture-scripted in every scenario
+> **except `real-assembly`**, which deliberately omits fixtures so its one
+> ModelCall runs step 9 (`prompt.assemble` → `lcm.assemble`) for real
+> against a seeded multi-turn history — the assembly path every real turn
+> takes and every other scenario short-circuits. One extra real fast-tier
+> call; it's the only place `prompt_assemble_latency_seconds` comes from.
 
 ## Running it
 
