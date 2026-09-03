@@ -11,8 +11,15 @@ Intentions are scoped to the **user-stable scope** of the creating session
 suffix stripped): workflow id `intn:<scope>:<slug>`. For web that scope is the
 user; for a shared Discord channel it's the channel (the best available — the
 harness has no user primitive). A fired intention wakes that scope's canonical
-session coordinator (SignalWithStart recreates it if it has idled out). An
-`IntentionUser` Search Attribute for cross-scope listing is a later refinement.
+session coordinator (SignalWithStart recreates it if it has idled out).
+
+`list_intentions` scopes server-side on the **`IntentionUser` Search Attribute**
+(set by `IntentionWorkflow`, alongside `IntentionKind` / `IntentionState`) —
+`ListWorkflowExecutions` filtered on it, not "list everything and match the
+workflow-id prefix". The three attributes are registered on the namespace as a
+deploy step; the workflow's upsert of an unregistered attribute is a harmless
+no-op, but a `list_intentions` query against one is not — it fails, and that
+surfaces (no fallback).
 
 No import of `.tools` here (would be circular — tools.py registers these) — the
 `ctx` argument is duck-typed; `from __future__ import annotations` keeps the
@@ -181,23 +188,35 @@ async def create_intention(arguments: dict, ctx: "ToolContext") -> dict:
     return {"intention_id": intention_id, "armed": True}
 
 
+def _q_lit(value: str) -> str:
+    """Single-quote a value for a Temporal visibility query (escape embedded ')."""
+    return "'" + value.replace("'", "''") + "'"
+
+
 async def list_intentions(arguments: dict, ctx: "ToolContext") -> dict:
     scope = _scope(ctx)
-    wf_prefix = f"{_WF_PREFIX}{scope}:"
     sched_prefix = f"{_SCHED_PREFIX}{scope}:"
     client = _client(ctx)
     out: list[dict] = []
 
-    async for wf in client.list_workflows(
-        "WorkflowType = 'IntentionWorkflow' AND ExecutionStatus = 'Running'"
-    ):
-        if not wf.id.startswith(wf_prefix):
-            continue
+    # Server-side scope filter on the IntentionUser Search Attribute — no
+    # client-side workflow-id matching. The per-workflow `status` query still
+    # gives the rich fields (objective, fire count) that aren't attributes.
+    # No fallback: if the query fails (attributes not registered on the
+    # namespace), that surfaces rather than silently returning a partial list.
+    query = (
+        "WorkflowType = 'IntentionWorkflow' "
+        f"AND IntentionUser = {_q_lit(scope)} "
+        "AND ExecutionStatus = 'Running'"
+    )
+    async for wf in client.list_workflows(query):
         try:
             out.append(await client.get_workflow_handle(wf.id).query("status"))
         except Exception:  # noqa: BLE001 — a just-closed / mid-continue-as-new workflow
             out.append({"intention_id": wf.id, "state": "unknown"})
 
+    # Schedules aren't workflow executions until they fire, so they carry no
+    # Search Attributes — scope them by id prefix as before.
     async for sched in client.list_schedules():
         if not sched.id.startswith(sched_prefix):
             continue

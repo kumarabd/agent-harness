@@ -12,9 +12,9 @@ turns the inbound user message into a small task representation:
 
 All five are small routing signals *derived* from the message, not the
 message itself — they ride back to the workflow as the activity's result
-and `RetrievalWorkflow` passes `retrieval_query`/`entities` straight into
+and `RoutingWorkflow` passes `retrieval_query`/`entities` straight into
 the retrieval activities. Nothing is persisted here; the bulk retrieved
-*content* (memory items, composed skill, tool schemas) is what goes through
+*content* (memory items, retrieved skills, tool schemas) is what goes through
 the `turn_retrieval` staging table, in later steps.
 
 Design principles:

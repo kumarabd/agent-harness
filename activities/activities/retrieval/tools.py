@@ -5,9 +5,8 @@ Resolves which of this tenant's registered capabilities are relevant to the
 task, via the same `discover_tools` primitive the model-facing `search_tools`
 tool uses (mcp-hub semantic search + in-process shell-hub, one combined
 ranked list). Stages the results to `turn_retrieval` as `kind='tool'` — a
-task-scoped tool set for the planner and skill composer, and an implicit
-"is this capability connected" answer (an unregistered backend is simply
-absent).
+task-scoped capability hint for the turn's prompt, and an implicit "is this
+capability connected" answer (an unregistered backend is simply absent).
 
 Advisory, not restrictive: the reason-act loop still offers the full
 always-on tool set and the model can call `search_tools` itself mid-turn.

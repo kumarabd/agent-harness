@@ -1,28 +1,17 @@
 # Request Pipeline — Step 4: Memory Retrieval
 
-> STATUS: IMPLEMENTED — `activities/activities/retrieval/memory.py`. Calls
+> STATUS: BUILT — `activities/activities/retrieval/memory.py`. Calls
 > `agent_brain.memory_search`, dedups + budgets the fused results, stages
-> `kind='memory'` rows; `llm.build_conversation` reads them every ModelCall.
-> The old `turn_seq==1` in-process retrieval in `llm.py`
-> (`_session_start_memory_block` / `_render_memory_results`) is deleted. MMR
-> diversity and a real relevance floor are still open (see below).
+> `kind='memory'` rows keyed on the current turn's id
+> (`turn_retrieval.owner_id`); `prompt.assemble` reads them every `ModelCall`.
+> `MemoryRetrieve` runs **per turn** (not once per task-run) — the `lcm` →
+> `WriteMemory` → agent-brain → `MemoryRetrieve` loop already keeps it current.
+> A subagent turn inherits its parent turn's `kind='memory'` rows rather than
+> re-querying. MMR diversity and a real relevance floor are still open.
 >
 > Parent: [`../request-pipeline.md`](../request-pipeline.md).
 > Orchestrated by [`03-routing.md`](03-routing.md)'s `RoutingWorkflow`.
 > Backend contract: [`../memory-slot.md`](../memory-slot.md).
->
-> ## REVISION (2026-09-02) — BUILT (Phase 2 slice 2.1, branch proactivity-substrate; compiles + Go tests green, not deployed)
->
-> Per [`08-planning.md`](08-planning.md) + [`../episode-lifecycle.md`](../episode-lifecycle.md)
-> REVISION: `MemoryRetrieve` runs **per turn**, staged under the current turn's
-> id (`turn_retrieval.owner_id = turn_id`, migration `021`) and read back per
-> `ModelCall` — no episode-scoped bundle, no reconcile pass (both duplicated the
-> `lcm` → `WriteMemory` → agent-brain → back loop). The mechanism (agent-brain
-> `memory_search`, dedup, budget) is unchanged; only *when* it runs and *what
-> it's keyed on* change. The subagent path still inherits `kind='memory'` rows,
-> now from the **parent turn** (was: parent episode). `ComposeSkill` still reads
-> memory at episode open — the anchor turn's own per-turn rows. `turn_retrieval`
-> + `ComposeSkill` themselves go away in Phase 3.
 
 ### Role
 
@@ -79,15 +68,13 @@ ModelCall and it vanished thereafter.
 - **Not done:** `memory_expand` on top candidates; MMR-style diversity (needs
   embeddings); contradiction reconciliation (deferred to agent-brain's
   bi-temporal validity — a superseded rule shouldn't be returned in the first
-  place, see [`06-skill-composition.md`](06-skill-composition.md)); the
-  `harness_type` typing (not implementable against agent-brain's real schema —
-  see `memory-slot.md`).
+  place); the `harness_type` typing (not implementable against agent-brain's
+  real schema — see `memory-slot.md`).
 
-### What the planner / assembly does with it
+### What prompt assembly does with it
 
-The composed skill (step 6) consumes memory items to fill slots and adapt steps.
-Items not consumed by a skill are still placed in the assembled prompt as a
-labelled background block, before the live conversation — `memory-slot.md`'s
+`prompt.assemble` places the staged items in a labelled background block, before
+the live conversation — `memory-slot.md`'s
 "Resolved: Staleness Is Handled by Placement".
 
 ### Relationship to `memory-slot.md`

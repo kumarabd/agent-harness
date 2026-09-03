@@ -72,6 +72,13 @@ class Checkpoint:
     complex: bool = False
 
 
+def _norm_intent(text: str) -> str:
+    """Loose key for matching a re-proposed checkpoint to an existing one —
+    collapse whitespace + case + trailing punctuation. A re-plan usually
+    re-emits an unchanged step verbatim; this tolerates minor drift."""
+    return re.sub(r"\s+", " ", (text or "").strip().lower()).rstrip(".")
+
+
 def _plan_path(plan_id: str) -> str:
     root = os.environ.get(_SESSION_ROOT_ENV, _DEFAULT_SESSION_ROOT)
     session_key = ids.session_key_of(plan_id)
@@ -133,24 +140,34 @@ def _write_file(plan_id: str, cps: list[Checkpoint]) -> None:
 
 async def seed(plan_id: str, checkpoints: list[dict]) -> int:
     """Write the ledger from an ordered list of `{intent, done_when?, complex?}` —
-    called by the planning turn (via `propose_plan`) and again by a mid-plan re-plan.
-    Merges onto an existing file (keeps the status of matching cp ids) so a
-    re-plan preserves completed checkpoints rather than clobbering progress.
+    called by the planning turn (via `propose_plan`) and again by a mid-plan
+    re-plan (a PlanHandling follow-up turn re-proposing the whole plan).
+
+    Merges onto an existing file **by intent, not position**: a checkpoint whose
+    intent matches one already in the ledger carries over its status/note (so a
+    re-plan that inserts or reorders steps before a completed one doesn't
+    misattribute the mark); a genuinely new step is `pending`. cp ids are just
+    fresh position labels.
 
     The approval gate is PlanWorkflow's concern, not this file's: `propose_plan`'s
     `needs_approval` rides out on ModelCallOutput → TurnResult, and PlanWorkflow
     parks on a UserInputRequestWorkflow before it ever calls NextCheckpoint."""
-    existing = {cp.cp_id: cp for cp in _read_file(plan_id)}
+    # intent (normalised) -> the matching prior checkpoints, oldest first. Each is
+    # consumed on match so two new steps with the same intent don't both inherit.
+    prior: dict[str, list[Checkpoint]] = {}
+    for cp in _read_file(plan_id):
+        prior.setdefault(_norm_intent(cp.intent), []).append(cp)
+
     out: list[Checkpoint] = []
-    for i, cp in enumerate(checkpoints, start=1):
+    for cp in checkpoints:
         intent = str(cp.get("intent", "")).strip()
         if not intent:
             continue
-        cp_id = f"cp{i}"
-        prev = existing.get(cp_id)
+        bucket = prior.get(_norm_intent(intent))
+        prev = bucket.pop(0) if bucket else None
         out.append(
             Checkpoint(
-                cp_id=cp_id,
+                cp_id=f"cp{len(out) + 1}",
                 checkpoint=len(out) + 1,
                 intent=intent,
                 done_when=str(cp.get("done_when", "") or "").strip(),

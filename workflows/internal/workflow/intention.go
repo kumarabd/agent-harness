@@ -39,6 +39,20 @@ const (
 	intentionCheckTimeout = 2 * time.Minute
 )
 
+// Search Attributes — docs/components/proactivity.md, "What's actually new" #2:
+// visibility IS the registry. Registered once on the namespace (an ops step);
+// tools_intention.py's list_intentions filters `ListWorkflowExecutions` on
+// these instead of listing everything and matching the workflow-id prefix.
+//   IntentionUser  — the user-stable scope (ids.UserScopeOf), so a shared
+//                    Discord channel's intentions don't leak across users.
+//   IntentionKind  — time | deadline | condition | state | event | inactivity.
+//   IntentionState — armed | firing | expired (updated at every transition).
+var (
+	saIntentionUser  = temporal.NewSearchAttributeKeyKeyword("IntentionUser")
+	saIntentionKind  = temporal.NewSearchAttributeKeyKeyword("IntentionKind")
+	saIntentionState = temporal.NewSearchAttributeKeyKeyword("IntentionState")
+)
+
 func IntentionWorkflow(ctx workflow.Context, input types.IntentionInput) error {
 	logger := workflow.GetLogger(ctx)
 	logger.Info("intention started", "intention_id", input.IntentionID, "kind", input.Kind)
@@ -49,6 +63,21 @@ func IntentionWorkflow(ctx workflow.Context, input types.IntentionInput) error {
 	why := input.Why
 	fireAt := input.FireAt
 	pollEvery := input.PollEvery
+
+	// setState updates both the local var (for the `status` query) and the
+	// IntentionState Search Attribute. Errors are swallowed deliberately: if the
+	// SAs aren't registered on the namespace yet, the id-prefix listing path
+	// still works — an unregistered SA must not break intentions.
+	setState := func(s string) {
+		state = s
+		_ = workflow.UpsertTypedSearchAttributes(ctx, saIntentionState.ValueSet(s))
+	}
+	// Identity SAs, set once (survives ContinueAsNew — this runs on every start).
+	_ = workflow.UpsertTypedSearchAttributes(ctx,
+		saIntentionUser.ValueSet(input.SessionKey),
+		saIntentionKind.ValueSet(input.Kind),
+		saIntentionState.ValueSet(state),
+	)
 
 	if err := workflow.SetQueryHandler(ctx, IntentionStatusQueryName, func() (types.IntentionStatus, error) {
 		return types.IntentionStatus{
@@ -85,7 +114,7 @@ func IntentionWorkflow(ctx workflow.Context, input types.IntentionInput) error {
 	}
 
 	fire := func() error {
-		state = "firing"
+		setState("firing")
 		ao := workflow.ActivityOptions{
 			StartToCloseTimeout: activityTimeoutTierA,
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
@@ -98,7 +127,7 @@ func IntentionWorkflow(ctx workflow.Context, input types.IntentionInput) error {
 			Why:         why,
 		}).Get(actx, nil)
 		firedCount++
-		state = "armed"
+		setState("armed")
 		if err != nil {
 			logger.Error("FireIntention failed", "intention_id", input.IntentionID, "error", err)
 		}
@@ -156,7 +185,7 @@ func IntentionWorkflow(ctx workflow.Context, input types.IntentionInput) error {
 				return ctx.Err()
 			}
 			if !input.ExpiresAt.IsZero() && workflow.Now(ctx).After(input.ExpiresAt) {
-				state = "expired"
+				setState("expired")
 				logger.Info("intention expired unfired", "intention_id", input.IntentionID)
 				return nil
 			}

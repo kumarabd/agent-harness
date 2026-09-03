@@ -3,8 +3,8 @@
 
 This package is the subsystem library: the flat `skill_procedures` store, the
 embedding helper, the retrieval scoring, and the authored-seed loader. The
-pipeline activities that use it live in `activities/activities/retrieval/`
-(`SkillDiscover` step 5, `ComposeSkill` step 6).
+pipeline activity that uses it lives in `activities/activities/retrieval/`
+(`SkillDiscover`, step 5); the write path is `skills/record.py` (`RecordSkill`).
 
 Built:
   - store.py      — read/write skill_procedures, EMA updates, co-occurrence

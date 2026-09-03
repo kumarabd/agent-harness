@@ -93,8 +93,8 @@ def observe_outcome(
     Ordering: put this *below* ``@activity.defn`` so the decorator applies
     first and Temporal registers the wrapped function::
 
-        @activity.defn(name="ComposeSkill")
-        @observe_outcome("compose_skill_total")
+        @activity.defn(name="SkillDiscover")
+        @observe_outcome("skill_discover_total")
         async def __call__(self, input): ...
 
     ``functools.wraps`` keeps ``__name__``/``__wrapped__``/annotations, which

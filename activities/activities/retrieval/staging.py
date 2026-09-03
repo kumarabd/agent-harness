@@ -1,10 +1,10 @@
 """Shared helpers for the `turn_retrieval` staging table.
 
-REVISED 2026-09-02: the key column is `owner_id` — "whichever unit owns this
-row". MemoryRetrieve and ToolDiscover run once per TURN and stage under the
-current turn's id; SkillDiscover runs once per task-run and stages under the
-plan_id (the planning turn's id). Workflows carry only an id reference plus
-per-subsystem status — the content lives here.
+The key column is `owner_id` — "whichever unit owns this row". MemoryRetrieve
+and ToolDiscover run once per TURN and stage under the current turn's id;
+SkillDiscover runs once per task-run and stages under the plan_id (the planning
+turn's id). Workflows carry only an id reference plus per-subsystem status — the
+content lives here.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class RetrievalRow:
-    kind: str  # 'memory' | 'tool' | 'skill' | 'composed'
+    kind: str  # 'memory' | 'tool' | 'skill'
     seq: int  # rank within (owner_id, kind)
     content: str
     score: float | None = None

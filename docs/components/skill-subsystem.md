@@ -1,94 +1,42 @@
 # Component: Skill Subsystem — The Skill Graph
 
-> STATUS: DESIGN + PHASES 1–5 BUILT (2026-08-31).
-> **Phase 1** (retrieve + compose over a seed set): `skill_procedures` table
-> (migration `014`, embeddings as `real[]`, no pgvector), `skills/`
-> (store / embedding / vectors / select / seed), 4 authored seeds, real
-> `SkillDiscover` + `ComposeSkill`, `build_conversation` splices the composed
-> procedure into the prompt.
-> **Phase 2** (recording): `skill_candidates` table (migration `015`),
-> `skills/record.py` `RecordSkillOutcome` — writes the candidate + EMA-updates
-> composed procedures' `confidence` / `trigger_embedding`, dispatched as a
-> detached child (`RecordSkillOutcomeWorkflow`). **Episode-scoped since
-> 2026-09-01 ([`episode-lifecycle.md`](episode-lifecycle.md)): one candidate per
-> episode, over the whole multi-turn trajectory, dispatched when the episode
-> closes — not per turn.**
-> **Phase 3** (synthesis): `SkillSynthesisWorkflow` + `SkillSynthesize`
-> (`skills/synthesize.py` + `generalize.py`) — write-triggered from
-> `RecordSkillOutcomeWorkflow`, debounced by the fixed `"skill-synthesis"`
-> workflow id. Assigns candidates to procedure clusters (each procedure's own `cluster_radius`,
-> `ASSIGN_RADIUS` before it has one), creates / refines / annotates via a
-> medium-tier generalization pass. Divergence handled inside refinement (a
-> candidate whose `composed_from` names the procedure forces an immediate
-> re-version). Explicit `/skill` signal not wired.
-> **Phase 4** (co-occurrence): `skill_cooccurrence` table (migration `016`),
-> `store.update_cooccurrence` (called from `RecordSkillOutcome` — this turn's
-> procedures × each other, and × the procedures used earlier in the *same
-> session*) + `store.edge_weights` (read by `SkillDiscover`). `select` now
-> blends the `w_co` term. Cross-session / project-window linking still needs
-> project scope wired.
-> **Phase 5** (recency + adaptive radius): `select` blends the `w_rec` term
-> (`exp(−λ·days_since(last_used_at))`, `last_used_at` fed from
-> `Procedure.last_used_at` via `SkillDiscover`); `SkillSynthesize` derives a
-> per-procedure `cluster_radius` from the cosine spread of its own member
-> trajectories (`_radius`, floored, `None` under 2 embeddings) and uses it for
-> assignment. Migration `014` already carried both columns.
-> **Deferred (not built):** the `skill_clusters` **cluster hierarchy** +
-> pgvector — a flat Python cosine over every current procedure is the retrieval
-> path. Build trigger: when that flat scan over the store is measurably slow
-> (profiled, not guessed) — at seed-set / few-hundred-procedure scale it is not.
-> `RebuildSkillIndexWorkflow` and the nightly Temporal schedule land with it.
+> STATUS: BUILT on branch `proactivity-substrate` (not deployed). This doc is
+> the full design; the sections below carry the reward-model reasoning. Current
+> mechanism:
 >
-> A browser-rendered version of this spec (diagrams, the retrieval algorithm
-> laid out) was produced alongside it for review.
->
-> ## REVISION (2026-09-02) — recording collapsed, composition removed
->
-> **RecordSkill collapse BUILT (Phase 3 slice A, branch `proactivity-substrate`;
-> Go build + tests green, py compiles, NOT deployed):** `RecordSkillOutcome` +
-> `skill_candidates` (table dropped, migration `022`) + `SkillSynthesizeWorkflow`
-> + `synthesize.py` → **one `RecordSkill` activity** (`skills/record.py`,
-> `RecordSkillWorkflow`, 5-min timeout for the inline `generalize` call). It
-> gathers the episode trajectory, EMA-updates `composed_from` procedures + the
-> co-occurrence graph, then match-or-inserts against `skill_procedures`:
-> match+success+divergence → `new_version`; match+success → positive EMA;
-> no-match+success → `generalize` + `insert_learned`; match+failure → caution
-> note; no-match+failure → dropped. `store.py` lost `insert_candidate` /
-> `CandidateRow` / `unsynthesized_candidates` / `mark_synthesized`. `cluster_radius`
-> stays `None` for now (single-candidate radius can't be measured — `_MATCH_RADIUS`
-> = 0.82 fallback). Composition (`ComposeSkill`) still exists until Phase 3 slice C.
-
->
-> Driven by [`request-pipeline/08-planning.md`](request-pipeline/08-planning.md)'s
-> plan-and-execute revision and [`episode-lifecycle.md`](episode-lifecycle.md)'s
-> REVISION. **The reward model (below) is unchanged** — a procedure is still the
-> effective procedure reconstructed from a successful trajectory, an EMA-updated
-> prototype, cached on first success, a cluster not a threshold. What changes is
-> the plumbing:
->
-> - **Recording + Synthesis collapse into one online activity, `RecordSkill`.**
->   No `skill_candidates` table (migration `015` reverted), no
->   `SkillSynthesisWorkflow`, no `"skill-synthesis"` debounce, no "OFFLINE every
->   ~2h". At **episode close**, `RecordSkill` embeds the task, matches against
->   current `skill_procedures`: **match → reinforce** (EMA the prototype +
->   confidence, fold in new/revised checkpoints); **no match → insert** a new
->   procedure whose body is the final PLAN.md checkpoint list. Dispatched
->   detached (`ABANDON`).
-> - **Composition (step 6 / `ComposeSkill`) is removed.** `SkillDiscover`'s
->   results feed the **planning turn** inside the `PlanWorkflow`, which drafts the
->   checkpoint plan. There is no `kind='composed'` staging row and no separate
->   merge model call.
-> - **`SkillDiscover` (step 5) is otherwise unchanged** — runs once per episode,
->   flat cosine + scored selection (`sim + w_co + w_conf + w_rec`).
-> - **The co-occurrence graph survives**, updated by `RecordSkill` (procedures
->   retrieved into this episode × each other, × earlier episodes in the session).
-> - **The generalization pass (topic → task-shape `trigger_text`)** folds into
->   `RecordSkill` as an optional medium-tier step, or stays deferred (the
->   `generalize.py` altitude gap, already open).
-> - `turn_retrieval` is dropped entirely (see the pipeline REVISION).
->
-> Sections below still describe the candidate → offline-synthesis → cluster flow;
-> read them for the reward-model reasoning, not the mechanism.
+> - **`skill_procedures`** (migration `014`, embeddings as `real[]`, no
+>   pgvector) — the flat store. `skills/` = store / embedding / vectors / select
+>   / seed / generalize. 4 authored seed procedures.
+> - **Retrieval — `SkillDiscover`** (pipeline step 5): on a **planning turn**,
+>   embed `retrieval_query`, flat cosine over the session's procedures, scored
+>   selection (`sim + w_co + w_conf + w_rec`), stage the chosen procedures'
+>   full renders to `turn_retrieval` `kind='skill'` under the plan_id.
+>   `prompt.assemble` renders them into the planning turn's prompt.
+> - **There is no composition step.** The planning turn drafts the checkpoint
+>   plan from the retrieved procedures directly ([`request-pipeline/08-planning.md`](request-pipeline/08-planning.md)).
+> - **Write — `RecordSkill`** (`skills/record.py`, `RecordSkillWorkflow`,
+>   detached ABANDON, 5-min timeout): fires **once** when a task-run closes,
+>   over its whole prefix-swept trajectory. Collapses the old
+>   `RecordSkillOutcome` + `skill_candidates` (table dropped, migration `022`) +
+>   `SkillSynthesizeWorkflow` chain. Embeds the task, EMA-updates the procedures
+>   `SkillDiscover` retrieved into the run + the co-occurrence graph, then
+>   match-or-inserts against `skill_procedures`: match+success+divergence →
+>   `new_version`; match+success → positive EMA; no-match+success →
+>   `generalize` + `insert_learned`; match+failure → caution note;
+>   no-match+failure → dropped. `_MATCH_RADIUS = 0.82` (per-procedure
+>   `cluster_radius` stays `None` — a single trajectory's radius can't be
+>   measured).
+> - **Co-occurrence graph** (`skill_cooccurrence`, migration `016`) — updated by
+>   `RecordSkill`; `select` blends `w_co`. Cross-session / project-scoped
+>   linking still needs project scope wired.
+> - **Deferred:** the `skill_clusters` cluster hierarchy + pgvector — a flat
+>   Python cosine is the retrieval path until that scan is *measurably* slow.
+> - **`trigger_text` altitude:** `generalize.py`'s system prompt now forces
+>   task-CLASS altitude with explicit bad/good examples ("root-causing a
+>   regression a recent deploy introduced", not "debugging the checkout NPE").
+>   Still unverified against a real eval run, and the match test still embeds
+>   the raw `task_text` (topic-specific) against the process-shaped trigger — an
+>   asymmetry a distilled task-shape embedding would close (deferred).
 
 ### Role (one line)
 
@@ -276,16 +224,15 @@ One row per procedure *version*. Retrieval only sees `valid_to IS NULL`.
 
 ---
 
-### Recording — BUILT (phase 2), episode-scoped since 2026-09-01
+### Recording — the reward model
 
-> **[`episode-lifecycle.md`](episode-lifecycle.md):**
-> recording is now **episode-scoped**, not per-turn. `RecordSkillOutcome` fires
-> **once, when an episode closes** — plan complete, a new task supersedes it,
-> the coordinator idle-exits, or (subagent) its turn ends — over the *whole
-> multi-turn trajectory*. Input is `episode_id`. Before this, it fired per turn,
-> so a multi-turn task (brainstorming needs several) produced N fragmented
-> candidates instead of one. `skill_candidates.turn_id` now holds the episode's
-> anchor turn_id.
+> The mechanism is `RecordSkill` (see the STATUS block) — one online activity,
+> no `skill_candidates` table, no separate synthesis workflow. This section and
+> the next ("Synthesis") describe the **reward-model reasoning** — what counts
+> as success, what gets cached and when, EMA vs re-version, the divergence
+> signal. That reasoning is unchanged; where these sections say
+> `RecordSkillOutcome` / "candidate" / "the synthesis pass", read `RecordSkill`
+> doing the same judgement inline over the task-run's prefix-swept trajectory.
 
 `RecordSkillOutcomeWorkflow` → `RecordSkillOutcome` (`skills/record.py`),
 dispatched detached (`ABANDON`, same shape as `WriteMemoryWorkflow`) by whoever
@@ -327,7 +274,16 @@ teach?) is deferred to synthesis.
 
 ---
 
-### Synthesis — BUILT (phase 3)
+### Synthesis — folded into `RecordSkill`
+
+> `SkillSynthesizeWorkflow` / `synthesize.py` are **deleted**. The
+> assignment / creation / refinement / versioning logic below runs **inline**
+> inside `RecordSkill` (match-or-insert against `skill_procedures`, one
+> `generalize` call on an insert or divergence re-version). No candidate queue,
+> no debounce, no offline pass. Read the rest for the assignment / EMA /
+> versioning reasoning; the trigger is "every task-run close", synchronous.
+
+_(historical description, kept for the reasoning:)_
 
 `SkillSynthesisWorkflow` → `SkillSynthesize` (`skills/synthesize.py` +
 `generalize.py`). **Write-triggered**, not scheduled: `RecordSkillOutcomeWorkflow`
@@ -645,25 +601,15 @@ retrieval algorithm doesn't change. Named, not built.
 
 ---
 
-### Composition (pipeline step 6 — `ComposeSkill`)
+### Composition — removed
 
-Unchanged in shape from its earlier design. Reads the staged `skill` / `memory`
-/ `tool` rows for the turn, produces one composed procedure staged as
-`kind='composed'`.
-
-1. **Order** the selected procedures using co-occurrence direction where it
-   exists (if *a* reliably precedes *b* in transcripts), the model otherwise.
-2. **Bind abstract tool refs** — each `tool_ref` resolves to a concrete
-   `{server, tool}` from the staged `kind='tool'` rows (step 7).
-3. **Fill slots** from staged `kind='memory'` rows (persona/preference) or the
-   procedure's own defaults.
-4. **Apply adaptation by placement** — memory items attach to the steps they
-   concern. Contradictions are *not* reconciled here: a correction that
-   superseded a step is already in the body (§ Synthesis re-version), and a
-   stale memory item loses to a fresher one via memory-slot's recency.
-5. **Attach provenance + confidence** as structured metadata (not prose) — which
-   procedures/memory items shaped it, and a visible "unverified" marker for any
-   sub-`0.35` procedure.
+There is no composition step. The staged `kind='skill'` rows are the full
+rendered procedures; the **planning turn** inside the `PlanWorkflow`
+([`request-pipeline/08-planning.md`](request-pipeline/08-planning.md)) reads
+them from its prompt (alongside memory and discovered tools) and drafts the
+checkpoint plan — ordering, tool binding, and slot-filling are the model's job
+at draft time, and each checkpoint turn re-plans the tail with real results in
+hand. `compose.py`, `CompositionError`, `kind='composed'` are all gone.
 
 ---
 
@@ -671,21 +617,18 @@ Unchanged in shape from its earlier design. Reads the staged `skill` / `memory`
 
 | Unit | Kind | Cadence | Does |
 |---|---|---|---|
-| `SkillDiscover` | activity | per turn (step 5, in `RoutingWorkflow`) | retrieval, stages `kind='skill'` |
-| `ComposeSkill` | activity | per turn (step 6, when candidates found) | composition, stages `kind='composed'` |
-| `RecordSkillOutcome` | activity + `RecordSkillOutcomeWorkflow` | **once, when an episode closes** (`episode-lifecycle.md`), detached (`ABANDON`) | **built** — writes one candidate over the whole multi-turn trajectory, EMA-updates each composed procedure's `confidence` + `trigger_embedding`, updates co-occurrence edges (phase 4). |
-| `SkillSynthesisWorkflow` + `SkillSynthesize` | workflow + activity | **built** — write-triggered per recording, debounced by fixed workflow id (no schedule yet) | candidate assignment (per-procedure `cluster_radius`), creation / refinement / failure-annotation via the generalization pass, versioning |
+| `SkillDiscover` | activity | per task-run (step 5, in `RoutingWorkflow` on the planning turn) | retrieval, stages `kind='skill'` under the plan_id |
+| `RecordSkill` | activity + `RecordSkillWorkflow` | **once, when a task-run closes**, detached (`ABANDON`), 5-min timeout | EMA-updates each retrieved procedure's `confidence` + `trigger_embedding`, updates co-occurrence edges, then match-or-inserts against `skill_procedures` (inline `generalize` on an insert / re-version) |
 | `RebuildSkillIndexWorkflow` | workflow + schedule | nightly per tenant | **deferred** — re-clusters all trajectories → `skill_clusters`; builds only when the flat scan is profiled slow |
 
-**Degradation** — every path best-effort and additive. No procedures for a task
-→ `SkillDiscover` returns `empty`, turn runs as today. Synthesis/rebuild failing
-→ candidates and stale clusters persist, retried next run. pgvector/embedding
-outage → `SkillDiscover` returns `error`, `RoutingWorkflow` records it, turn
-proceeds un-enriched.
+**Degradation** — retrieval is best-effort and additive: no procedures →
+`SkillDiscover` returns `empty`, the planning turn drafts from scratch. Embedding
+outage → `error`, `RoutingWorkflow` records it, the turn proceeds un-enriched.
+`RecordSkill` failing → logged; the run is already closed, nothing user-facing
+breaks.
 
 **Worker placement** — all tenant-worker (tenant Postgres, embedding creds,
-medium-tier model). `RoutingWorkflow` on the loop-worker only dispatches by
-name; the schedules run as tenant workflows.
+medium-tier model). `RoutingWorkflow` on the loop-worker only dispatches by name.
 
 ---
 

@@ -28,14 +28,15 @@ type RoutingPlan struct {
 }
 
 // laneIsDeliberate reports whether a turn takes the Deliberate lane
-// (docs/components/lane-model.md) — the full retrieval pipeline plus an episode
-// and RL recording. Everything else is the Lite lane: memory-only retrieval
-// (or nothing, for conversational), no episode, no skills/tools/plan/recording.
-// Pure, deterministic, replay-safe — the single source of truth for the lane
-// split, consumed by both Route() here and turn.go's OpenEpisode / recording
-// gates. Deliberate is exactly (task, moderate|complex), (question, complex),
-// plus the Confidence < 0.5 fallback (a misclassified real task must not be
-// under-provisioned) and any unrecognised intent.
+// (docs/components/lane-model.md) — a PlanWorkflow task-run with the full
+// retrieval pipeline and RL recording. Everything else is the Lite lane:
+// memory-only retrieval (or nothing, for conversational), a plain TurnWorkflow,
+// no skills/tools/plan/recording. Pure, deterministic, replay-safe — the single
+// source of truth for the lane split, consumed by Route() here and by
+// dispatch.go's plan-vs-plain-turn decision. Deliberate is exactly
+// (task, moderate|complex), (question, complex), plus the Confidence < 0.5
+// fallback (a misclassified real task must not be under-provisioned) and any
+// unrecognised intent.
 func laneIsDeliberate(task types.TaskRepresentation) bool {
 	if task.Confidence < 0.5 {
 		return true
@@ -72,46 +73,42 @@ func Route(task types.TaskRepresentation) RoutingPlan {
 // 08-planning.md): its memory is inherited from the parent's snapshot rather
 // than retrieved fresh.
 //
-// REVISED 2026-09-02 (episode-lifecycle.md REVISION): memory + tool discovery
-// run every turn, staged under TurnID. Skill discovery + ComposeSkill run only
-// when PlanID is set (a fresh Deliberate episode's opening turn) — they seed
-// the plan once. The reconcile mode is gone.
+// Memory + tool discovery run every turn, staged under TurnID. Skill discovery
+// runs only when PlanID is set (a planning turn), staged under PlanID so the
+// planning turn's prompt and the run's RecordSkill can both read it.
 type RoutingWorkflowInput struct {
 	TurnID string `json:"turn_id"` // memory + tool staging key (the current turn)
-	// PlanID set ⇒ also run skill discovery + ComposeSkill and seed the plan,
-	// staged under PlanID. Empty on a continuation / Lite turn.
-	PlanID       string                   `json:"episode_id,omitempty"`
+	// PlanID set ⇒ also run skill discovery, staged under PlanID. Empty on a
+	// checkpoint / continuation / Lite turn.
+	PlanID       string                   `json:"plan_id,omitempty"`
 	Task         types.TaskRepresentation `json:"task"`
 	ParentTurnID string                   `json:"parent_turn_id,omitempty"`
 }
 
 // RoutingResult is RoutingWorkflow's output — the plan it chose plus a
 // per-subsystem SubsystemResult (status + staged-row count). No content: the
-// staged rows live in turn_retrieval, read from there by the planner / prompt
-// assembly. Statuses: "ok" | "empty" | "error" | "timed_out" | "skipped".
+// staged rows live in turn_retrieval, read from there by prompt assembly.
+// Statuses: "ok" | "empty" | "error" | "timed_out" | "skipped".
 type RoutingResult struct {
-	Plan          RoutingPlan           `json:"plan"`
-	Memory        types.SubsystemResult `json:"memory"`
-	Tools         types.SubsystemResult `json:"tools"`
-	Skills        types.SubsystemResult `json:"skills"`
-	ComposedSkill bool                  `json:"composed_skill"`
+	Plan   RoutingPlan           `json:"plan"`
+	Memory types.SubsystemResult `json:"memory"`
+	Tools  types.SubsystemResult `json:"tools"`
+	Skills types.SubsystemResult `json:"skills"`
 }
 
 // RoutingWorkflow — request pipeline step 3 (docs/components/request-pipeline/
 // 03-routing.md). Child of TurnWorkflow, awaited before the reason-act loop.
-// Decides the plan, runs the active retrieval subsystems in parallel under a
-// phase deadline, then composes a skill if discovery produced candidates.
-// Every path is best-effort — a failed or timed-out subsystem is recorded and
-// the turn proceeds with whatever enrichment landed.
+// Decides the plan, then runs the active retrieval subsystems in parallel under
+// a phase deadline. Every path is best-effort — a failed or timed-out subsystem
+// is recorded and the turn proceeds with whatever enrichment landed.
 func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingResult, error) {
 	logger := workflow.GetLogger(ctx)
 
 	plan := Route(input.Task)
-	// Skill discovery + ComposeSkill only run for a fresh episode's opening turn
-	// (PlanID set) — they seed the plan once. Continuation / Lite turns still
-	// get fresh memory + tools.
-	seedEpisode := input.PlanID != ""
-	if !seedEpisode {
+	// Skill discovery only runs for a planning turn (PlanID set) — it stages the
+	// procedures once, under the plan. Checkpoint / continuation / Lite turns
+	// still get fresh memory + tools.
+	if input.PlanID == "" {
 		plan.Skills = false
 	}
 
@@ -218,12 +215,8 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 	}
 	cancelRetrieval()
 
-	logger.Info("routing: retrieval fan-out complete", "turn_id", input.TurnID, "episode_id", input.PlanID,
+	logger.Info("routing: retrieval fan-out complete", "turn_id", input.TurnID, "plan_id", input.PlanID,
 		"memory", result.Memory.Status, "tools", result.Tools.Status, "skills", result.Skills.Status)
-
-	// ComposeSkill is removed (Phase 3C — 08-planning.md): SkillDiscover's rows
-	// feed the planning turn, which drafts the plan via `propose_plan`. The
-	// staged `kind='skill'` rows are read directly by the planning turn's prompt.
 	return result, nil
 }
 
@@ -235,13 +228,12 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 // enrichment they've already superseded — that's a deliberate supersede, not
 // a failure, so err is nil in that case.
 //
-// A non-nil err means RoutingWorkflow genuinely failed — which, after the
-// "no fallback" changes, means ComposeSkill couldn't produce a merged
-// procedure (the fan-out subsystems record their own errors into the result
-// and never fail the workflow). The caller (turn.go) fails the turn on it.
-// The RoutingResult is always safe to read (zero value on failure/interrupt).
-// planID is the retrieval staging key (== turnID for a new episode's opening
-// turn); turnID is the current turn.
+// A non-nil err means RoutingWorkflow genuinely failed. The fan-out subsystems
+// record their own errors into the result and never fail the workflow, so in
+// practice this only fires on an infra fault (activity dispatch, Postgres). The
+// caller (turn.go) fails the turn on it. The RoutingResult is always safe to
+// read (zero value on failure/interrupt). planID is the skill staging key (set
+// only for a planning turn); turnID is the current turn.
 func startRouting(ctx workflow.Context, planID, turnID, parentTurnID string, task types.TaskRepresentation, pendingMessages *[]types.SignalPayload) (RoutingResult, error) {
 	logger := workflow.GetLogger(ctx)
 
@@ -281,7 +273,7 @@ func startRouting(ctx workflow.Context, planID, turnID, parentTurnID string, tas
 		logger.Info("routing complete", "turn_id", turnID,
 			"fast_path", result.Plan.FastPath,
 			"memory", result.Memory.Status, "tools", result.Tools.Status,
-			"skills", result.Skills.Status, "composed_skill", result.ComposedSkill)
+			"skills", result.Skills.Status)
 		return result, nil
 	}
 }

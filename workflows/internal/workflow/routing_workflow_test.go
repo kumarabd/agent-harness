@@ -37,7 +37,6 @@ func TestRoutingWorkflow_FastPath(t *testing.T) {
 	require.Equal(t, "skipped", result.Memory.Status)
 	require.Equal(t, "skipped", result.Tools.Status)
 	require.Equal(t, "skipped", result.Skills.Status)
-	require.False(t, result.ComposedSkill)
 }
 
 func TestRoutingWorkflow_FullFanOut(t *testing.T) {
@@ -50,7 +49,7 @@ func TestRoutingWorkflow_FullFanOut(t *testing.T) {
 
 	env.ExecuteWorkflow(RoutingWorkflow, RoutingWorkflowInput{
 		TurnID: "s:turn:1",
-		PlanID: "s:turn:1", // fresh episode's opening turn — skills seed the plan
+		PlanID: "s:turn:1", // planning turn — skills stage under the plan
 		Task:   types.TaskRepresentation{Intent: "task", Complexity: "moderate", Confidence: 0.9},
 	})
 
@@ -60,7 +59,6 @@ func TestRoutingWorkflow_FullFanOut(t *testing.T) {
 	require.Equal(t, types.SubsystemResult{Status: "ok", Count: 3}, result.Memory)
 	require.Equal(t, "empty", result.Tools.Status)
 	require.Equal(t, "empty", result.Skills.Status)
-	require.False(t, result.ComposedSkill) // no skill candidates -> ComposeSkill not run
 }
 
 func TestRoutingWorkflow_SubsystemError(t *testing.T) {
@@ -107,15 +105,15 @@ func TestRoutingWorkflow_SubagentInheritsParentMemory(t *testing.T) {
 
 	require.NoError(t, env.GetWorkflowError())
 	// The subagent's routing passes the parent turn id through to MemoryRetrieve,
-	// which resolves the parent's episode and copies its staged rows rather than
-	// re-querying agent-brain. Staging is keyed on the subagent's own episode.
+	// which copies the parent turn's staged rows rather than re-querying
+	// agent-brain. Staging is keyed on the subagent's own turn id.
 	require.Equal(t, "s:turn:1", gotMemInput.ParentTurnID)
 	require.Equal(t, "s:turn:1:sub:1", gotMemInput.OwnerID)
 }
 
 func TestRoutingWorkflow_ContinuationSkipsSkills(t *testing.T) {
-	// A continuation turn (no PlanID) still retrieves fresh memory + tools
-	// under its own turn id, but does not re-run skill discovery / ComposeSkill.
+	// A checkpoint / continuation turn (no PlanID) still retrieves fresh memory
+	// + tools under its own turn id, but does not re-run skill discovery.
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()
 
@@ -152,8 +150,8 @@ func TestRoutingWorkflow_ContinuationSkipsSkills(t *testing.T) {
 }
 
 func TestRoutingWorkflow_SkillDiscoverRunsForFreshPlan(t *testing.T) {
-	// A fresh Deliberate task-run (PlanID set) runs SkillDiscover under it —
-	// its rows feed the planning turn. ComposeSkill is gone (Phase 3C).
+	// A planning turn (PlanID set) runs SkillDiscover under the plan — its rows
+	// feed the planning turn's prompt.
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()
 

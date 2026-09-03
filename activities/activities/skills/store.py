@@ -93,19 +93,6 @@ async def current_procedures(db, scopes: tuple[str, ...]) -> list[Procedure]:
     return [_row_to_procedure(r) for r in rows]
 
 
-async def procedures_by_ids(db, ids: list[str]) -> dict[str, Procedure]:
-    """Current procedures keyed by id — used by ComposeSkill to load the
-    bodies of the ids `SkillDiscover` staged."""
-    if not ids:
-        return {}
-    rows = await db.fetch(
-        f"SELECT {_COLUMNS} FROM skill_procedures "
-        "WHERE valid_to IS NULL AND id = ANY($1::text[])",
-        ids,
-    )
-    return {r["id"]: _row_to_procedure(r) for r in rows}
-
-
 async def upsert_authored(db, spec: dict, embedding: list[float] | None) -> None:
     """Insert or replace an authored seed procedure (version 1). Idempotent —
     a re-run with the same `trigger_text` leaves the row (and any accumulated

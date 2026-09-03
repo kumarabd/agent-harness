@@ -1,14 +1,14 @@
 """RecordSkill — the skill subsystem's write path
-(docs/components/skill-subsystem.md REVISION 2026-09-02;
-docs/components/request-pipeline/08-planning.md).
+(docs/components/skill-subsystem.md; docs/components/request-pipeline/08-planning.md).
 
-Fires ONCE when a task-run closes (plan complete, superseded, idle-exit, or a
-subagent turn ending). Collapses the old RecordSkillOutcome + `skill_candidates`
-+ SkillSynthesize chain into one online step:
+Fires ONCE when a task-run closes (plan complete, superseded, rejected, or a
+Deliberate subagent turn ending). Collapses the old RecordSkillOutcome +
+`skill_candidates` + SkillSynthesize chain into one online step:
 
-  1. Gather the task-run's whole multi-turn trajectory + its terminal outcome.
-  2. EMA-update the `confidence` / `trigger_embedding` of every procedure that
-     was composed INTO the task-run, and the co-occurrence graph.
+  1. Gather the task-run's whole multi-turn trajectory + its terminal outcome
+     (a nested plan's turns are swept in by turn-id prefix — 3C-iii).
+  2. EMA-update the `confidence` / `trigger_embedding` of every procedure
+     SkillDiscover retrieved into the run, and the co-occurrence graph.
   3. Match the trajectory's task against the current procedures:
        - match + success + it's a divergence (this run started from that
          procedure) → re-`generalize` a new version;
@@ -127,7 +127,7 @@ class RecordSkillActivity:
             transcript = plan_final + "\n\n" + transcript
         task_embedding = await embedding.embed(task_text)
 
-        # --- 2. reinforce the procedures the task-run was composed from
+        # --- 2. reinforce the procedures SkillDiscover retrieved into the run
         if composed_from:
             reward = (0.5 if required_correction else 1.0) if outcome == "success" else 0.0
             for procedure_id in composed_from:

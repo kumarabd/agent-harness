@@ -78,7 +78,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 	}
 	turnSeq := maxTurnSeq
 	// The active unit of work: a plain TurnWorkflow (Lite / conversational) or a
-	// PlanWorkflow (a Deliberate episode) — dispatchWork decides. workHandle is
+	// PlanWorkflow (a Deliberate task-run) — dispatchWork decides. workHandle is
 	// nil when we're attached to a PlanWorkflow the coordinator didn't start
 	// (a restart mid-plan); completion then arrives via the PlanDone signal.
 	var workHandle workflow.ChildWorkflowFuture
@@ -103,9 +103,9 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 		// Were we actually idle-waiting on entry to this iteration? Only then
 		// can the idle timer be what wakes us — a turn completing (which also
 		// clears workActive, below) must NOT be mistaken for an idle timeout,
-		// or the coordinator exits the instant every turn ends and no episode
-		// (docs/components/episode-lifecycle.md) ever survives to a follow-up
-		// turn. Before episodes this was a harmless early exit + recreate.
+		// or the coordinator exits the instant every turn ends and a follow-up
+		// message can never continue an in-progress task-run. The guard gives a
+		// real post-turn grace window (idleTTL).
 		wasIdle := !workActive
 		idleTimerCtx, cancelIdleTimer := workflow.WithCancel(ctx)
 		idleTimer := workflow.NewTimer(idleTimerCtx, idleTTL)
@@ -123,13 +123,13 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			pendingWake = &w
 			haveWake = true
 		})
-		// PlanDone: a PlanWorkflow finished its episode. Clears the guard even
-		// when we hold no handle for it (attached after a restart).
+		// PlanDone: a root PlanWorkflow finished its task-run. Clears the guard
+		// even when we hold no handle for it (attached after a restart).
 		sel.AddReceive(planDoneChan, func(c workflow.ReceiveChannel, _ bool) {
 			var planID string
 			c.Receive(ctx, &planID)
 			if workKind == WorkPlan {
-				logger.Info("plan workflow reported done", "episode_id", planID)
+				logger.Info("plan workflow reported done", "plan_id", planID)
 				workActive = false
 				workID = ""
 				workHandle = nil
@@ -179,7 +179,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			// SignalWithStart recreates this workflow on demand. A turn
 			// finishing instead falls through to the `!haveSignal` continue
 			// below, which loops back and arms a fresh idle timer — so there IS
-			// a real post-turn grace window now, which episode attachment needs.
+			// a real post-turn grace window for a continuation message.
 			logger.Info("coordinator idle timeout, exiting", "session_key", input.SessionKey)
 
 			// docs/components/memory-slot.md's "Resolved: Write-Path

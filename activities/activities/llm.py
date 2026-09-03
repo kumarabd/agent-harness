@@ -38,7 +38,7 @@ their TOOL_REGISTRY entry in tools.py.
 **Prompt assembly** — request pipeline step 9
 (docs/components/request-pipeline/09-prompt-assembly.md), `prompt.py` — owns
 the whole ordered, budget-bounded conversation: `lcm.assemble`'s summary
-DAG + verbatim window, then the composed skill (step 6), the plan ledger
+DAG + verbatim window, then retrieved skills (step 5), the plan ledger
 (step 8), discovered tools (step 7), and long-term memory (step 4), each
 staged by the request pipeline's retrieval phase and read fresh every
 ModelCall. `build_conversation` here is kept only as model_call.py's stable

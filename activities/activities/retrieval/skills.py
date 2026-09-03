@@ -2,12 +2,12 @@
 (docs/components/request-pipeline/05-skill-discovery.md; design in
 docs/components/skill-subsystem.md, "Retrieval").
 
-Phase 1: embed the retrieval query, flat-cosine it against the current
-procedures for the session's applicable scopes, run the greedy
-scoring/selection (`skills.select`), and stage the chosen procedures to
-`turn_retrieval` as `kind='skill'`. `ComposeSkill` (step 6) turns them into
-one merged procedure; `RoutingWorkflow` gates that on this returning `ok`
-with `count > 0`.
+Embed the retrieval query, flat-cosine it against the current procedures for
+the session's applicable scopes, run the greedy scoring/selection
+(`skills.select`), and stage the chosen procedures to `turn_retrieval` as
+`kind='skill'` under the plan_id. `prompt.assemble` renders them into the
+planning turn's prompt; `RecordSkill` reads them back to attribute the run's
+reward to the procedures that fed it.
 
 Best-effort: embeddings unavailable, an empty store, or nothing over the
 score floor all return `empty` — the turn runs with no procedural guidance.
@@ -90,7 +90,9 @@ class SkillDiscoverActivity:
             RetrievalRow(
                 kind="skill",
                 seq=i,
-                content=f"{by_id[s.id].title} — {by_id[s.id].trigger_text}",
+                # The full rendered procedure — prompt.assemble drops this
+                # straight into the planning turn's prompt.
+                content=renders[s.id],
                 score=s.score,
                 metadata={
                     "procedure_id": s.id,

@@ -84,15 +84,14 @@ func CompressContextWorkflow(ctx workflow.Context, turnID string) error {
 }
 
 // RecordSkillWorkflow — the skill subsystem's write path
-// (docs/components/skill-subsystem.md REVISION 2026-09-02). Same thin-wrapper
-// reasoning as WriteMemoryWorkflow: a detached child so the activity's
-// completion is recorded against a still-open history, not the turn's
-// already-closed one. Dispatched once when an episode closes
-// (docs/components/episode-lifecycle.md), over the whole multi-turn trajectory.
+// (docs/components/skill-subsystem.md). Same thin-wrapper reasoning as
+// WriteMemoryWorkflow: a detached child so the activity's completion is
+// recorded against a still-open history, not the turn's already-closed one.
+// Dispatched once when a task-run closes, over the whole multi-turn trajectory.
 // The old RecordSkillOutcome + skill_candidates + SkillSynthesize chain is
 // collapsed into this one online activity — no candidates queue, no debounce.
-// Longer timeout because RecordSkill now makes the generalization model call
-// inline (match ⇒ reinforce, no match + success ⇒ generalize a new procedure).
+// Longer timeout because RecordSkill makes the generalization model call inline
+// (match ⇒ reinforce, no match + success ⇒ generalize a new procedure).
 func RecordSkillWorkflow(ctx workflow.Context, input types.RecordSkillInput) error {
 	ao := workflow.ActivityOptions{StartToCloseTimeout: 5 * time.Minute}
 	actx := workflow.WithActivityOptions(ctx, ao)
@@ -602,8 +601,8 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	// (docs/components/request-pipeline/02-request-understanding.md). A cheap
 	// fast-tier analysis of the inbound message — intent + complexity routing
 	// scalars, plus a distilled retrieval query and named entities for the
-	// step-4/5/7 retrieval subsystems. It IS load-bearing: every lane / episode
-	// / retrieval decision below reads it, so there is no neutral fallback —
+	// step-4/5/7 retrieval subsystems. It IS load-bearing: every lane /
+	// retrieval decision below reads it, so there is no neutral fallback —
 	// ClassifyRequest either returns a real representation or raises
 	// (activities/classify.py), Temporal retries the bounded ladder, and an
 	// exhausted retry fails the turn here rather than silently routing every
@@ -651,16 +650,14 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	logger.Info("task-run resolved", "turn_id", input.TurnID, "plan_id", planID, "planning", input.PlanningMode)
 
 	// --- Step 3: routing + retrieval orchestration
-	// (docs/components/request-pipeline/03-routing.md + episode-lifecycle.md
-	// REVISION). Every non-conversational turn runs memory + tool discovery for
-	// THIS turn (fresh — the stale once-per-episode snapshot is gone). A fresh
-	// Deliberate episode's opening turn additionally seeds skills + the plan
-	// ledger: pass seedPlanID so RoutingWorkflow does that under it. A
-	// continuation (attached) or Lite turn passes "" — memory + tools only.
+	// (docs/components/request-pipeline/03-routing.md). Every non-conversational
+	// turn runs memory + tool discovery fresh for THIS turn. A planning turn (or
+	// a Deliberate subagent's fresh run) additionally stages skills under the
+	// plan id: pass seedPlanID so RoutingWorkflow does that. A checkpoint turn,
+	// a continuation, or a Lite turn passes "" — memory + tools only.
 	if taskRep.Intent != "conversational" {
 		// seedPlanID != "" ⇒ RoutingWorkflow also runs SkillDiscover under it
-		// (feeds the planning turn's draft). Otherwise memory + tools only, for
-		// this turn — a checkpoint turn, a continuation, or Lite.
+		// (feeds the planning turn's prompt).
 		seedPlanID := ""
 		if input.PlanningMode || openedFresh {
 			seedPlanID = planID
@@ -1022,9 +1019,9 @@ loop:
 		interruptedPayload = deliverConnectionBased(ctx, interrupts, input.SessionKey, input.ConnectionID, input.TurnID)
 	}
 
-	// A turn under a PlanWorkflow (the planning turn or a checkpoint turn) never
-	// closes/records the episode — the PlanWorkflow owns that, once, after every
-	// checkpoint is terminal. It also delivers the final answer itself.
+	// A turn under a PlanWorkflow (planning / checkpoint / handling) never
+	// records — the PlanWorkflow owns that, once, at the end of the run. It also
+	// delivers the final answer itself.
 	if input.ParentType == "plan" {
 		logger.Info("turn workflow complete (under plan)", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "needs_approval", needsApproval)
 		return types.TurnResult{TurnID: input.TurnID, StopReason: stopReason, Iterations: iterations, NeedsApproval: needsApproval}, nil

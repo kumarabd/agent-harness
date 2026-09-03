@@ -14,7 +14,7 @@ type WorkKind string
 
 const (
 	WorkTurn   WorkKind = "turn"   // a plain TurnWorkflow (Lite / conversational)
-	WorkPlan   WorkKind = "plan"   // a PlanWorkflow (fresh Deliberate episode)
+	WorkPlan   WorkKind = "plan"   // a PlanWorkflow (fresh Deliberate task-run)
 	WorkAttach WorkKind = "attach" // forward the message into a running PlanWorkflow
 )
 
@@ -34,16 +34,19 @@ type WorkResult struct {
 //     owns intake.
 //  2. ClassifyRequest — no fallback: a persistent failure returns an error the
 //     coordinator surfaces rather than starting anything.
-//  3. OpenEpisode — the lane decision. planID == "" ⟺ Lite / conversational.
+//  3. ResolveOpenPlan — is a Deliberate task-run already in progress for this
+//     session, and does this message continue it?
 //  4. Branch:
 //     - Lite / conversational → a plain TurnWorkflow (PreInserted).
-//     - Deliberate, fresh episode → a PlanWorkflow ("<episode_id>:plan").
-//     - Deliberate, continues an open episode → Attach: the caller forwards
-//     the message into the already-running PlanWorkflow.
+//     - Deliberate, fresh task-run → a PlanWorkflow ("<turn_id>:plan").
+//     - Deliberate, continues a running plan → Attach: the caller forwards the
+//       message into the already-running PlanWorkflow.
+//     - Deliberate, supersedes a running plan → signal it `abandon`, then start
+//       a fresh PlanWorkflow.
 //
-// Top-level only for now — a subagent still classifies + opens its episode
-// inside turn.go and runs the plain reason-act loop (a Deliberate subagent
-// getting its own PlanWorkflow is a later slice).
+// Top-level only — a subagent still classifies inside turn.go and, if
+// Deliberate, opens its own single-loop plan there (a Deliberate subagent
+// getting its own PlanWorkflow is 3C-iii, for a recursed checkpoint).
 func dispatchWork(ctx workflow.Context, sessionKey, connectionID string, turnSeq int, msg types.Message, initiatedBy string) (WorkResult, error) {
 	logger := workflow.GetLogger(ctx)
 	turnID := ids.TurnID(sessionKey, turnSeq)
@@ -131,8 +134,8 @@ func dispatchWork(ctx workflow.Context, sessionKey, connectionID string, turnSeq
 }
 
 // startPlainTurn starts a plain TurnWorkflow (ParentType "session"), PreInserted
-// (dispatchWork already did InsertMessage). planID/task are threaded through
-// so the turn skips its own OpenEpisode when the router already resolved it.
+// (dispatchWork already did InsertMessage). planID/task are threaded through so
+// the turn skips its own ClassifyRequest when the router already resolved it.
 func startPlainTurn(ctx workflow.Context, sessionKey, connectionID, turnID string, turnSeq *int, msg types.Message, initiatedBy, planID string, task *types.TaskRepresentation) (WorkResult, error) {
 	logger := workflow.GetLogger(ctx)
 	in := types.TurnInput{

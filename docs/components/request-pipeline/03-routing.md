@@ -1,89 +1,58 @@
 # Request Pipeline — Step 3: Routing + Retrieval Orchestration
 
-> STATUS: IMPLEMENTED with stub subsystems. `workflows/internal/workflow/routing.go`
-> (`Route`, `RoutingPlan`, `RoutingWorkflow`, `RoutingResult`, `startRouting`),
-> registered on the loop-worker, spawned from `turn.go` for top-level turns.
-> `turn_retrieval` table = migration `013`. The four subsystem activities
-> (`MemoryRetrieve` / `ToolDiscover` / `SkillDiscover` / `ComposeSkill`) are
-> registered stubs in `activities/activities/retrieval/` — they return `empty`
-> and write nothing until steps 4/5/6/7 fill them in. `RoutingResult` has no
-> consumer wired yet (`turn.go` logs and holds it for the planner / assembly).
+> STATUS: BUILT — `workflows/internal/workflow/routing.go` (`Route`,
+> `RoutingPlan`, `RoutingWorkflow`, `RoutingResult`, `startRouting`), registered
+> on the loop-worker, spawned from `turn.go`. `turn_retrieval` table = migration
+> `013` (key column `owner_id` since `021`). Subsystem activities
+> (`MemoryRetrieve` / `ToolDiscover` / `SkillDiscover`) live in
+> `activities/activities/retrieval/`.
 >
-> Parent: [`../request-pipeline.md`](../request-pipeline.md).
-> Owns: the `Route()` decision, and `RoutingWorkflow` (steps 3–6).
+> Parent: [`../request-pipeline.md`](../request-pipeline.md). Owns the `Route()`
+> decision + `RoutingWorkflow` (the retrieval fan-out).
 >
-> ## REVISION (2026-09-02) — Phase 2 slice 2.1 BUILT (branch proactivity-substrate; compiles + Go tests green, not deployed)
->
-> `RoutingWorkflow` now: `Route()` gate → **memory + tool discovery every turn**
-> (staged under `TurnID` via `turn_retrieval.owner_id`, migration `021`) →
-> **skill discovery + `ComposeSkill` only when `EpisodeID` is set** (a fresh
-> Deliberate episode's opening turn — they seed the plan once). `Mode="reconcile"`
-> and `dispatchReconcileRouting` are **gone** (`reconcile.py` deleted); a mid-turn
-> follow-up just lands in the conversation. `RoutingWorkflowInput` lost `Mode`;
-> the retrieval-activity inputs use `OwnerID`.
->
-> **Still open for Phase 3:** `ComposeSkill` + `SkillDiscover` move into the
-> `PlanWorkflow`'s planning turn, `turn_retrieval` is dropped, and `RoutingWorkflow`
-> collapses to just the `Route()` / `laneIsDeliberate()` decision (which is pure
-> Go and already the `OpenEpisode` trigger). Everything below still describes the
-> pre-2.1 staging design.
+> `RoutingWorkflow` = `Route()` gate → **memory + tool discovery every turn**
+> (staged under `TurnID`) + **skill discovery only on a planning turn**
+> (`RoutingWorkflowInput.PlanID` set — staged under the plan_id). There is no
+> `ComposeSkill` step (removed — [`06-skill-composition.md`](06-skill-composition.md));
+> the lane split is [`../lane-model.md`](../lane-model.md)'s `laneIsDeliberate`,
+> also the plan-vs-plain-turn decision in `dispatch.go`.
 
 ### Role
 
 Decide which retrieval subsystems this turn needs (memory / skills / tools),
-run the active subset in parallel under a phase deadline, compose a skill if
-discovery found candidates, and hand `TurnWorkflow` a `RoutingResult` — the
-plan plus per-subsystem status. The bulk content is staged to `turn_retrieval`,
-read there by the planner (step 8) and prompt assembly (step 9).
+run the active subset in parallel under a phase deadline, and hand
+`TurnWorkflow` a `RoutingResult` — the plan plus per-subsystem status. The bulk
+content is staged to `turn_retrieval`, read there by prompt assembly (step 9).
 
 ### `Route()` — the decision
 
 A **pure deterministic Go function**, `Route(taskRep) RoutingPlan`, in
-`routing.go`. No I/O — replay-safe, unit-testable without Temporal
-(`routing_test.go`).
+`routing.go`. No I/O — replay-safe, unit-testable without Temporal.
 
 ```go
 type RoutingPlan struct {
     FastPath bool // no enrichment — straight to the reason-act loop
     Memory   bool // step 4
-    Skills   bool // steps 5 + 6
+    Skills   bool // step 5 — only when RoutingWorkflowInput.PlanID is set
     Tools    bool // step 7
 }
 ```
 
-**Router-owned activation, conservative.** The router decides the set; each
-subsystem keeps only a cheap *internal* guard ("backend unconfigured", "empty
-query") — "I can't run", not policy. A **low-confidence** classification
-(`Confidence < 0.5` — the model's own self-reported uncertainty; step 2 has no
-"wasn't classified" state, a failed classify fails the turn) takes the full
-path so nothing downstream is under-provisioned. Promote to per-subsystem
-`ShouldActivate(task)` predicates only when step 2 carries richer inputs.
+The lane split is `laneIsDeliberate(taskRep)` ([`../lane-model.md`](../lane-model.md),
+the single source of truth, also `dispatch.go`'s plan-vs-plain-turn decision):
 
-> **Being reworked by [`../lane-model.md`](../lane-model.md) (DESIGN, 2026-09-01):**
-> the rule table below collapses into two lanes — **Lite** (memory only, or
-> nothing for `conversational`) and **Deliberate** (the full pipeline + episode
-> + RL). Deliberate is exactly `(task, moderate)`, `(task, complex)`,
-> `(question, complex)`, plus the `confidence < 0.5` override; everything else
-> is Lite. Headline change: a `simple`/`trivial` `task` and a `moderate`
-> `question` drop to **memory only** (no skills, no tools, no plan ledger), and
-> only Deliberate opens an episode.
+- **Deliberate** — `(task, moderate|complex)`, `(question, complex)`, any
+  `Confidence < 0.5`, or an unrecognised intent → `{Memory, Skills, Tools}`.
+- **`conversational`** → `FastPath` (no enrichment).
+- **everything else (Lite)** → `{Memory}` only.
 
-**Rule table (v1 — `intent` + `complexity`):**
+`Route` returns `Skills: true` for a Deliberate turn, but `RoutingWorkflow`
+clears it unless `PlanID` is set — skills stage once, on the planning turn.
 
-| `intent` | `complexity` | Route |
-|---|---|---|
-| `conversational` | any | **fast path** (nothing) |
-| `meta` | any | memory |
-| `question` | `trivial` / `simple` | memory |
-| `question` | `moderate` / `complex` | memory + skills |
-| `task` | any | memory + skills + tools |
-| any | `confidence < 0.5` | **full path** (memory + skills + tools) |
-
-**Why aggressive skipping is safe:** the fast path *is* today's behavior
-(`build_conversation` + the reason-act loop, nothing removed), and the model
-keeps full tool access on every path — it can call `memory_search` /
-`search_tools` itself mid-turn. A misroute to fast is no worse than the current
-harness and self-heals; a misroute to full is a wasted parallel retrieval.
+Each subsystem also keeps a cheap *internal* guard ("backend unconfigured",
+"empty query") — "I can't run", not policy. A misroute to `FastPath` self-heals
+(the model still has full tool access and can call `memory_search` /
+`search_tools` mid-turn); a misroute to full is a wasted parallel retrieval.
 Neither is a correctness bug.
 
 ### `RoutingWorkflow` — the orchestration
@@ -95,24 +64,22 @@ against a follow-up message (below), for top-level turns only.
 TurnWorkflow
   ├─ InsertMessage
   ├─ ClassifyRequest → taskRep                     (step 2)
-  ├─ startRouting(turn_id, taskRep, &pendingMessages)   → RoutingResult
+  ├─ startRouting(seedPlanID, turn_id, ..., taskRep, &pendingMessages) → RoutingResult
   │    └─ RoutingWorkflow  child, REQUEST_CANCEL
-  │         1. plan := Route(taskRep)
+  │         1. plan := Route(taskRep); if PlanID == "" { plan.Skills = false }
   │         2. if plan.FastPath: return all-"skipped"
-  │         3. dispatch the plan's subset, each with
-  │            {turn_id, taskRep.RetrievalQuery, taskRep.Entities}:
-  │              MemoryRetrieve  ┐  Selector loop over the futures,
-  │              ToolDiscover    ├  racing workflow.NewTimer(retrievalPhaseTimeout);
-  │              SkillDiscover   ┘  unsettled → cancelled, recorded "timed_out"
-  │         4. ComposeSkill(turn_id)  — iff Skills settled "ok" with Count > 0
-  │         5. return RoutingResult{ Plan, Memory, Tools, Skills, ComposedSkill }
-  ├─ [Planner — step 8]
-  └─ reason-act loop
+  │         3. dispatch the plan's subset in parallel:
+  │              MemoryRetrieve(owner=turn_id)  ┐  Selector loop over the futures,
+  │              ToolDiscover(owner=turn_id)    ├  racing workflow.NewTimer(retrievalPhaseTimeout);
+  │              SkillDiscover(plan_id)         ┘  unsettled → cancelled, recorded "timed_out"
+  │         4. return RoutingResult{ Plan, Memory, Tools, Skills }
+  └─ reason-act loop  (prompt.assemble reads the staged rows)
 ```
 
-`RoutingWorkflow` input is `{turn_id, taskRep}` — small derived routing metadata
-(see step 2), not content. Output is the plan + per-subsystem `SubsystemResult`
-(`{Status, Count}`) + `ComposedSkill bool` — no content.
+`RoutingWorkflow` input is `{turn_id, plan_id, taskRep, parent_turn_id}` — small
+derived routing metadata (see step 2), not content. Output is the plan + each
+subsystem's `SubsystemResult` (`{Status, Count}`) — no content. `seedPlanID` is
+non-empty only for a planning turn (or a Deliberate subagent's fresh run).
 
 **Why a child workflow, not inline in `TurnWorkflow`:**
 - History isolation — `TurnWorkflow` already runs a ≤20-iteration loop; the
@@ -151,10 +118,6 @@ in `turn.go` is now set up *before* the request-pipeline steps.
 - **Genuine-error vs timed-out** — readiness is snapshotted before the cancel,
   so a future that settled with an error before the deadline is `error`, one
   cancelled for missing it is `timed_out`.
-- **Dependency edge** — `ComposeSkill` runs only after the fan-out completes,
-  and only when `SkillDiscover` returned `ok` with `Count > 0` (a plan bit alone
-  isn't enough — there may be no matching skeleton). It reads the staged
-  memory / tool / skill rows from `turn_retrieval` itself.
 - **Retry** — each activity: `RetryPolicy{MaximumAttempts: 3}`.
 - **Cancellation** — `ParentClosePolicy: REQUEST_CANCEL` on the child, plus the
   interrupt race above.
@@ -165,7 +128,7 @@ in `turn.go` is now set up *before* the request-pipeline steps.
 `SubsystemResult.Status`: `ok` | `empty` | `error` | `timed_out` | `skipped`.
 The activity returns `ok` / `empty` / `error`; `RoutingWorkflow` assigns
 `timed_out` (missed the deadline) and `skipped` (not in the plan).
-`RoutingResult` carries all three subsystems' outcomes so the planner knows
+`RoutingResult` carries all three subsystems' outcomes so downstream knows
 exactly what it's working with — `{memory: ok, tools: error, skills: empty}`,
 never a silent gap.
 
@@ -179,13 +142,10 @@ never a silent gap.
 2. **Interrupt race — tolerated.** A follow-up message arrives mid-routing →
    routing is cancelled, `startRouting` returns a nil error, the turn proceeds
    against the superseding message. A deliberate supersede, not a failure.
-3. **ComposeSkill failure — fails the turn.** ComposeSkill has no fallback
-   render (see [`06-skill-composition.md`](06-skill-composition.md)). A failure
-   propagates out of `RoutingWorkflow`; `startRouting` returns the error;
-   `turn.go` fails the turn. A half-composed skill that silently isn't
-   composed is worse than a visible failure. (A *reconcile*-mode compose is
-   detached — its failure records a failed child execution and leaves the
-   episode's prior composed row in place.)
+3. **`RoutingWorkflow` genuine error — fails the turn.** The fan-out subsystems
+   record their own errors into the result and never fail the workflow, so this
+   only fires on an infra fault (activity dispatch, Postgres). `startRouting`
+   returns it; `turn.go` fails the turn.
 
 ### Reference-passing — two categories
 
@@ -194,31 +154,30 @@ never a silent gap.
 workflow freely as activity I/O. Same category as `ModelCallOutput.NextHintTier`
 and `ToolCallRef.{Server,Tool}`.
 
-**Bulk retrieved content** — memory item text, the composed skill procedure,
-tool descriptions/schemas (KBs) — goes through the `turn_retrieval` staging
-table (migration `013`); workflows carry only references + status.
+**Bulk retrieved content** — memory item text, rendered skill procedures, tool
+descriptions/schemas (KBs) — goes through the `turn_retrieval` staging table
+(migration `013`); workflows carry only references + status.
 
 ```sql
 CREATE TABLE turn_retrieval (
-  turn_id    text NOT NULL REFERENCES turns(turn_id),
-  kind       text NOT NULL CHECK (kind IN ('memory', 'tool', 'skill', 'composed')),
-  seq        int  NOT NULL,             -- rank within (turn_id, kind)
+  owner_id   text NOT NULL,             -- the current turn_id (memory/tool) or the plan_id (skill)
+  kind       text NOT NULL CHECK (kind IN ('memory', 'tool', 'skill')),
+  seq        int  NOT NULL,             -- rank within (owner_id, kind)
   content    text NOT NULL,
   score      real,
   metadata   jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (turn_id, kind, seq)
+  PRIMARY KEY (owner_id, kind, seq)
 );
 ```
 
 `activities/activities/retrieval/staging.py` — `write_rows` / `read_rows`
-helpers. `ComposeSkill` writes its output back as `kind = 'composed'`; the
-planner and prompt assembly read `WHERE turn_id = $1`. Rows share the turn's
-lifecycle.
+helpers, `ON CONFLICT` upsert so an activity retry re-writes. `prompt.assemble`
+reads memory/tool rows `WHERE owner_id = <turn_id>` and skill rows
+`WHERE owner_id = <plan_id>`.
 
 ### Open Questions
 
 - Phase deadline value — deferred, numeric-tuning discipline.
-- `RoutingResult` consumer wiring — lands with steps 8 / 9.
-- Whether `RoutingWorkflow`'s reusability (mid-turn re-retrieval, subagent
-  retrieval) is ever exercised, or it stays a once-per-turn child.
+- Whether `RoutingWorkflow`'s reusability (mid-turn re-retrieval) is ever
+  exercised, or it stays a once-per-turn child.

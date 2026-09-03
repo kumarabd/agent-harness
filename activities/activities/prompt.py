@@ -2,18 +2,18 @@
 (docs/components/request-pipeline/09-prompt-assembly.md).
 
 Turns `lcm.assemble`'s conversation (system prompt + summary DAG + verbatim
-window) plus everything the request pipeline staged for the turn — the
-composed skill (step 6), the plan ledger (step 8), discovered tools (step 7),
-long-term memory (step 4) — into one ordered, budget-bounded conversation.
-Runs inside `ModelCall`, every call; `llm.build_conversation` is now a thin
-call-through kept as the stable call site.
+window) plus everything the request pipeline staged for the turn — retrieved
+skills (step 5), the plan ledger (step 8), discovered tools (step 7), long-term
+memory (step 4) — into one ordered, budget-bounded conversation. Runs inside
+`ModelCall`, every call; `llm.build_conversation` is a thin call-through kept as
+the stable call site.
 
 Section order is most task-specific first, live conversation last (so it
 dominates — memory-slot.md's "Resolved: Staleness Is Handled by Placement").
 Only `capabilities` and `memory` are ever shed under budget pressure — the
-composed skill and plan progress are the most task-critical, and dropping the
-live conversation itself is the compression gate's job (context-slot.md), not
-this module's.
+skills and the plan ledger are the most task-critical, and dropping the live
+conversation itself is the compression gate's job (context-slot.md), not this
+module's.
 """
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ from . import ids, lcm, plan
 
 logger = logging.getLogger(__name__)
 
-_COMPOSED_HEADER = (
-    "Suggested procedure for this task, assembled from past successful runs — "
-    "follow it where it fits, adapt or ignore it where the situation differs:\n"
+_SKILLS_HEADER = (
+    "Procedures from past successful runs that may fit this task — follow one "
+    "where it fits, adapt or ignore it where the situation differs:\n"
 )
 _CAPABILITIES_HEADER = (
     "These environment tools look relevant to your task — use call_tool to invoke one:\n"
@@ -46,9 +46,9 @@ _MEMORY_HEADER = (
 # deferred like every other threshold in this project.
 _ENRICHMENT_BUDGET_FRACTION = 0.25
 
-# Shed order when over budget — least task-critical first. composed_skill and
-# the plan ledger are never in this list: they ARE the task, and there's little
-# point running the model without them once they exist.
+# Shed order when over budget — least task-critical first. `skills` and the plan
+# ledger are never in this list: they ARE the task, and there's little point
+# running the model without them once they exist.
 _SHED_ORDER = ("capabilities", "memory")
 
 
@@ -66,21 +66,20 @@ async def assemble(
     through ModelCallOutput to the workflow for the compression-gate check (see
     lcm.assemble's own docstring for why it can't be accumulated workflow-side).
 
-    The live conversation is keyed on the session (via turn_id). REVISED
-    2026-09-02: memory + discovered tools are staged PER TURN (owner_id =
-    turn_id) — fresh every turn. The composed skill and plan ledger stay
-    plan-scoped (owner_id = plan_id), seeded once when the plan opens. plan_id
-    is empty for a Lite / conversational turn — the composed/plan reads no-op
-    then."""
+    The live conversation is keyed on the session (via turn_id). Memory +
+    discovered tools are staged PER TURN (owner_id = turn_id); retrieved skills
+    stay plan-scoped (owner_id = plan_id, staged once by the planning turn's
+    routing). plan_id is empty for a Lite / conversational turn — the skills and
+    plan reads no-op then."""
     session_key = ids.session_key_of(turn_id)
     conversation, context_tokens = await lcm.assemble(conn, session_key, system_prompt)
 
     sections: list[_Section] = []
-    ep = plan_id or turn_id
-    staged = await _staged_texts(conn, turn_id, ep)
+    owner = plan_id or turn_id
+    staged = await _staged_texts(conn, turn_id, owner)
     for name, text in (
-        ("composed_skill", staged["composed_skill"]),
-        ("plan", await _plan_text(ep)),
+        ("skills", staged["skills"]),
+        ("plan", await _plan_text(owner)),
         ("capabilities", staged["capabilities"]),
         ("memory", staged["memory"]),
     ):
@@ -103,8 +102,8 @@ async def assemble(
                     enrichment_total -= s.tokens
 
     # Each insert(1, ...) pushes the previous one down, so inserting in reverse
-    # order puts `sections[0]` (composed_skill, if present) first — the order
-    # the module docstring describes.
+    # order puts `sections[0]` (skills, if present) first — the order the module
+    # docstring describes.
     for s in reversed(sections):
         conversation.insert(1, {"role": "system", "content": s.text})
         context_tokens += s.tokens
@@ -123,25 +122,26 @@ async def assemble(
 
 async def _staged_texts(conn, turn_id: str, plan_id: str) -> dict[str, str | None]:
     """Discovered tools (step 7) + long-term memory (step 4) for THIS turn
-    (owner_id = turn_id), and the composed skill (step 6) for the plan
-    (owner_id = plan_id) — one query over turn_retrieval, split by kind. Each
-    renders to its section text, or None when nothing was staged."""
+    (owner_id = turn_id), and retrieved skills (step 5) for the plan (owner_id =
+    plan_id) — one query over turn_retrieval, split by kind. Each renders to its
+    section text, or None when nothing was staged."""
     by_kind: dict[str, list[str]] = {}
     for r in await conn.fetch(
         "SELECT kind, content FROM turn_retrieval "
         "WHERE (owner_id = $1 AND kind IN ('tool', 'memory')) "
-        "   OR (owner_id = $2 AND kind = 'composed') "
+        "   OR (owner_id = $2 AND kind = 'skill') "
         "ORDER BY kind, seq",
         turn_id,
         plan_id,
     ):
         by_kind.setdefault(r["kind"], []).append(r["content"])
 
-    composed = by_kind.get("composed", [])
+    skills = by_kind.get("skill", [])
     tools = by_kind.get("tool", [])
     memory = by_kind.get("memory", [])
     return {
-        "composed_skill": (_COMPOSED_HEADER + composed[0]) if composed and composed[0].strip() else None,
+        # skill rows are full rendered procedures — separate with a rule, not a bullet
+        "skills": (_SKILLS_HEADER + "\n\n---\n\n".join(skills)) if skills else None,
         "capabilities": (_CAPABILITIES_HEADER + "\n".join(f"- {c}" for c in tools)) if tools else None,
         "memory": (_MEMORY_HEADER + "\n".join(f"- {c}" for c in memory)) if memory else None,
     }

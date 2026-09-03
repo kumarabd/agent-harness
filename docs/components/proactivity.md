@@ -27,9 +27,14 @@
 >   with any `:session:`/`:thread:` suffix stripped): `intn:<scope>:<slug>`. For
 >   web that scope is the user; for a shared Discord channel it's the channel
 >   (the harness has no user primitive — `core.SessionKeyFor` is deliberately not
->   user-scoped). A fire wakes that scope's canonical session. `list` filters
->   `WorkflowType='IntentionWorkflow'` + `intn:<scope>:` id-prefix — no
->   `IntentionUser` Search Attribute yet (namespace registration is a deploy step).
+>   user-scoped). A fire wakes that scope's canonical session. `list_intentions`
+>   filters `ListWorkflowExecutions` on the **`IntentionUser` Search Attribute**
+>   (`IntentionWorkflow` upserts `IntentionUser` / `IntentionKind` /
+>   `IntentionState` on start + every transition). Registering the three on the
+>   namespace is a deploy step; an unregistered upsert is a harmless no-op, but
+>   the `list` query against one fails and surfaces (no fallback). Schedules
+>   aren't workflow executions, so they keep the `intn-sched:<scope>:` id-prefix
+>   filter.
 > - The proactive seed is written **role=`user`, seq 0** (ClassifyRequest
 >   requires it); `initiated_by` carries the real provenance.
 > - `cron` and any daily cadence run in the **execution engine's timezone**
@@ -163,7 +168,10 @@ turns, so each deciding turn sees in `lcm` what the last one just said.
    + `revise` / `snooze` / `cancel` / `reset` signals + a `status` query. The
    single new primitive.
 2. **Search Attributes** `IntentionUser` / `IntentionKind` / `IntentionState` —
-   registered once, so visibility can be the registry.
+   `IntentionWorkflow` upserts them (identity two on start, state at every
+   transition); `list_intentions` filters `ListWorkflowExecutions` on them, so
+   visibility *is* the registry. Registering the three Keyword attributes on the
+   namespace is the one deploy step.
 3. **Coordinator `Wake` signal** — a handful of lines in the existing selector
    (`coordinator.go:102`), plus honouring `initiated_by` on the started turn.
 4. **`turns.initiated_by` / `episodes.initiated_by`** — one column, a provenance

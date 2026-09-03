@@ -1,48 +1,38 @@
 # Request Pipeline — Step 5: Skill Discovery
 
-> STATUS: PHASE 1 BUILT — `activities/activities/retrieval/skills.py` +
+> STATUS: BUILT — `activities/activities/retrieval/skills.py` +
 > `activities/activities/skills/` (store, embedding, select, seed). Embeds the
 > `retrieval_query`, flat-cosines against the current procedures for the
 > session's scopes, greedy budget-bounded selection (`skills.select`, no
-> co-occurrence / recency term yet), stages `kind='skill'` rows. 4 authored
-> seed procedures. Later phases (recording, synthesis, cluster hierarchy)
-> not built.
+> co-occurrence / recency term yet), stages `kind='skill'` rows under the
+> plan_id. 4 authored seed procedures. Cluster hierarchy not built (flat scan).
 >
 > **Design lives in [`../skill-subsystem.md`](../skill-subsystem.md)** ("The
-> Skill Graph"). This file is just the pipeline-integration contract. Also
-> supersedes the reverted mcp-hub document-store design in
-> [`../skills.md`](../skills.md).
+> Skill Graph"). This file is the pipeline-integration contract. Also supersedes
+> the reverted mcp-hub document-store design in [`../skills.md`](../skills.md).
 >
 > Parent: [`../request-pipeline.md`](../request-pipeline.md).
->
-> ## REVISION (2026-09-02)
->
-> Per [`08-planning.md`](08-planning.md): `SkillDiscover` runs **once per
-> episode**, and its output feeds the **planning turn** (which drafts PLAN.md),
-> not `ComposeSkill` (removed) and not a `turn_retrieval` `kind='skill'` staging
-> row (the table is dropped). The retrieval algorithm — embed `retrieval_query`,
-> flat cosine over the session's procedures, scored selection — is unchanged. It
-> now hands the selected procedures to the planning turn as context. "Gates step
-> 6" no longer applies (there is no step 6).
 
 ### Pipeline contract
 
 - **Activity:** `SkillDiscover`, tenant-worker, dispatched in the
-  `RoutingWorkflow` fan-out when `plan.Skills` is set (`intent == task`, or
-  `question` with `complexity >= moderate`).
-- **Input:** `{turn_id, retrieval_query}` from step 2's `TaskRepresentation`.
+  `RoutingWorkflow` fan-out on a **planning turn** only (`RoutingWorkflowInput.PlanID`
+  set). Checkpoint / continuation / Lite turns skip it.
+- **Input:** `{plan_id, retrieval_query}` from step 2's `TaskRepresentation`.
 - **Does:** the retrieval algorithm in `skill-subsystem.md` — embed the query,
-  beam-descend the cluster hierarchy, union with a flat top-M safety net, score
-  by `sim + co-occurrence + confidence + recency − diversity`, greedy
+  flat cosine over the session's procedures, score by
+  `sim + co-occurrence + confidence + recency − diversity`, greedy
   budget-bounded selection.
-- **Output:** staged `turn_retrieval` rows, `kind='skill'` — one per selected
-  procedure, `content` = title + trigger, `score` = selection score,
-  `metadata` = `{procedure_id, version, body, provenance, confidence}`.
+- **Output:** staged `turn_retrieval` rows keyed `owner_id = plan_id`,
+  `kind='skill'` — one per selected procedure, `content` = the full rendered
+  procedure, `score` = selection score, `metadata` =
+  `{procedure_id, version, provenance, confidence}`.
+- **Consumers:** `prompt.assemble` renders the rows into the planning turn's
+  prompt; `RecordSkill` reads the `procedure_id`s back to attribute the run's
+  reward.
 - **Status:** `ok` (≥ 1 selected) | `empty` (no store, nothing over the floor,
-  empty query) | `error` (pgvector / embedding outage — raised, `RoutingWorkflow`
-  retry handles it) | `timed_out`.
-- **Gates step 6:** `ComposeSkill` runs only when this returns `ok` with
-  `Count > 0`.
+  empty query) | `error` (embedding outage — raised, `RoutingWorkflow` retry
+  handles it) | `timed_out`.
 
 ### Complementary vs. alternative — resolved
 

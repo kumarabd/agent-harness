@@ -1,32 +1,23 @@
 # Request Pipeline — Step 7: Tool Discovery
 
-> STATUS: IMPLEMENTED — `activities/activities/retrieval/tools.py`. Calls the
-> new ctx-free `tools.discover_tools` (extracted from `search_tools`), renders
-> `{server}/{tool} — description` lines, stages `kind='tool'` rows with the
-> `input_schema` in `metadata`.
+> STATUS: BUILT — `activities/activities/retrieval/tools.py`. Calls the ctx-free
+> `tools.discover_tools` (extracted from `search_tools`), renders
+> `{server}/{tool} — description` lines, stages `kind='tool'` rows (keyed on the
+> current turn's id, `turn_retrieval.owner_id`) with the `input_schema` in
+> `metadata`. Runs **per turn**; `prompt.assemble` reads them back as the
+> capabilities-hint block. The model binds tools at execution time from that
+> block (there is no skill-composition step to pre-bind them).
 >
 > Parent: [`../request-pipeline.md`](../request-pipeline.md).
 > Orchestrated by [`03-routing.md`](03-routing.md)'s `RoutingWorkflow`.
 > Backend: [`../tool-registry.md`](../tool-registry.md) (`discover_tools`).
->
-> ## REVISION (2026-09-02) — BUILT (Phase 2 slice 2.1, branch proactivity-substrate; compiles + Go tests green, not deployed)
->
-> Per [`../episode-lifecycle.md`](../episode-lifecycle.md) REVISION: `ToolDiscover`
-> runs **per turn**, staged under the current turn's id
-> (`turn_retrieval.owner_id = turn_id`, migration `021`), read back by
-> `prompt.assemble` as the capabilities-hint block — no once-per-episode
-> snapshot, no reconcile. `input.owner_id` replaces `input.episode_id`. The
-> `discover_tools` mechanism (mcp-hub + shell-hub fan-out, `top_k` split) is
-> unchanged. `ComposeSkill` still reads the anchor turn's tool rows at episode
-> open for `tool_ref` binding; `ComposeSkill` itself goes away in Phase 3, after
-> which the model binds tools at execution time from the hint block.
 
 ### Role
 
 Resolve which of this tenant's registered capabilities are **relevant to the
-task**, so the planner (step 8) and skill composition (step 6) work with a
-task-scoped tool set instead of the full static schema — and so the harness
-knows whether a needed capability exists at all ("is Grafana connected?").
+task**, so the turn's prompt carries a task-scoped tool hint instead of only the
+full static schema — and so the harness knows whether a needed capability exists
+at all ("is Grafana connected?").
 
 ### Activation
 
@@ -66,16 +57,12 @@ capability.
 
 ### Consumers
 
-- **Skill composition (step 6)** — resolves the skeleton's *abstract* tool
-  references ("a git-hosting tool", "a metrics-query tool") to concrete
-  `{server, tool}` pairs against this list, and the checkpoint ledger it emits
-  (step 8) inherits those bindings. This is why `ComposeSkill` waits for
-  `ToolDiscover` to settle.
-- **Prompt assembly (step 9)** — resolved: kept the full tool schema, and
-  surfaces the discovered subset as a plain hint block (a "capabilities"
+- **Prompt assembly (step 9)** — the only consumer. Keeps the full tool schema
+  and surfaces the discovered subset as a plain hint block (the "capabilities"
   section, `09-prompt-assembly.md`) rather than narrowing what the model can
   call. Narrowing was rejected — it risks hiding a tool the model would have
-  known to ask for.
+  known to ask for. The planning turn and each checkpoint turn read the block
+  and pick / bind tools themselves.
 
 ### Relationship to `tool-registry.md`
 

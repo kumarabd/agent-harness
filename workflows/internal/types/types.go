@@ -84,8 +84,10 @@ type TurnInput struct {
 	// `propose_plan` tool so it can reshape the still-pending plan tail given
 	// what the follow-up asked. Not PlanningMode (which is propose-plan-only).
 	PlanHandling bool `json:"plan_handling,omitempty"`
-	// PlanID: pre-resolved by the dispatch helper (the anchor turn id).
-	// When set, TurnWorkflow skips its own ClassifyRequest / OpenEpisode.
+	// PlanID: the task-run this turn belongs to (the planning turn's id). Set by
+	// PlanWorkflow for every turn it runs, and by dispatch.go for a Lite turn it
+	// pre-resolved. When Task is also set, TurnWorkflow skips its own
+	// ClassifyRequest.
 	PlanID string `json:"plan_id,omitempty"`
 	// Task: pre-resolved classification, passed through when PlanID is set.
 	Task *TaskRepresentation `json:"task,omitempty"`
@@ -145,11 +147,10 @@ type WakePayload struct {
 // step now) and looks up ContextSeq's scripted/real response.
 type ModelCallInput struct {
 	TurnID string `json:"turn_id"`
-	// PlanID — docs/components/episode-lifecycle.md. The episode this turn
-	// belongs to (== the anchor turn_id). Prompt assembly reads the staged
-	// retrieval + plan ledger by this, and plan_progress updates apply against
-	// it, so a continuation turn advances the episode's one ledger. Empty for a
-	// conversational fast-path turn.
+	// PlanID — the task-run this turn belongs to (== the planning turn's id).
+	// Prompt assembly reads the staged skills + the PLAN.md ledger by this, and
+	// propose_plan / checkpoint_done updates apply against it. Empty for a Lite
+	// or conversational turn.
 	PlanID     string `json:"plan_id"`
 	ContextSeq int    `json:"context_seq"`
 	// PlanHandling — docs/components/request-pipeline/08-planning.md. A mid-plan
@@ -194,18 +195,17 @@ type ClassifyRequestInput struct {
 // are — routing metadata derived from the message, not the message content
 // (which stays Postgres-side). RetrievalQuery/Entities are passed straight
 // into the step-4/5/7 retrieval activities by RetrievalWorkflow. Confidence ==
-// 0 marks a fallback / un-classified turn (the activity degrades to a neutral
-// representation rather than failing).
+// A zero value marks an un-classified turn; ClassifyRequest fails rather than
+// returning one (no fallback — request-pipeline/02-request-understanding.md).
 type TaskRepresentation struct {
 	Intent         string   `json:"intent"`     // "conversational" | "question" | "task" | "meta"
 	Complexity     string   `json:"complexity"` // "trivial" | "simple" | "moderate" | "complex"
 	Confidence     float64  `json:"confidence"`
 	RetrievalQuery string   `json:"retrieval_query"`
 	Entities       []string `json:"entities"`
-	// ContinuesPrior — docs/components/episode-lifecycle.md. Whether this
-	// message continues the session's currently-open episode or starts a new
-	// one. Only meaningful when an episode is open; false on the classifier
-	// fallback (OpenEpisode's degraded path uses embedding similarity instead).
+	// ContinuesPrior — whether this message continues the session's in-progress
+	// task-run or starts a new one. Consumed by ResolveOpenPlan, which
+	// cross-checks it against embedding similarity when Confidence is low.
 	ContinuesPrior bool `json:"continues_prior"`
 }
 
@@ -214,9 +214,8 @@ type TaskRepresentation struct {
 // the distilled query from step 2's TaskRepresentation — a small derived
 // signal passed straight in, not read from Postgres.
 //
-// REVISED 2026-09-02 (episode-lifecycle.md REVISION): MemoryRetrieve runs once
-// PER TURN, staged under the current turn's id (OwnerID = TurnID). The stale
-// once-per-episode snapshot + reconcile pass are gone.
+// MemoryRetrieve runs once PER TURN, staged under the current turn's id
+// (OwnerID = TurnID).
 type MemoryRetrieveInput struct {
 	OwnerID        string `json:"owner_id"` // the current turn_id — turn_retrieval staging key
 	RetrievalQuery string `json:"retrieval_query"`
@@ -237,8 +236,8 @@ type ToolDiscoverInput struct {
 }
 
 // SkillDiscoverInput is SkillDiscover's input
-// (docs/components/request-pipeline/05-skill-discovery.md). Still episode-scoped
-// — runs once when an episode opens, feeds ComposeSkill / the plan seed.
+// (docs/components/request-pipeline/05-skill-discovery.md). Plan-scoped — runs
+// once on the planning turn, staged under PlanID for the prompt + RecordSkill.
 type SkillDiscoverInput struct {
 	PlanID         string `json:"plan_id"`
 	RetrievalQuery string `json:"retrieval_query"`
@@ -389,10 +388,10 @@ type InsertMessageInput struct {
 	// InitiatedBy — set only on the is_turn_start call; written to
 	// turns.initiated_by (docs/components/proactivity.md). Empty → 'user'.
 	InitiatedBy string `json:"initiated_by,omitempty"`
-	// PlanID — set on the is_turn_start call for a checkpoint turn under a
-	// PlanWorkflow (docs/components/request-pipeline/08-planning.md): its
-	// OpenEpisode is skipped, so InsertMessage writes turns.episode_id directly
-	// (RecordSkill's trajectory gather keys on it).
+	// PlanID — set on the is_turn_start call for any turn under a PlanWorkflow
+	// (docs/components/request-pipeline/08-planning.md). Written to
+	// turns.plan_id, which RecordSkill's trajectory gather keys on (by prefix,
+	// so a nested plan's turns are swept in too).
 	PlanID string `json:"plan_id,omitempty"`
 }
 
