@@ -112,6 +112,10 @@ class ToolContext:
     summary_model: str
     heartbeat_interval_seconds: float
     lease_ttl_seconds: float
+    # docs/components/proactivity.md — the intention tools (tools_intention.py)
+    # are thin wrappers over the Temporal client. None for any ToolCallActivity
+    # not constructed with one; those tools raise a clear error if called.
+    temporal_client: Any = None
 
 
 @dataclass
@@ -607,3 +611,24 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         start_to_close_timeout_seconds=15.0,
     ),
 }
+
+# docs/components/proactivity.md — intention tools. Registered after TOOL_REGISTRY
+# is defined to keep the import one-directional (tools_intention.py must not
+# import this module). Quick Temporal-client calls, no lease/subprocess — same
+# timeout tier as memory_search.
+from . import tools_intention as _ti  # noqa: E402
+
+for _name, _handler in {
+    "create_intention": _ti.create_intention,
+    "list_intentions": _ti.list_intentions,
+    "inspect_intention": _ti.inspect_intention,
+    "revise_intention": _ti.revise_intention,
+    "snooze_intention": _ti.snooze_intention,
+    "cancel_intention": _ti.cancel_intention,
+}.items():
+    TOOL_REGISTRY[_name] = ToolSpec(
+        handler=_handler,
+        heartbeat_interval_seconds=5.0,
+        heartbeat_timeout_seconds=15.0,
+        start_to_close_timeout_seconds=30.0,
+    )

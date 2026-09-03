@@ -1,5 +1,21 @@
 # Request Pipeline — Step 6: Skill Composition
 
+> ## REMOVED (2026-09-02)
+>
+> This step is deleted. Per [`08-planning.md`](08-planning.md)'s plan-and-execute
+> revision, there is no separate `ComposeSkill` activity and no `kind='composed'`
+> prompt block. The job it did — take the retrieved procedures and turn them into
+> one coherent, tool-bound, slot-filled procedure to follow — is now done by the
+> **planning turn** inside the `PlanWorkflow`: it reads the `SkillDiscover`
+> results (plus memory and discovered tools, like any turn) and drafts a
+> checkpoint plan (`propose_plan` → PLAN.md), grounded in those procedures but
+> never executing them verbatim. `compose.py` is removed; `CompositionError` and
+> the `composePhaseTimeout` go with it.
+>
+> Kept below for historical context only.
+>
+> ---
+>
 > STATUS: PHASE 1 BUILT — `activities/activities/retrieval/compose.py`. Reads
 > the staged `skill` rows, loads the procedure bodies, and merges them into one
 > ordered procedure (a medium-tier model call when there's ≥2 procedures or

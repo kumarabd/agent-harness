@@ -36,12 +36,12 @@ class Message:
 @dataclass
 class ModelCallInput:
     turn_id: str = ""
-    # docs/components/episode-lifecycle.md — the episode this turn belongs to
-    # (== the anchor turn_id). Prompt assembly reads the staged retrieval + the
-    # plan ledger by this, and plan_progress updates are applied against it, so a
-    # continuation turn advances the episode's one ledger rather than a new one.
-    # Empty for a conversational fast-path turn (no episode).
-    episode_id: str = ""
+    # docs/components/request-pipeline/08-planning.md — the task-run this turn
+    # belongs to (== the planning/anchor turn_id). Prompt assembly reads the
+    # staged retrieval + the PLAN.md ledger by this, and propose_plan /
+    # checkpoint_done updates are applied against it. Empty for a conversational
+    # fast-path turn (no plan).
+    plan_id: str = ""
     context_seq: int = 0
     # docs/components/model-registry.md, "Resolved: Selection Mechanism" —
     # the PREVIOUS step's self-declared hint for THIS step, threaded through
@@ -58,6 +58,11 @@ class ModelCallInput:
     # turn's FIRST tier from it (empty hint_tier only). Empty for subagents
     # and when step 2 fell back.
     complexity: str = ""
+    planning_mode: bool = False
+    # docs/components/request-pipeline/08-planning.md — a mid-plan follow-up turn:
+    # normal reason-act, but `propose_plan` is offered alongside the regular
+    # tools and peeled the same way planning_mode peels it.
+    plan_handling: bool = False
 
 
 @dataclass
@@ -92,49 +97,38 @@ class TaskRepresentation:
     confidence: float = 0.0
     retrieval_query: str = ""
     entities: list[str] = field(default_factory=list)
-    # docs/components/episode-lifecycle.md — whether this message continues the
-    # session's currently-open episode (the task the agent is mid-way through)
-    # or starts a new one. Only meaningful when an episode is actually open;
-    # `turn.go` passes it to OpenEpisode. When `confidence` is low, OpenEpisode
-    # cross-checks this against embedding similarity rather than trusting it
-    # outright.
+    # docs/components/request-pipeline/08-planning.md — whether this message
+    # continues the session's in-progress task-run (a running PlanWorkflow) or
+    # starts a new one. Only meaningful when a run is actually in progress;
+    # `dispatch.go` passes it to ResolveOpenPlan. When `confidence` is low,
+    # ResolveOpenPlan cross-checks this against embedding similarity rather than
+    # trusting it outright.
     continues_prior: bool = False
 
 
 @dataclass
 class MemoryRetrieveInput:
     """MemoryRetrieve's input — docs/components/request-pipeline/
-    04-memory-retrieval.md. retrieval_query is the distilled query from step
-    2's TaskRepresentation, a small derived signal passed straight in by
-    RoutingWorkflow (not read from Postgres).
+    04-memory-retrieval.md. REVISED 2026-09-02: runs once PER TURN, staged
+    under owner_id = the current turn_id. retrieval_query is the distilled
+    query from step 2's TaskRepresentation.
 
-    episode_id (docs/components/episode-lifecycle.md) is the staging key — rows
-    go to turn_retrieval keyed by it, so every turn of the episode reads the
-    same bundle. turn_id is the current turn, used only for the reconcile-mode
-    "latest user message" lookup (a continuation turn's new message lives under
-    turn_id, not the anchor episode_id).
+    parent_turn_id is set only for a subagent turn: when present, the activity
+    copies the parent turn's staged kind='memory' rows instead of calling
+    agent-brain."""
 
-    parent_turn_id is set only for a subagent turn ("Subagents are full
-    agents"): when present, the activity resolves the parent turn's episode and
-    copies its staged kind='memory' rows instead of calling agent-brain."""
-
-    episode_id: str = ""
-    turn_id: str = ""
+    owner_id: str = ""
     retrieval_query: str = ""
     parent_turn_id: str = ""
-    # request-pipeline/08-planning.md, "Reconciliation trigger" — when true the
-    # activity re-keys on the current turn's latest user message and replaces
-    # the episode's staged rows rather than appending.
-    reconcile: bool = False
 
 
 @dataclass
 class ToolDiscoverInput:
     """ToolDiscover's input — docs/components/request-pipeline/
-    07-tool-discovery.md. Runs once per episode (the opening turn); staged by
-    episode_id."""
+    07-tool-discovery.md. REVISED 2026-09-02: runs once PER TURN, staged under
+    owner_id = the current turn_id."""
 
-    episode_id: str = ""
+    owner_id: str = ""
     retrieval_query: str = ""
     entities: list[str] = field(default_factory=list)
 
@@ -142,112 +136,59 @@ class ToolDiscoverInput:
 @dataclass
 class SkillDiscoverInput:
     """SkillDiscover's input — docs/components/request-pipeline/
-    05-skill-discovery.md. See MemoryRetrieveInput for the episode_id / turn_id
-    split."""
+    05-skill-discovery.md. Runs once per task-run, staged under plan_id, feeds
+    the planning turn."""
 
-    episode_id: str = ""
-    turn_id: str = ""
+    plan_id: str = ""
     retrieval_query: str = ""
-    reconcile: bool = False
 
 
 @dataclass
-class ComposeSkillInput:
-    """ComposeSkill's input — docs/components/request-pipeline/
-    06-skill-composition.md. Reads the staged memory / tool / skill rows from
-    turn_retrieval by episode_id itself."""
+class RecordSkillInput:
+    """RecordSkill's input — docs/components/skill-subsystem.md REVISION
+    2026-09-02. Dispatched once when a task-run finishes. The activity reads the
+    whole multi-turn trajectory / tool calls / staged skill rows / PLAN.md from
+    Postgres + the PV itself, then match-or-inserts against skill_procedures.
+    Intent/complexity/close_reason come from the caller (decision B — no
+    `episodes` row to read them from)."""
 
-    episode_id: str = ""
-    # request-pipeline/08-planning.md — a reconcile-mode compose regenerates the
-    # kind='composed' block but does NOT re-seed turn_plan (the model has been
-    # tracking checkpoints; blindly overwriting intents/positions mid-episode
-    # would desync its plan_progress reports).
-    reconcile: bool = False
-
-
-@dataclass
-class RecordSkillOutcomeInput:
-    """RecordSkillOutcome's input — docs/components/skill-subsystem.md,
-    "Recording" + docs/components/episode-lifecycle.md. Fires ONCE when an
-    episode closes. The activity reads the whole multi-turn trajectory, the
-    tool calls, the staged skill rows, the plan ledger, and the episode row
-    (intent/complexity/close_reason/last_stop_reason) from Postgres itself."""
-
-    episode_id: str = ""
+    plan_id: str = ""
     stop_reason: str = ""
+    intent: str = ""
+    complexity: str = ""
+    close_reason: str = ""
 
 
 @dataclass
-class OpenEpisodeInput:
-    """OpenEpisode's input — docs/components/episode-lifecycle.md +
-    docs/components/lane-model.md. The activity reads the turn's parent_type /
-    seed message / session from Postgres itself; the workflow supplies the
-    turn_id, step 2's task representation, and whether the turn's own lane
-    wants a fresh episode.
-
-    want_new_episode is the Go-side `laneIsDeliberate(task)` result. It only
-    governs the *no open episode to attach to* case: a Lite turn with nothing
-    open gets `episode_id = ""` (no episode). A turn that continues an *open*
-    episode always attaches regardless — a "yes, use Redis" follow-up to an
-    in-progress design is part of that Deliberate task even though the message
-    alone looks trivial."""
-
-    turn_id: str = ""
-    task: TaskRepresentation = field(default_factory=TaskRepresentation)
-    want_new_episode: bool = False
-
-
-@dataclass
-class OpenEpisodeResult:
-    """What OpenEpisode returns. episode_id is what to stage/key the turn under.
-    attached=True means this turn joined an already-open episode (skip the full
-    pipeline, reconcile-refresh only). superseded_episode_id is non-empty when a
-    previously-open episode was closed to make room — the workflow dispatches
-    its RecordSkillOutcome."""
-
-    episode_id: str = ""
-    attached: bool = False
-    superseded_episode_id: str = ""
-
-
-@dataclass
-class CompleteEpisodeInput:
-    """CompleteEpisode's input — docs/components/episode-lifecycle.md. Called at
-    every turn end for a turn that belongs to an episode: records the turn's
-    stop_reason on the episode and, if the plan ledger is now all-terminal,
-    closes the episode as complete."""
-
-    episode_id: str = ""
-    stop_reason: str = ""
-
-
-@dataclass
-class CompleteEpisodeResult:
-    completed: bool = False
-
-
-@dataclass
-class CloseSessionEpisodesInput:
-    """CloseSessionEpisodes' input — docs/components/episode-lifecycle.md.
-    Dispatched on the coordinator's idle-exit: closes every still-open
-    top-level episode for the session and returns their ids so the caller can
-    record each."""
+class ResolveOpenPlanInput:
+    """docs/components/request-pipeline/08-planning.md — dispatch.go asks whether
+    a Deliberate task-run is already in progress for this session and whether
+    this new message continues it."""
 
     session_key: str = ""
+    turn_id: str = ""
+    task: TaskRepresentation = field(default_factory=TaskRepresentation)
 
 
 @dataclass
-class CloseSessionEpisodesResult:
-    episode_ids: list[str] = field(default_factory=list)
+class ResolveOpenPlanResult:
+    plan_id: str = ""
+    should_continue: bool = False
+    supersede: bool = False
 
 
 @dataclass
-class SkillSynthesizeInput:
-    """SkillSynthesize's input — docs/components/skill-subsystem.md,
-    "Synthesis". The activity processes the whole un-synthesized candidate
-    queue; this carries only the triggering turn for logging."""
+class NextCheckpointResult:
+    """The NextCheckpoint activity reads PLAN.md and returns the next
+    non-terminal checkpoint, formatted as the seed message for a checkpoint
+    TurnWorkflow. has_next is False when every checkpoint is terminal."""
 
-    trigger_turn_id: str = ""
+    has_next: bool = False
+    checkpoint_id: str = ""
+    seed_text: str = ""
+    # 3C-iii — the planning model flagged this checkpoint as a multi-step
+    # subtask; PlanWorkflow runs it as a nested PlanWorkflow.
+    complex: bool = False
 
 
 @dataclass
@@ -303,6 +244,11 @@ class ModelCallOutput:
     # the next ModelCallInput unmodified by the workflow.
     next_hint_modality: str = "language"
     next_hint_tier: str = "medium"
+    # docs/components/request-pipeline/08-planning.md — set on a planning turn's
+    # one call when the model's `propose_plan` asked for approval before
+    # execution. A control bool, same category as next_hint_tier; TurnWorkflow
+    # copies it into TurnResult and PlanWorkflow gates on it.
+    needs_approval: bool = False
 
 
 @dataclass
@@ -343,6 +289,15 @@ class InsertMessageInput:
     parent_id: str = ""
     parent_type: str = ""
     turn_seq: int | None = None
+    # Provenance for the turns row, set only on the is_turn_start call
+    # (docs/components/proactivity.md): "" / "user" (default), "intn:<id>",
+    # or "plan".
+    initiated_by: str = ""
+    # docs/components/request-pipeline/08-planning.md — every turn under a
+    # PlanWorkflow (the planning turn and each parent_type='plan' checkpoint
+    # turn) carries the task-run's plan_id here so the turns row records it
+    # directly. Empty for a plain / conversational turn.
+    plan_id: str = ""
 
 
 @dataclass
@@ -381,3 +336,35 @@ class UserInputResponse:
     request_id: str = ""
     selected_option_id: str | None = None
     free_text: str | None = None
+
+
+# --- docs/components/proactivity.md — intentions ---
+
+
+@dataclass
+class ProbeSpec:
+    tool: str = ""
+    args: dict[str, Any] = field(default_factory=dict)
+    predicate: str = ""
+
+
+@dataclass
+class FireIntentionInput:
+    """FireIntention SignalWithStarts the session coordinator's Wake handler."""
+
+    intention_id: str = ""
+    session_key: str = ""
+    objective: str = ""
+    why: str = ""
+
+
+@dataclass
+class CheckConditionInput:
+    intention_id: str = ""
+    probe: ProbeSpec = field(default_factory=ProbeSpec)
+
+
+@dataclass
+class CheckConditionResult:
+    fired: bool = False
+    note: str = ""

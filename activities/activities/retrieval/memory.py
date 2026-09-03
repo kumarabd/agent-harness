@@ -25,8 +25,7 @@ from temporalio import activity
 from .. import agent_brain, lcm
 from ..metrics import observe_outcome
 from ..types import MemoryRetrieveInput, SubsystemResult
-from .reconcile import reconcile_query
-from .staging import RetrievalRow, read_rows, replace_rows, write_rows
+from .staging import RetrievalRow, read_rows, write_rows
 
 logger = logging.getLogger(__name__)
 
@@ -116,69 +115,49 @@ class MemoryRetrieveActivity:
     @activity.defn(name="MemoryRetrieve")
     @observe_outcome("memory_retrieve_total")
     async def __call__(self, input: MemoryRetrieveInput) -> SubsystemResult:
-        if input.parent_turn_id and not input.reconcile:
-            return await self._inherit(input.episode_id, input.parent_turn_id)
+        if input.parent_turn_id:
+            return await self._inherit(input.owner_id, input.parent_turn_id)
 
         query = input.retrieval_query.strip()
-        if input.reconcile:
-            query = await reconcile_query(self._pool, input.turn_id, query)
         if not query:
-            logger.info("MemoryRetrieve[%s]: empty query — nothing to retrieve", input.episode_id)
+            logger.info("MemoryRetrieve[%s]: empty query — nothing to retrieve", input.owner_id)
             return SubsystemResult(status="empty", count=0)
 
         try:
             response = await agent_brain.call_tool("memory_search", {"query": query, "limit": _SEARCH_LIMIT})
         except agent_brain.AgentBrainNotConfiguredError:
-            logger.info("MemoryRetrieve[%s]: agent-brain not configured", input.episode_id)
+            logger.info("MemoryRetrieve[%s]: agent-brain not configured", input.owner_id)
             return SubsystemResult(status="empty", count=0)
         # Any other exception propagates — see module docstring.
 
         rows = _select(response.get("results", []) or [])
         if not rows:
-            logger.info("MemoryRetrieve[%s]: no usable results for query=%r", input.episode_id, query)
-            # Reconcile with no hits leaves the original rows in place — an empty
-            # result is likelier a noisier query than a signal the old context
-            # went stale.
+            logger.info("MemoryRetrieve[%s]: no usable results for query=%r", input.owner_id, query)
             return SubsystemResult(status="empty", count=0)
 
-        if input.reconcile:
-            written = await replace_rows(self._pool, input.episode_id, "memory", rows)
-        else:
-            written = await write_rows(self._pool, input.episode_id, rows)
-        logger.info(
-            "MemoryRetrieve[%s]: staged %d memory rows (query=%r, reconcile=%s)",
-            input.episode_id, written, query, input.reconcile,
-        )
+        written = await write_rows(self._pool, input.owner_id, rows)
+        logger.info("MemoryRetrieve[%s]: staged %d memory rows (query=%r)", input.owner_id, written, query)
         return SubsystemResult(status="ok", count=written)
 
-    async def _inherit(self, episode_id: str, parent_turn_id: str) -> SubsystemResult:
-        """Subagent path (docs/components/episode-lifecycle.md): copy the parent
-        episode's already-staged kind='memory' rows rather than re-query
+    async def _inherit(self, owner_id: str, parent_turn_id: str) -> SubsystemResult:
+        """Subagent path (docs/components/request-pipeline/08-planning.md): copy
+        the parent turn's already-staged kind='memory' rows rather than re-query
         agent-brain. Memory is about the user's world — stable across a turn
-        tree — and the parent's front-loaded snapshot is a consistent
-        point-in-time capture."""
-        parent_ep = await self._pool.fetchrow(
-            "SELECT COALESCE(episode_id, turn_id) AS ep FROM turns WHERE turn_id = $1", parent_turn_id
-        )
-        parent_episode_id = parent_ep["ep"] if parent_ep else parent_turn_id
-        parent_rows = await read_rows(self._pool, parent_episode_id, ("memory",))
+        tree — and the parent's snapshot is a consistent point-in-time capture."""
+        parent_rows = await read_rows(self._pool, parent_turn_id, ("memory",))
         if not parent_rows:
             logger.info(
-                "MemoryRetrieve[%s]: parent episode %s staged no memory — nothing to inherit",
-                episode_id,
-                parent_episode_id,
+                "MemoryRetrieve[%s]: parent turn %s staged no memory — nothing to inherit",
+                owner_id, parent_turn_id,
             )
             return SubsystemResult(status="empty", count=0)
-        # re-seq defensively; read_rows already orders by (kind, seq)
         rows = [
             RetrievalRow(kind="memory", seq=i, content=r.content, score=r.score, metadata=r.metadata)
             for i, r in enumerate(parent_rows)
         ]
-        written = await write_rows(self._pool, episode_id, rows)
+        written = await write_rows(self._pool, owner_id, rows)
         logger.info(
-            "MemoryRetrieve[%s]: inherited %d memory rows from parent episode %s",
-            episode_id,
-            written,
-            parent_episode_id,
+            "MemoryRetrieve[%s]: inherited %d memory rows from parent turn %s",
+            owner_id, written, parent_turn_id,
         )
         return SubsystemResult(status="ok", count=written)

@@ -164,9 +164,9 @@ def parse_task_representation(raw: str) -> TaskRepresentation:
 
 # One round-trip for everything the classifier prompt needs: the seed user
 # message, a short tail of prior conversation, and a one-line summary of the
-# open episode (its query + the agent's last message). Was four sequential
-# fetchrow/fetch calls — ~1s on the critical path, all of it dead wait since
-# the queries are independent given `turn_id` + `session_key`.
+# in-progress task-run (its anchor message + the agent's last message). Was
+# four sequential fetchrow/fetch calls — ~1s on the critical path, all of it
+# dead wait since the queries are independent given `turn_id` + `session_key`.
 #   $1 = turn_id   $2 = session_key   $3 = recent-message cap
 _CONTEXT_SQL = """
 WITH seed AS (
@@ -185,25 +185,36 @@ recent AS (
         LIMIT $3
     ) latest
 ),
-open_ep AS (
-    SELECT e.episode_id, e.retrieval_query
-    FROM episodes e JOIN turns t ON t.turn_id = e.episode_id
-    WHERE e.session_key = $2 AND e.status = 'open' AND t.parent_type = 'session'
-    ORDER BY e.opened_at DESC LIMIT 1
+-- The session's most recent task-run (decision B — no `episodes` table; a
+-- turn in a run carries turns.plan_id). ResolveOpenPlan does the authoritative
+-- "is it still running / does this continue it" check; this is just a hint for
+-- the classifier's `continues_prior`.
+open_run AS (
+    SELECT t.plan_id
+    FROM turns t
+    WHERE t.parent_id = $2 AND t.parent_type = 'session' AND t.plan_id IS NOT NULL
+      AND t.turn_id <> $1
+    ORDER BY t.started_at DESC LIMIT 1
 ),
 open_last AS (
     SELECT m.content
     FROM messages m JOIN turns t ON m.parent_id = t.turn_id
-    WHERE t.episode_id = (SELECT episode_id FROM open_ep)
+    WHERE t.plan_id = (SELECT plan_id FROM open_run)
       AND m.role = 'assistant' AND m.content IS NOT NULL
     ORDER BY t.turn_seq DESC, m.seq DESC LIMIT 1
+),
+open_seed AS (
+    SELECT m.content
+    FROM messages m
+    WHERE m.parent_id = (SELECT plan_id FROM open_run) AND m.seq = 0 AND m.role = 'user'
+    LIMIT 1
 )
 SELECT
     (SELECT content FROM seed) AS seed_content,
     (SELECT json_agg(json_build_object('role', role, 'content', content) ORDER BY ts ASC, ms ASC)
        FROM recent) AS recent_msgs,
-    (SELECT episode_id FROM open_ep) AS open_episode_id,
-    (SELECT retrieval_query FROM open_ep) AS open_retrieval_query,
+    (SELECT plan_id FROM open_run) AS open_plan_id,
+    (SELECT content FROM open_seed) AS open_anchor_message,
     (SELECT content FROM open_last) AS open_last_assistant
 """
 
@@ -220,14 +231,15 @@ def _format_recent_context(recent_msgs: str | None) -> str:
 
 
 def _format_open_task(
-    episode_id: str | None, retrieval_query: str | None, last_assistant: str | None, turn_id: str
+    plan_id: str | None, anchor_message: str | None, last_assistant: str | None, turn_id: str
 ) -> str:
-    """One line describing the open top-level episode for the `continues_prior`
-    judgement. Empty when none is open, or when the open one IS this turn's own
-    episode (a mid-turn re-classify — shouldn't happen, but harmless)."""
-    if not episode_id or episode_id == turn_id:
+    """One line describing the session's in-progress task-run for the
+    `continues_prior` judgement. Empty when no run is in progress, or when the
+    run's anchor IS this turn (a mid-turn re-classify — shouldn't happen, but
+    harmless)."""
+    if not plan_id or plan_id == turn_id:
         return ""
-    line = (retrieval_query or "").strip() or "(task in progress)"
+    line = (anchor_message or "").strip() or "(task in progress)"
     if last_assistant:
         line += f"\nagent's last message: {_truncate(last_assistant.strip(), _MAX_RECENT_MESSAGE_CHARS)}"
     return line
@@ -332,7 +344,7 @@ class ClassifyRequestActivity:
         user_message: str = row["seed_content"]
         recent_context = _format_recent_context(row["recent_msgs"])
         open_task = _format_open_task(
-            row["open_episode_id"], row["open_retrieval_query"], row["open_last_assistant"], turn_id
+            row["open_plan_id"], row["open_anchor_message"], row["open_last_assistant"], turn_id
         )
 
         config = model_registry.resolve("language", _CLASSIFIER_TIER)

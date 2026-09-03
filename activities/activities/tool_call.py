@@ -50,12 +50,19 @@ logger = logging.getLogger(__name__)
 
 
 class ToolCallActivity:
-    def __init__(self, pool):
+    def __init__(self, pool, temporal_client=None):
         self._pool = pool
         # The AsyncOpenAI client is NOT injected anymore (2026-08-28,
         # per-tier provider revision) — it's resolved per call via
         # llm_client.get_client(model_config), from whichever tier's
         # config the summary path actually uses. See __call__ below.
+        #
+        # temporal_client IS injected — the intention tools
+        # (tools_intention.py, docs/components/proactivity.md) are thin
+        # wrappers over it (start/signal/cancel/query an IntentionWorkflow).
+        # Same "an activity may hold its own client" pattern ModelCallActivity
+        # already uses for its streaming path.
+        self._temporal_client = temporal_client
 
     @activity.defn(name="ToolCall")
     async def __call__(self, input: ToolCallInput) -> ToolCallOutput:
@@ -111,6 +118,7 @@ class ToolCallActivity:
             summary_model=summary_config.model,
             heartbeat_interval_seconds=spec.heartbeat_interval_seconds,
             lease_ttl_seconds=spec.heartbeat_timeout_seconds,
+            temporal_client=self._temporal_client,
         )
 
         logger.info("ToolCall start: %s(%r)", tool_name, arguments)

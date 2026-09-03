@@ -12,12 +12,14 @@ The runtime, turn-facing counterpart to `components/dreaming.md`'s batch produce
 ### Resolved: Two Retrieval Triggers, Matching `components/context-slot.md`
 > **Superseded 2026-08-31 for the automatic trigger** — it is now the request
 > pipeline's step 4 (`components/request-pipeline/04-memory-retrieval.md`):
-> `RoutingWorkflow` dispatches `MemoryRetrieve` **once per top-level turn**
-> (not only the session's first), keyed to step 2's distilled `retrieval_query`,
-> and stages results to `turn_retrieval` for `build_conversation` to read every
-> ModelCall. The "session start only" framing below is the earlier design; the
-> "unconditional, accept the wasted call" reasoning still holds, just per-turn
-> now (routing's fast-path skips it for high-confidence `conversational` turns).
+> `MemoryRetrieve` runs **once per turn** (not only the session's first), keyed
+> to step 2's distilled `retrieval_query`, and `prompt.assemble` injects the
+> results into that turn's conversation directly. (**REVISION 2026-09-02**: the
+> earlier design staged results to a `turn_retrieval` table read every ModelCall;
+> that table is dropped — see `request-pipeline/08-planning.md` — and retrieval
+> is per-turn, not a `RoutingWorkflow` fan-out.) The "session start only" framing
+> below is the earliest design; the "unconditional, accept the wasted call"
+> reasoning still holds, just per-turn now (a `conversational` turn skips it).
 > The mid-session model-initiated `memory_search` tool is unchanged.
 
 - **Session start** — automatic, no model decision. Fires when a session has zero prior turns (not on every Coordinator respawn, which is workflow-lifecycle noise unrelated to whether this is a genuinely new line of inquiry).

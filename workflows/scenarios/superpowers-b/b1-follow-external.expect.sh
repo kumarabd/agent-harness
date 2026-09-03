@@ -30,13 +30,9 @@ echo "$lc" | grep -qE "approach|option|trade-?off|alternativ" || fail "reply did
 ok "followed the process (approaches + trade-offs, ${#reply} chars)"
 printf '%s' "$reply" | grep -q '```' && warn "reply has a code fence — check it's a sketch, not an implementation" || ok "hard gate held (no code)"
 
-# candidate recorded
-cand=""
-for _ in $(seq 1 20); do cand="$(pg "SELECT outcome FROM skill_candidates WHERE turn_id='$ROOT_TURN_ID'")"; [ -n "$cand" ] && break; sleep 1; done
-[ -n "$cand" ] || fail "no skill_candidate row — RecordSkillOutcome didn't fire (classify complexity<moderate?)"
-ok "skill_candidate recorded (outcome=$cand)"
-
-# synthesis: a new learned procedure appeared, reflecting the brainstorming shape
+# RecordSkill (skill-subsystem.md REVISION 2026-09-02) generalizes inline at
+# episode close — no candidates queue, no separate SkillSynthesize step. A new
+# learned:* procedure appears directly, reflecting the brainstorming shape.
 learned_after=""
 new_proc=""
 for _ in $(seq 1 90); do
@@ -47,8 +43,8 @@ for _ in $(seq 1 90); do
   fi
   sleep 2
 done
-[ -n "$new_proc" ] || fail "no new learned:* procedure after 3min — SkillSynthesize didn't generalize the trajectory (candidate outcome=$cand; check worker logs for SkillSynthesize)"
-ok "synthesis created a learned procedure: $new_proc"
+[ -n "$new_proc" ] || fail "no new learned:* procedure after 3min — RecordSkill didn't generalize the trajectory (check worker logs for RecordSkill)"
+ok "RecordSkill created a learned procedure: $new_proc"
 
 new_id="${new_proc%% ::*}"
 body="$(pg "SELECT lower(string_agg(value->>'instruction', ' | ')) FROM skill_procedures, jsonb_array_elements(body) WHERE id='$new_id'")"

@@ -36,9 +36,12 @@ retrieval activities' inputs. This is the same category as
 `ModelCallOutput.NextHintTier` (a decision derived from model output) and
 `ToolCallRef.Server` / `Tool` (a token extracted from the command string,
 explicitly blessed as "dispatch/routing metadata, not the call's actual
-arguments"). The **bulk retrieved content** — memory item text, the composed
-skill, tool schemas — is what goes through the `turn_retrieval` staging table in
-later steps; a ~20-word query does not need to.
+arguments"). The **bulk retrieved content** — memory item text, tool schemas —
+is injected into the turn's conversation by `prompt.assemble` at `ModelCall`
+time; a ~20-word query does not need to cross as content. (**REVISION
+2026-09-02**: an earlier design staged that content to a `turn_retrieval` table;
+it's dropped, and there is no "composed skill" — see
+[`08-planning.md`](08-planning.md).)
 
 No `task_representations` table. (One was drafted twice and cut twice — first
 when there were no consumers, then when the consumers turned out to only need

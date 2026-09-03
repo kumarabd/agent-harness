@@ -33,6 +33,25 @@ def session_key_of(turn_id: str) -> str:
     return session_key
 
 
+def user_scope_of(session_key: str) -> str:
+    """The user-stable scope a standing intention keys on
+    (docs/components/proactivity.md).
+
+    `session_key` is deliberately channel/branch-scoped, not user-scoped
+    (gateway core.SessionKeyFor) — for web it embeds the user
+    ("agent:main:web:user:<id>"); for a shared Discord channel the channel is
+    the best available scope. Stripping any per-branch ":session:<id>" or
+    per-thread ":thread:<id>" suffix gives a stable namespace shared across a
+    user's branches/threads, and the result is always itself a valid canonical
+    session_key — so it also names the session a fired intention wakes.
+    """
+    for marker in (":session:", ":thread:"):
+        head, sep, _ = session_key.partition(marker)
+        if sep:
+            return head
+    return session_key
+
+
 def session_fs_path(turn_id: str) -> str:
     """Maps a turn_id to its working directory on the session filesystem PV,
     per docs/components/session-filesystem.md's path convention:

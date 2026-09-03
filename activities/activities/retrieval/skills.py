@@ -25,8 +25,7 @@ from ..skills import embedding
 from ..skills import select as skill_select
 from ..skills import store
 from ..types import SkillDiscoverInput, SubsystemResult
-from .reconcile import reconcile_query
-from .staging import RetrievalRow, replace_rows, write_rows
+from .staging import RetrievalRow, write_rows
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ def _days_since(last_used_at, now: datetime) -> float | None:
     return max(0.0, (now - last_used_at).total_seconds() / 86400.0)
 
 
-def _applicable_scopes(episode_id: str) -> tuple[str, ...]:
+def _applicable_scopes(plan_id: str) -> tuple[str, ...]:
     # Phase 1: global only. project:/user: scoping lands once the session
     # carries that context (skill-subsystem.md, "scope shadowing").
     return ("global",)
@@ -53,17 +52,15 @@ class SkillDiscoverActivity:
     @observe_outcome("skill_discover_total")
     async def __call__(self, input: SkillDiscoverInput) -> SubsystemResult:
         query = input.retrieval_query.strip()
-        if input.reconcile:
-            query = await reconcile_query(self._pool, input.turn_id, query)
         if not query:
             return SubsystemResult(status="empty", count=0)
 
         query_embedding = await embedding.embed(query)
         if query_embedding is None:
-            logger.info("SkillDiscover[%s]: embeddings unavailable — no skill retrieval", input.episode_id)
+            logger.info("SkillDiscover[%s]: embeddings unavailable — no skill retrieval", input.plan_id)
             return SubsystemResult(status="empty", count=0)
 
-        procedures = await store.current_procedures(self._pool, _applicable_scopes(input.episode_id))
+        procedures = await store.current_procedures(self._pool, _applicable_scopes(input.plan_id))
         if not procedures:
             return SubsystemResult(status="empty", count=0)
 
@@ -84,7 +81,7 @@ class SkillDiscoverActivity:
         chosen = skill_select.select(query_embedding, candidates, edges)
         if not chosen:
             logger.info(
-                "SkillDiscover[%s]: no procedure over the score floor (query=%r)", input.episode_id, query
+                "SkillDiscover[%s]: no procedure over the score floor (query=%r)", input.plan_id, query
             )
             return SubsystemResult(status="empty", count=0)
 
@@ -104,13 +101,10 @@ class SkillDiscoverActivity:
             )
             for i, s in enumerate(chosen)
         ]
-        if input.reconcile:
-            written = await replace_rows(self._pool, input.episode_id, "skill", rows)
-        else:
-            written = await write_rows(self._pool, input.episode_id, rows)
+        written = await write_rows(self._pool, input.plan_id, rows)
         logger.info(
             "SkillDiscover[%s]: staged %d skill row(s): %s",
-            input.episode_id,
+            input.plan_id,
             written,
             [s.id for s in chosen],
         )

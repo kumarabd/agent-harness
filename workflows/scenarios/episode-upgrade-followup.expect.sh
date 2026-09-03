@@ -45,19 +45,16 @@ echo "  episode classification now: $row"
 echo "$row" | grep -q '^task|' || fail "episode intent = '${row%%|*}', expected 'task' — _upgrade_classification did not bump it from the anchor's 'question'"
 ok "episode intent upgraded to task"
 
-# because it upgraded, the episode is recorded (a question-intent episode is skipped)
-cand=""
-for _ in $(seq 1 40); do
-  cand="$(pg "SELECT outcome || '|' || (task_embedding IS NOT NULL) FROM skill_candidates WHERE turn_id = '$ep1'")"
-  [ -n "$cand" ] && break
+# because it upgraded question→task, the episode is recorded (a question-intent
+# episode is skipped). RecordSkill match-or-inserts one skill_procedures row.
+rec=""
+for _ in $(seq 1 55); do
+  rec="$(pg "SELECT count(*) FROM skill_procedures WHERE source_ids @> '[\"$ep1\"]'::jsonb")"
+  [ "${rec:-0}" -gt 0 ] && break
   sleep 1
 done
-[ -n "$cand" ] || fail "no skill_candidates row for episode $ep1 — the upgraded (task) episode was not recorded"
-echo "  candidate: outcome|has_embedding = $cand"
-ok "the upgraded episode was recorded"
-
-n="$(pg "SELECT count(*) FROM skill_candidates WHERE turn_id = '$ep1'")"
-[ "$n" = "1" ] || fail "expected exactly 1 candidate, got $n"
-ok "exactly one candidate for the two-turn episode"
+[ "${rec:-0}" -gt 0 ] || fail "no skill_procedures row for episode $ep1 — the upgraded (task) episode was not recorded"
+[ "$rec" = "1" ] || fail "expected exactly 1 procedure carrying the episode, got $rec"
+ok "the upgraded two-turn episode produced exactly one RecordSkill write"
 
 exit 0

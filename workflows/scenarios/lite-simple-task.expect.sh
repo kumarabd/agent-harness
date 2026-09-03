@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 # Expectations for lite-simple-task.json — docs/components/lane-model.md, the Lite lane.
 #
-# A simple task must NOT open an episode and must NOT run skill/tool/plan
-# retrieval — only memory, staged under the turn's own id.
+# A simple task must NOT open a task-run (no PlanWorkflow, turns.plan_id unset)
+# and must NOT run skill/tool/plan retrieval — only memory, staged under the
+# turn's own id.
 #
 # Called by run_scenario.sh as: expect.sh <session_key> <root_turn_id>
 set -euo pipefail
 
+SESSION_KEY="$1"
 ROOT_TURN_ID="$2"
 
 pg() {
   kubectl exec -i -n "$NAMESPACE" "$PG_POD" -- sh -c \
     "PGPASSWORD=\$(cat /opt/bitnami/postgresql/secrets/password) psql -U $PG_USER -d $PG_DB -tAc \"$1\""
+}
+plan_md() {
+  kubectl exec -n "$NAMESPACE" deploy/abishekk-worker -- \
+    cat "/sessions/session/$SESSION_KEY/plans/${1//:/_}/PLAN.md" 2>/dev/null || true
 }
 fail() { echo "  FAIL: $1"; exit 1; }
 ok() { echo "  ok: $1"; }
@@ -34,27 +40,22 @@ case "$cx" in
 esac
 ok "classifier rated this a Lite turn ('$cx')"
 
-ep="$(pg "SELECT COALESCE(episode_id,'') FROM turns WHERE turn_id = '$ROOT_TURN_ID'")"
-[ -z "$ep" ] || fail "turns.episode_id = '$ep' — a simple task should take the Lite lane and open NO episode"
-ok "no episode opened (Lite lane)"
+ep="$(pg "SELECT COALESCE(plan_id,'') FROM turns WHERE turn_id = '$ROOT_TURN_ID'")"
+[ -z "$ep" ] || fail "turns.plan_id = '$ep' — a simple task should take the Lite lane and open NO task-run"
+ok "no task-run opened (Lite lane)"
 
-n_ep="$(pg "SELECT count(*) FROM episodes WHERE episode_id = '$ROOT_TURN_ID'")"
-[ "$n_ep" = "0" ] || fail "an episodes row exists for this turn"
-ok "no episodes row"
-
-kinds="$(pg "SELECT string_agg(DISTINCT kind, ',' ORDER BY kind) FROM turn_retrieval WHERE episode_id = '$ROOT_TURN_ID'")"
+kinds="$(pg "SELECT string_agg(DISTINCT kind, ',' ORDER BY kind) FROM turn_retrieval WHERE owner_id = '$ROOT_TURN_ID'")"
 echo "  staged retrieval kinds: '${kinds:-<none>}'"
 case "$kinds" in
   ""|"memory") ok "retrieval is memory-only (or empty)" ;;
   *) fail "staged non-memory retrieval ($kinds) — Lite should only run MemoryRetrieve" ;;
 esac
 
-plan_n="$(pg "SELECT count(*) FROM turn_plan WHERE episode_id = '$ROOT_TURN_ID'")"
-[ "${plan_n:-0}" = "0" ] || fail "turn_plan has $plan_n rows — Lite must not seed a plan ledger"
+[ -z "$(plan_md "$ROOT_TURN_ID")" ] || fail "a PLAN.md exists for this turn — Lite must not seed a plan ledger"
 ok "no plan ledger"
 
-cand="$(pg "SELECT count(*) FROM skill_candidates WHERE turn_id = '$ROOT_TURN_ID'")"
-[ "${cand:-0}" = "0" ] || fail "a skill_candidates row was written — Lite must not record"
+rec="$(pg "SELECT count(*) FROM skill_procedures WHERE source_ids @> '[\"$ROOT_TURN_ID\"]'::jsonb")"
+[ "${rec:-0}" = "0" ] || fail "a skill_procedures row carries this turn in source_ids — Lite must not record"
 ok "no RL recording"
 
 exit 0

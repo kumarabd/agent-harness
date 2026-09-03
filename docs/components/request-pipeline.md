@@ -7,18 +7,43 @@
 > other components. Every phase is additive and degrades cleanly to today's
 > behavior with its inputs absent — see "Degradation is layered" below.
 >
+> ## REVISION (2026-09-02) — plan-and-execute. Design agreed, not built.
+>
+> Authority: [`08-planning.md`](request-pipeline/08-planning.md) (REVISED) and
+> [`episode-lifecycle.md`](episode-lifecycle.md) (REVISION block). In brief, the
+> whole staging model is being removed:
+>
+> - **`turn_retrieval` — dropped.** The staged bundle duplicated the
+>   `lcm` → `WriteMemory` → agent-brain → `MemoryRetrieve` loop.
+> - **`MemoryRetrieve` + `ToolDiscover` — per turn, fresh**, injected directly by
+>   `prompt.assemble`. Not staged, not fanned out for staging.
+> - **`SkillDiscover` — once per episode**, feeding a **planning turn**.
+> - **`ComposeSkill` / step 6 — removed.** Merging retrieved procedures into a
+>   coherent plan is the planning turn's job.
+> - **`turn_plan` — dropped.** Replaced by **PLAN.md**
+>   (`/sessions/<key>/plans/<episode_id>/`), executed by a new **`PlanWorkflow`**
+>   (loop-worker). `plan_progress` → `propose_plan` + `checkpoint_done`.
+> - **`RecordSkillOutcome` + `skill_candidates` + `SkillSynthesizeWorkflow` —
+>   collapsed** into one async **`RecordSkill`** (embed task → match→reinforce /
+>   no-match→insert `skill_procedures`).
+> - **`RoutingWorkflow`'s fan-out/staging role and `Mode="reconcile"`** are
+>   largely obsolete; its surviving shape is an open question for the next pass.
+>
+> Phase docs below still describe the staging model; the two authority docs win
+> where they conflict.
+>
 > This file is the index and the cross-cutting contract. Each phase has its own
 > doc:
 > - [`02-request-understanding.md`](request-pipeline/02-request-understanding.md) — **implemented**
 > - [`03-routing.md`](request-pipeline/03-routing.md) — the router + `RoutingWorkflow` orchestration
 > - [`04-memory-retrieval.md`](request-pipeline/04-memory-retrieval.md)
 > - [`05-skill-discovery.md`](request-pipeline/05-skill-discovery.md) — pipeline contract; design in `skill-subsystem.md`
-> - [`06-skill-composition.md`](request-pipeline/06-skill-composition.md) — pipeline contract; design in `skill-subsystem.md`
-> - [`../skill-subsystem.md`](skill-subsystem.md) — **"The Skill Graph"**, the full design for steps 5 & 6
+> - [`06-skill-composition.md`](request-pipeline/06-skill-composition.md) — **REMOVED 2026-09-02** (job absorbed into the planning turn)
+> - [`../skill-subsystem.md`](skill-subsystem.md) — **"The Skill Graph"**, the full design for step 5 (+ recording/synthesis, being collapsed into `RecordSkill`)
 > - [`07-tool-discovery.md`](request-pipeline/07-tool-discovery.md)
-> - [`08-planning.md`](request-pipeline/08-planning.md) — **built**; the living checkpoint ledger + subagents-as-full-agents + reconciliation trigger
-> - [`09-prompt-assembly.md`](request-pipeline/09-prompt-assembly.md) — **built**; the section model + budget arbitration
-> - [`../episode-lifecycle.md`](episode-lifecycle.md) — **built**; the episode as the unit of work — plan ledger, staged retrieval, and skill recording are episode-scoped, not per-turn
+> - [`08-planning.md`](request-pipeline/08-planning.md) — **REVISED 2026-09-02**; plan-and-execute orchestrator (`PlanWorkflow` + PLAN.md + approval gate)
+> - [`09-prompt-assembly.md`](request-pipeline/09-prompt-assembly.md) — **built**; the section model + budget arbitration (composed-skill section removed)
+> - [`../episode-lifecycle.md`](episode-lifecycle.md) — **built + REVISION 2026-09-02**; the episode owns only plan + trajectory + status (staged retrieval removed)
 > - [`../lane-model.md`](lane-model.md) — **design**; two lanes — **Lite** (memory only) and **Deliberate** (full pipeline + episode + RL). Skills / tools / plan ledger / episodes / RL recording are all Deliberate-only; Deliberate is `(task, moderate|complex)` + `(question, complex)` + `conf<0.5`
 
 ### Role (one line)
@@ -91,11 +116,11 @@ behavior when its inputs are absent.**
 | 2 | Request understanding | `02-request-understanding.md` | **implemented** |
 | 3 | Routing + retrieval orchestration | `03-routing.md` | **implemented** (`RoutingWorkflow`; subsystems live) |
 | 4 | Memory retrieval | `04-memory-retrieval.md` | **implemented** (`MemoryRetrieve` → agent-brain, stages `kind='memory'`) |
-| 5 | Skill discovery | `05` + `skill-subsystem.md` | **built** (phases 1–5: flat-cosine + full scoring incl. recency → `kind='skill'`; cluster hierarchy deferred) |
-| 6 | Skill composition | `06` + `skill-subsystem.md` | **built** (merge → `kind='composed'` → into the prompt) |
-| 7 | Tool discovery | `07-tool-discovery.md` | **implemented** (`ToolDiscover` → `discover_tools`, stages `kind='tool'`) |
-| 8 | Planning | `08-planning.md`, `episode-lifecycle.md` | **built** — `turn_plan` ledger (migration `017`) seeded by `ComposeSkill`, `plan_progress` meta-tool applied in `ModelCall`, progress block in `build_conversation`, final state → synthesis. **Episode-scoped since 2026-09-01 (`episode-lifecycle.md`, migration `018`): the ledger + staged retrieval key on `episode_id` and persist across a task's turns; the pipeline runs once per episode, not per turn.** Subagents run steps 2–3 + skill recording. Follow-up → detached `RoutingWorkflow` `Mode="reconcile"` (mid-turn *and* between-turn continuation). Failure-run reconciliation + DAG deferred. |
-| 9 | Prompt assembly | `09-prompt-assembly.md` | **built** — `prompt.py`'s section model (composed skill, plan progress, capabilities hint, memory, in that order) + budget arbitration (sheds capabilities then memory). `llm.build_conversation` now a thin call-through. |
+| 5 | Skill discovery | `05` + `skill-subsystem.md` | built (flat-cosine + scoring → `kind='skill'`). **REVISED: runs once per episode, feeds the planning turn; `turn_retrieval` staging dropped.** |
+| 6 | Skill composition | `06` + `skill-subsystem.md` | ~~built~~ **REMOVED (2026-09-02)** — merging retrieved procedures into a plan is the planning turn's job. `ComposeSkill` deleted. |
+| 7 | Tool discovery | `07-tool-discovery.md` | built (`ToolDiscover` → `discover_tools`). **REVISED: per turn, fresh, injected by `prompt.assemble`; staging dropped.** |
+| 8 | Planning | `08-planning.md`, `episode-lifecycle.md` | **REVISED (2026-09-02) — plan-and-execute.** `PlanWorkflow` (loop-worker) runs a planning turn → PLAN.md (replaces `turn_plan`) → approval gate → one child turn per checkpoint w/ tail re-planning → one async `RecordSkill`. The 2026-08-31 living-ledger build (migration `017`, `plan.py`, `plan_progress`) is superseded. |
+| 9 | Prompt assembly | `09-prompt-assembly.md` | built. **REVISED: no "composed skill" section (removed); "plan progress" → "current checkpoint" from PLAN.md; capabilities + memory always per-turn fresh.** |
 | 10 | Model execution | `components/temporal-workflow.md` | done |
 | 11 | Memory write-back | `components/memory-slot.md` | partial |
 
@@ -149,6 +174,13 @@ for any misroute or missing backend is the current, un-enriched harness.
 
 ### Notes Log
 
+- 2026-09-02: **Plan-and-execute revision.** See the REVISION banner at the top
+  and `08-planning.md` / `episode-lifecycle.md`. Staging model (`turn_retrieval`,
+  `turn_plan`) removed; `MemoryRetrieve`/`ToolDiscover` go per-turn;
+  `SkillDiscover` feeds a planning turn once per episode; `ComposeSkill` deleted;
+  a `PlanWorkflow` executes an approved PLAN.md checkpoint-by-checkpoint;
+  recording collapses to one async `RecordSkill`. `RoutingWorkflow`'s future
+  shape is open. Not built.
 - 2026-09-01: **Episodes — `episode-lifecycle.md`. Fixes multi-turn synthesis
   fragmentation.** The plan ledger + staged retrieval (`turn_plan` /
   `turn_retrieval`, key column renamed `turn_id` → `episode_id`, migration

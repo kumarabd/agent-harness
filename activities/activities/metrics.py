@@ -3,24 +3,24 @@
 
 Why this module exists
 ----------------------
-Every pipeline activity (ClassifyRequest, OpenEpisode, MemoryRetrieve,
-ToolDiscover, SkillDiscover, ComposeSkill) is best-effort and short on its
-own, but they run *serially before the first model token* — so their combined
-cost is what a turn's time-to-first-token is made of.
+Every pipeline activity (ClassifyRequest, ResolveOpenPlan, MemoryRetrieve,
+ToolDiscover, SkillDiscover) is best-effort and short on its own, but they run
+*serially before the first model token* — so their combined cost is what a
+turn's time-to-first-token is made of.
 
 **Latency is already measured.** The Temporal SDK core emits
 ``temporal_activity_execution_latency`` (a histogram, unit = *milliseconds*,
 label ``activity_type``) for every activity, scraped from the tenant worker's
 own ``/metrics``. Query THAT for per-activity timing — e.g.
-``temporal_activity_execution_latency{activity_type="ComposeSkill"}`` —
+``temporal_activity_execution_latency{activity_type="SkillDiscover"}`` —
 not a hand-rolled histogram, and not the ``_seconds`` variant (that name is
 only emitted by the Go gateway, which sets ``durations_as_seconds=true``).
 
-What the SDK metric can't show is the *semantic* outcome: whether ComposeSkill
-merged or degraded to a single procedure's render, whether MemoryRetrieve
-found anything, whether OpenEpisode attached / opened / superseded. Those
-decide lane routing and prompt content downstream, so `observe_outcome` adds
-one cheap counter per activity carrying just that.
+What the SDK metric can't show is the *semantic* outcome: whether
+MemoryRetrieve found anything, whether ResolveOpenPlan resolved to
+continue / supersede / none. Those decide lane routing and prompt content
+downstream, so `observe_outcome` adds one cheap counter per activity carrying
+just that.
 """
 
 from __future__ import annotations
@@ -65,20 +65,20 @@ SECONDS_LATENCY_METRICS: tuple[str, ...] = (
 def _outcome_of(result: Any) -> str:
     """Best-effort semantic label for what an activity returned.
 
-    - ``SubsystemResult`` (MemoryRetrieve / ToolDiscover / SkillDiscover /
-      ComposeSkill) -> its ``.status`` (``ok`` | ``empty`` | ``error``).
-    - ``OpenEpisodeResult`` -> ``superseded`` | ``attached`` | ``opened`` |
-      ``none`` (Lite turn with nothing to attach to).
+    - ``SubsystemResult`` (MemoryRetrieve / ToolDiscover / SkillDiscover)
+      -> its ``.status`` (``ok`` | ``empty`` | ``error``).
+    - ``ResolveOpenPlanResult`` -> ``supersede`` | ``continue`` | ``none``
+      (no running plan to resolve against).
     - anything else -> ``ok``.
     """
     if hasattr(result, "status") and isinstance(result.status, str) and result.status:
         return result.status
-    if hasattr(result, "attached") and hasattr(result, "episode_id"):
-        if getattr(result, "superseded_episode_id", ""):
-            return "superseded"
-        if result.attached:
-            return "attached"
-        return "opened" if result.episode_id else "none"
+    if hasattr(result, "should_continue") and hasattr(result, "plan_id"):
+        if getattr(result, "supersede", False):
+            return "supersede"
+        if result.should_continue:
+            return "continue"
+        return "none"
     return "ok"
 
 

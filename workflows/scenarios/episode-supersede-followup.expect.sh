@@ -53,15 +53,19 @@ st1="$(pg "SELECT status || '|' || coalesce(close_reason,'-') FROM episodes WHER
 [ "$st1" = "superseded|superseded" ] || fail "turn:1 episode state = '$st1', expected 'superseded|superseded'"
 ok "turn:1 episode closed as superseded when the unrelated task arrived"
 
-# turn:1 episode recorded (outcome failure — plan never finished)
-cand=""
-for _ in $(seq 1 30); do
-  cand="$(pg "SELECT outcome FROM skill_candidates WHERE turn_id = '$ep1'")"
-  [ -n "$cand" ] && break
+# supersede dispatches RecordSkill for turn:1's (failed, unfinished) episode.
+# RecordSkill (skill-subsystem.md REVISION 2026-09-02): a failed episode that
+# matches an existing procedure gets a caution note; one that matches nothing
+# is correctly dropped (no candidates queue to hold negative-only signal).
+seen=""
+for _ in $(seq 1 40); do
+  seen="$(kubectl logs -n "$NAMESPACE" deploy/abishekk-worker --since=10m 2>/dev/null \
+          | grep -F "RecordSkill[$ep1]" | grep -oE 'outcome=[a-z]+' | tail -1 || true)"
+  [ -n "$seen" ] && break
   sleep 1
 done
-[ -n "$cand" ] || fail "no skill_candidates row for the superseded episode $ep1 — supersede did not dispatch RecordSkillOutcome"
-[ "$cand" = "failure" ] || echo "  NOTE: superseded candidate outcome = '$cand' (expected 'failure' — plan was unfinished)"
-ok "superseded episode recorded (outcome=$cand)"
+[ -n "$seen" ] || fail "no RecordSkill[$ep1] log line — supersede did not dispatch RecordSkill for turn:1"
+[ "$seen" = "outcome=failure" ] || echo "  NOTE: RecordSkill saw '$seen' for the superseded episode (expected outcome=failure)"
+ok "supersede dispatched RecordSkill for the abandoned episode ($seen)"
 
 exit 0

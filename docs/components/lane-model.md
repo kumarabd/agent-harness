@@ -41,6 +41,26 @@
 > [`request-pipeline/03-routing.md`](request-pipeline/03-routing.md).
 > Reshapes: `Route()`'s rule table; the `turn.go` `OpenEpisode` gate
 > (`episode-lifecycle.md`); the `RecordSkillOutcome` gate (`skill-subsystem.md`).
+>
+> ## REVISION (2026-09-02) — the two lanes hold; their internals changed
+>
+> The **lane boundary is unchanged** — `laneIsDeliberate()` still decides Lite
+> (memory only) vs Deliberate, on the same `(intent, complexity, confidence)`
+> rule. What changed is what "Deliberate" *does* inside, per
+> [`request-pipeline/08-planning.md`](request-pipeline/08-planning.md) +
+> [`episode-lifecycle.md`](episode-lifecycle.md) REVISION:
+> - Deliberate = `OpenEpisode` → a **`PlanWorkflow`** (planning turn → PLAN.md →
+>   approval gate → checkpoint turns), not "compose → `turn_plan` ledger →
+>   reason-act with `plan_progress`".
+> - No `ComposeSkill`, no `turn_plan`, no `turn_retrieval` staging.
+>   `SkillDiscover` feeds the planning turn; `MemoryRetrieve` / `ToolDiscover` go
+>   per turn.
+> - `RecordSkillOutcome` → one async `RecordSkill` at episode close.
+> - Lite is still: memory-only route → single reason-act loop, no episode, no
+>   recording. A Lite turn that continues an open Deliberate episode still
+>   attaches and runs under its `PlanWorkflow`.
+> Mentally substitute those below wherever `ComposeSkill` / `plan_progress` /
+> `turn_plan` appear.
 
 ### The asymmetry this fixes
 

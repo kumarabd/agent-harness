@@ -76,19 +76,22 @@ from temporalio.worker import Worker
 from . import llm_client, shell_hub
 from .metrics import LATENCY_BUCKETS_SECONDS, SECONDS_LATENCY_METRICS
 from .classify import ClassifyRequestActivity
-from .episode import EpisodeActivities
+from .plan_resolve import (
+    MarkCheckpointDoneActivity,
+    NextCheckpointActivity,
+    ResolveOpenPlanActivity,
+)
 from .skills import seed as skill_seed
-from .skills.record import RecordSkillOutcomeActivity
-from .skills.synthesize import SkillSynthesizeActivity
+from .skills.record import RecordSkillActivity
 from .compress_context import CompressContextActivity
 from .db import create_pool
 from .deliver import DeliverActivity
 from .get_max_turn_seq import GetMaxTurnSeqActivity
 from .insert_message import InsertMessageActivity
+from .intention import CheckConditionActivity, FireIntentionActivity
 from .model_call import ModelCallActivity
 from .persist import PersistActivity
 from .retrieval import (
-    ComposeSkillActivity,
     MemoryRetrieveActivity,
     SkillDiscoverActivity,
     ToolDiscoverActivity,
@@ -100,12 +103,6 @@ from .user_input import CloseUserInputActivity, RequestUserInputActivity
 from .write_memory import WriteMemoryActivity
 
 
-def _episode_activities(pool):
-    """docs/components/episode-lifecycle.md — EpisodeActivities holds four
-    @activity.defn methods (OpenEpisode / CompleteEpisode / CloseSubagentEpisode
-    / CloseSessionEpisodes); register each bound method."""
-    ea = EpisodeActivities(pool)
-    return [ea.open_episode, ea.complete_episode, ea.close_subagent_episode, ea.close_session_episodes]
 
 
 async def main() -> None:
@@ -166,14 +163,14 @@ async def main() -> None:
         activities=[
             ModelCallActivity(pool, client).__call__,
             ClassifyRequestActivity(pool).__call__,
-            *_episode_activities(pool),
+            ResolveOpenPlanActivity(pool, client).__call__,
+            NextCheckpointActivity(pool).__call__,
+            MarkCheckpointDoneActivity(pool).__call__,
             MemoryRetrieveActivity(pool).__call__,
             ToolDiscoverActivity(pool).__call__,
             SkillDiscoverActivity(pool).__call__,
-            ComposeSkillActivity(pool).__call__,
-            RecordSkillOutcomeActivity(pool).__call__,
-            SkillSynthesizeActivity(pool).__call__,
-            ToolCallActivity(pool).__call__,
+            RecordSkillActivity(pool).__call__,
+            ToolCallActivity(pool, client).__call__,
             InsertMessageActivity(pool).__call__,
             GetMaxTurnSeqActivity(pool).__call__,
             PersistActivity(pool).__call__,
@@ -185,6 +182,8 @@ async def main() -> None:
             CloseUserInputActivity(pool).__call__,
             SeedChildSessionContextActivity(pool).__call__,
             SubagentManifestActivity(pool).__call__,
+            FireIntentionActivity(pool, client).__call__,
+            CheckConditionActivity(pool).__call__,
         ],
     )
     logging.getLogger(__name__).info(

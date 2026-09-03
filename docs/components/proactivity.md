@@ -1,301 +1,249 @@
-# Component: Proactivity — Intentions, Deliberation & Mixed-Initiative
+# Component: Proactivity — Intentions
 
-> STATUS: DESIGN (2026-09-02, rewritten around first-class components). Not built.
+> STATUS: DESIGN v3 (2026-09-02). Supersedes v2 ("first-class hand-built
+> components"), rejected as a parallel mini-architecture.
 >
-> Removes the asymmetry that only the user can start a conversation. The agent
-> is a peer: it has its own **intentions** — for its benefit, the user's, or
-> both — decides when to act on them, and can initiate.
+> **BUILD — Phase 1 substrate, branch `proactivity-substrate` (compiles, Go
+> tests green, NOT deployed):**
+> - **1a** — `turns.initiated_by` / `episodes.initiated_by` (migration `020`);
+>   coordinator `Wake` signal → proactive turn (`initiated_by="intn:<id>"`) or
+>   fold-in to the live turn; `startSessionTurn` helper.
+> - **1b-i** — `IntentionWorkflow` (loop-worker): `time`/`deadline` one-shot,
+>   `condition`/`state`/`event` poll loop, `inactivity` idle timer;
+>   `revise`/`snooze`/`reset` signals, `status` query; `FireIntention` activity
+>   (SignalWithStart the coordinator). 5 workflow tests.
+> - **1b-ii** — 6 agent tools (`create` / `list` / `inspect` / `revise` /
+>   `snooze` / `cancel_intention`) → handlers in `tools_intention.py` over
+>   `ctx.temporal_client` (threaded into `ToolCallActivity`). No new activities.
+> - **1b-iii** — real `CheckCondition` (mcp-hub probe → fast-tier predicate
+>   judge).
+> - **recurring** — `kind=schedule` (+ `cron` UTC / `every_seconds`) → a Temporal
+>   Schedule (`intn-sched:<scope>:<slug>`) starting a one-shot
+>   `IntentionWorkflow{kind:time}` per tick; `list` / `inspect` / `cancel` handle
+>   schedule ids; `revise` / `snooze` don't apply (cancel + recreate).
+>
+> **v1 deviations from this doc, deferred:**
+> - Intentions key on the **user-stable scope** (`ids.UserScopeOf` — session_key
+>   with any `:session:`/`:thread:` suffix stripped): `intn:<scope>:<slug>`. For
+>   web that scope is the user; for a shared Discord channel it's the channel
+>   (the harness has no user primitive — `core.SessionKeyFor` is deliberately not
+>   user-scoped). A fire wakes that scope's canonical session. `list` filters
+>   `WorkflowType='IntentionWorkflow'` + `intn:<scope>:` id-prefix — no
+>   `IntentionUser` Search Attribute yet (namespace registration is a deploy step).
+> - The proactive seed is written **role=`user`, seq 0** (ClassifyRequest
+>   requires it); `initiated_by` carries the real provenance.
+> - `cron` and any daily cadence run in the **execution engine's timezone**
+>   (per-user timezone is deferred — 2026-09-02).
+> - **The genesis daily-review intention is NOT built, but has no blockers left:**
+>   it's a plain `kind=schedule` intention (daily cron) that **the agent arms
+>   itself** via `create_intention` when a routine makes sense (no auto-genesis —
+>   the harness has no "onboard user" event and the bar for standing behaviour is
+>   high). Its fired turn derives its own watermark — `MAX(turns.started_at)
+>   WHERE initiated_by = 'intn:<scope>:daily-review'` — so "review everything
+>   since I last reviewed" needs **no new table, column, or workflow kind**
+>   (same "no watermark" stance as migration `011`). `importance` is computed by
+>   the review turn from raw signals (`stop_reason`, correction counts, plan
+>   outcomes), not stored.
+> - No suppression/dedup state on the intention beyond `fired_count`; the
+>   deciding turn's judgment + `lcm` are the only guard so far.
 >
 > Parent: [`../04-architecture-orchestrator-vision.md`](../04-architecture-orchestrator-vision.md).
-> Builds on [`episode-lifecycle.md`](episode-lifecycle.md),
-> [`lane-model.md`](lane-model.md), [`skill-subsystem.md`](skill-subsystem.md),
-> [`memory-slot.md`](memory-slot.md) (agent-brain is the belief store),
-> `coordinator.go` / `turn.go`.
->
-> **Relationship to memory mining.** agent-brain already runs its own
-> consolidation pipeline (`dreaming.md`, superseded — mining + EMU
-> construction/lifecycle) that turns raw transcripts into memory. Deliberation
-> here is **not** a second mining pipeline: it *reads* agent-brain's output as
-> one belief source, alongside live system state, and its job is to form
-> **intentions**, not memories. It writes back only higher-level reflection
-> insights (a `reflection` kind).
+> Builds on `coordinator.go` / `turn.go`, [`episode-lifecycle.md`](episode-lifecycle.md),
+> [`request-pipeline/08-planning.md`](request-pipeline/08-planning.md) (the
+> `PlanWorkflow`), [`lane-model.md`](lane-model.md),
+> [`memory-slot.md`](memory-slot.md) (agent-brain = the belief/preference store).
 
-### Role
+### The reframe
 
-When there is something worth a conversation — the agent finished a background
-task, a watched deploy failed, a fix it applied three days ago should be
-checked, it has a question it needs answered to do future work well, it noticed
-a pattern worth confirming — the agent starts that conversation itself, at a
-moment it judges appropriate, through the channel the session already uses.
+**A proactive turn is the existing reason-act turn, started by a trigger the
+agent set for itself instead of by a user message.**
 
-### The frame: Belief–Desire–Intention
-
-A named cognitive architecture (Bratman; Rao & Georgeff; AgentSpeak/Jason), and
-the model this design converged on:
-
-| BDI | here |
-|---|---|
-| **Beliefs** | agent-brain memory + live system state (episodes, skill confidences, plan ledgers, unanswered questions, deferred work) |
-| **Desires** | things the agent would like — surfaced by reflection |
-| **Intentions** | desires it has committed to, armed as running `IntentionWorkflow`s / Temporal Schedules |
-
-Deliberation cycle: update beliefs → reflect → form / revise / retire
-intentions → (intentions fire themselves) → *reconsider* when one fires.
-
-Two BDI results carry weight:
-- **Commitment strategy** — an intention persists until its trigger fires or the
-  agent explicitly revises it; the deliberation loop does *not* re-score every
-  intention every pass.
-- **Intention reconsideration** (Kinny & Georgeff) — a cheap "*should* I
-  reconsider?" check gates expensive re-deliberation. Here: a fired intention's
-  reflection turn runs a fast-tier "still relevant?" pass first, escalating only
-  if it decides to act.
-
-Other influences: **Generative Agents** (Park et al., 2023) — importance-gated
-reflection, self-generated salient questions, insights that become durable
-beliefs; **Horvitz, "Principles of Mixed-Initiative Interaction" (1999)** — the
-decide-whether-to-initiate problem as expected utility with explicit
-uncertainty about the user's goals, and **bounded deferral**; **Value of
-Information** — an info-gap intention (the agent's own ask) is justified only if
-the expected improvement to future work exceeds the cost of asking.
-
-### The decision: first-class harness components, not an agent-authored worker
-
-An earlier draft had the agent author and deploy its own Temporal worker for
-intentions (a `software-engineering.md` capability). Rejected as redundant: it
-builds a project workspace + deploy pipeline to produce a handful of workflow
-types the harness can hand-write, and asks the agent to re-derive Temporal
-patterns the harness already embodies.
-
-**Instead: proactivity is a small set of first-class components — workflows and
-activities deployed with the harness, exactly like `ClassifyRequest` /
-`ComposeSkill` / `RoutingWorkflow` / `SkillSynthesisWorkflow`.** The agent does
-not author their code. It *commands* them through meta-tools, the same way it
-invokes `spawn_subagent` or `search_tools`. The dynamic, agent-owned part is the
-**judgment** — which intention to arm, with what parameters, when to revise or
-drop it — not the control flow.
-
-The variety of intentions is smaller than it looks: every one decomposes into
-*"at time T / after delay D / when condition C, run a reflection turn about
-purpose P."* The control-flow shapes are three; the variety lives in **P** (a
-natural-language purpose) and **C** (a watch condition given as parameters).
-
-If a genuinely novel intention *shape* is ever needed, that is a normal harness
-change (add a workflow type) — or, once `software-engineering.md` exists for its
-own reasons, the agent extends the component then. Not a reason to build that
-capability first.
-
-### The components
-
-#### `IntentionWorkflow` — the generic durable intention
-
-Input: an **intention spec** (data, not code):
+Nothing downstream of "a message arrives at the `CoordinatorWorkflow`" changes —
+same `ClassifyRequest`, same Lite/Deliberate fork, same episode / `PlanWorkflow`,
+same `lcm` + memory, same delivery. The proactive turn's opening message is one
+the agent wrote to itself:
 
 ```
-IntentionSpec = {
-  kind:     "delay" | "watch",
-  purpose:  str,            # natural language — handed to the reflection turn
-  # kind == "delay":
-  after:    duration,
-  # kind == "watch":
-  watch: {
-    probe:    { tool, args },   # what to check
-    predicate: str,             # NL predicate, evaluated cheaply
-    every:    duration,         # poll interval
-    fires:    "once" | "each",  # one-shot, or on every occurrence
-    expires:  duration | null,  # give up after
-  },
-}
+[system, seq=0]  A travel email arrived: "Flight AA123 tomorrow delayed to 4:30pm."
+                 Standing intention: "Notify me about travel-related email."
+                 Decide whether and how to surface this now.
 ```
 
-- `kind == "delay"` → `workflow.Sleep(after)` → dispatch a reflection turn.
-- `kind == "watch"` → loop: `EvaluateWatchCondition` activity (probe + predicate)
-  every `every`, with `workflow.Sleep` between; on match → dispatch a reflection
-  turn (and stop, unless `fires == "each"`); stop at `expires`.
-- Long-lived until it fires/expires/is dropped. Accepts a `revise` signal (swap
-  the spec) and a `snooze` signal (re-arm the timer).
+The earlier vocabulary (situation, policy, proactive decision, suppression,
+feedback) collapses into machinery that already exists:
 
-**Cron intentions are a Temporal Schedule**, not an `IntentionWorkflow` — the
-meta-tool creates a `Schedule` whose action starts a reflection turn with the
-purpose. Schedules already give overlap/catchup/jitter/pause for free.
-
-#### `DeliberationWorkflow` — the long-lived reflection loop
-
-Per session (workflow id derived from the session key), first-class and
-hand-built like `CoordinatorWorkflow`. Not something the agent arms — it is
-started at a session's first contact and lives alongside the coordinator.
-
-- Receives **`importance_event`** signals (below), accumulates a score in
-  workflow state.
-- Fires a reflection turn (`purpose = "deliberate"`) when the score crosses `T`
-  (then resets), and on a slow internal timer (daily catch-all).
-- Survives coordinator idle-exits; a fresh coordinator re-attaches. (Open
-  question: exact lifetime — session- or user-scoped.)
-
-#### reflection turn = `TurnWorkflow` with `ParentType == "intention"`
-
-Not a new workflow type — the third `ParentType` alongside `"session"` and
-`"turn"` (subagent). Seed is a `system`-role message: the intention's purpose +
-any context the firing workflow gathered. Runs the normal reason-act loop
-(Lite or Deliberate per the seed's shape). What the loop does:
-
-1. **Reconsideration gate** (fast tier): "is this still relevant given what has
-   changed?" Stale → drop, turn ends. Otherwise →
-2. **Judgment** (Horvitz): act? how? Considers value (agent / user / both),
-   P(good timing) — user reachable, turn active, quiet hours — and interruption
-   cost. Produces an **urgency tier**:
-
-   | tier | behaviour |
-   |---|---|
-   | **urgent** | interrupt — fold into the active turn as a priority follow-up (proactive turn if none active) |
-   | **raise** | proactive turn if no active conversation; fold into the active turn if there is one |
-   | **mention** | fold into an active turn *only*; if no conversation, **re-defer** (bounded deferral) and wait for the user |
-   | **drop** | not worth it |
-
-3. If it acts by initiating → the turn produces a message, delivered outbound
-   through the session's existing channel. It becomes a normal conversation — a
-   user reply is normal inbound to the **same session**, `build_conversation`
-   has the proactive message as context, and if it leads to work it opens an
-   episode.
-
-For a `Deliberation` reflection turn, step 2 is instead: generate the *N most
-salient questions* about what changed (Generative Agents) → answer from beliefs
-→ per answer, **arm / revise / drop** an intention (via the same meta-tools) or
-**write a belief** to agent-brain. It contacts the user only if an intention it
-forms is `urgent`.
-
-#### `ManageIntention` activity — the meta-tool backend
-
-One activity behind the agent's meta-tools, wrapping the Temporal client (an
-activity may hold one — `ModelCallActivity` already does for streaming):
-
-| tool | op |
+| concept | already is |
 |---|---|
-| `arm_intention(spec)` | start `IntentionWorkflow` / create `Schedule` |
-| `list_intentions()` | list running `IntentionWorkflow`s + Schedules for this session |
-| `revise_intention(id, spec)` | `signal_workflow` / update schedule |
-| `snooze_intention(id, until)` | `signal_workflow` / pause schedule |
-| `drop_intention(id)` | `terminate_workflow` / delete schedule |
-| `inspect_intention(id)` | `query_workflow` |
+| **Situation** — what's happening now | what every turn does: the model calls tools mid-loop to check live state. No `AssembleSituation` activity. |
+| **Policy** — when am I allowed to act | `MemoryRetrieve` + model judgment. agent-brain holds "no travel notifications", past "stop doing this" corrections, quiet hours. Not a rule engine. |
+| **Opportunity detection** | a **default intention** seeded at genesis: *"periodically review recent episodes for anything worth raising."* Not a subsystem. |
+| **Proactive decision** — act? | the deciding turn's own output: a message = act; ending silently (`no_tool_calls`, empty response) = suppress. No arbiter workflow. |
+| **Plan / Execute** | `ClassifyRequest` on the seed → Lite (notify) or Deliberate (`PlanWorkflow`). The wake is a `seq=0` message; everything downstream is untouched. |
+| **Suppression / cooldown** | the deciding turn's judgment (`lcm` shows what it already said) + the intention workflow's own state (it knows when it last fired). Not a cooldown subsystem. |
+| **Feedback / adaptation** | already built: "stop these" → agent-brain correction → future deciding turns retrieve it and stay quiet. Skip. |
 
-Every armed intention is **rendered into the agent's context** — a "current
-intentions" block, like the plan ledger — so the agent reasons about its
-commitments and prunes.
+Research anchors still apply as *judgment* guidance, not as components: BDI
+(Bratman; Rao & Georgeff) — an intention persists until its trigger fires or the
+agent revises it, no re-scoring every pass; Horvitz "Principles of
+Mixed-Initiative Interaction" (1999) — initiate on expected utility minus
+interruption cost, with bounded deferral; Generative Agents (Park et al., 2023) —
+the daily review turn generates its own salient questions over recent episodes.
 
-#### `EvaluateWatchCondition` activity
+### An intention is a workflow, not a row
 
-Called by an `IntentionWorkflow` of `kind == "watch"`: run the `probe`
-(`tool` + `args`, via the existing tool-dispatch path), evaluate `predicate`
-against the result (a cheap fast-tier call — "does `<predicate>` hold given
-`<result>`?" → bool). Returns `{fired: bool, note: str}`.
+Each intention is one `IntentionWorkflow` execution. Temporal's own machinery
+*is* the state — there is **no `intentions` table** (same stance as "a database
+table is just redundant data").
 
-#### The importance signal
-
-No new subsystem — folded into the paths that already run at the relevant
-moments. `CompleteEpisode` / `CloseSessionEpisodes` / the turn-end block emit an
-`importance_event` signal to the session's `DeliberationWorkflow`, with a
-deterministic score:
-
-| signal | weight |
+| intention concept | Temporal-native realization |
 |---|---|
-| `episode.close_reason == 'superseded'` / `outcome == failure` | +3 |
-| `episode.required_correction == true` | +2 |
-| `stop_reason ∈ {max_iterations, max_retries}` (the agent struggled) | +2 |
-| a composed skill's `confidence` dropped > δ this turn | +2 |
-| an assistant question with no user reply after N turns | +1 |
-| a reconciliation trigger fired | +1 |
+| identity | Workflow ID `intn:<user>:<slug>` — addressable, dedup, human-readable |
+| objective + trigger spec | workflow **input args**; changed via a `revise` signal |
+| "armed" | the workflow is **Running**, parked in a timer / poll loop / `Await` |
+| "last fired" + fire count | workflow state, exposed by a `status` **Query** — and in event history |
+| "satisfied" / one-shot done | the workflow **Completes** (`ExecutionStatus = Completed`) |
+| "cancelled" | Temporal **cancellation** (`Canceled`) |
+| "snoozed" | `snooze` signal extends the timer; still Running |
+| "paused" | `Await(unpaused)` — Running but parked |
+| list a user's intentions | `ListWorkflowExecutions` on Search Attribute `IntentionUser` (+ `IntentionKind`, `IntentionState`) — visibility **is** the registry |
+| recurring ("every weekday 9am") | a **Temporal Schedule** whose action starts a one-shot `IntentionWorkflow` per firing — Temporal owns the calendar math, catch-up, pause |
+| bounded history on a long-lived condition-watcher | `ContinueAsNew` per poll cycle |
 
-#### The fold-in mechanic
+### Trigger types → Temporal mechanisms
 
-When judgment is `mention` or `urgent` and a turn is active:
-`SignalExternalWorkflow` into the active `TurnWorkflow` with
-`{pending_mention: content, urgency}` — the *exact* mechanism the coordinator
-already uses to forward follow-up messages. The active turn's next `ModelCall`
-sees *"you have something to surface when it fits: X"*. **The active turn's
-model decides placement** — it has the live conversation; the reflection turn
-does not.
+| trigger | mechanism |
+|---|---|
+| TIME `at 9am` | one-shot workflow: `workflow.Sleep(until)` → fire → complete |
+| DEADLINE `30 min before flight` | `Sleep(event_time − offset)`; `event_time` from a calendar `call_tool` at arm time, recomputed if a `revise` says it moved |
+| SCHEDULE `every weekday` | Temporal **Schedule** → one-shot `IntentionWorkflow` per occurrence |
+| CONDITION `stock < X` | loop: `Sleep(poll)` → `CheckCondition` activity → met ? fire : `ContinueAsNew` |
+| STATE CHANGE `calendar becomes free` | same loop; `CheckCondition` diffs against last-seen state held in **workflow state** |
+| INACTIVITY `no reply for 2 days` | timer = 2d; the coordinator sends a `reset` signal on any user activity, restarting it; fires only if the timer ever completes |
+| EVENT `email arrives` | poll variant for v1 (`Sleep(5m)` → `CheckForNewEmail`); push later = gateway webhook → `signal` the workflow |
 
-### Delivery — direct, no fallback
+`CheckCondition` is one generic activity: it runs the intention's declared probe
+(`{tool, args}` through the existing tool-dispatch path) and compares the result
+to the intention's declared predicate / threshold / last-seen value.
 
-One target: the channel the session already uses. Discord → the bot posts.
-Web → the message lands in Postgres, surfaced on next open. If delivery fails,
-the intention fails, it is surfaced, the cause is fixed. No channel fallback —
-same stance as the rest of the system.
+### The fire path
 
-### The initiative governor
+```
+IntentionWorkflow trigger fires
+   │
+   ▼  FireIntention activity
+SignalWithStart CoordinatorWorkflow(<user's session>)  { objective, why, intention_id }
+   │
+   ▼  Coordinator's Wake handler (sibling of NewMessage in the existing selector)
+starts a TurnWorkflow, seed = the synthesized system message, initiated_by = "intn:<id>"
+   │
+   ├─ a turn is already active  ──▶  fold in: SignalExternalWorkflow into it
+   │                                 { pending_mention, why } — the active turn's
+   │                                 model places it (same path used for follow-ups)
+   │
+   └─ no active turn  ──▶  the deciding turn runs; if the user is offline the
+                           coordinator starts headless and the turn routes its
+                           output to the session's gateway channel
+```
 
-The real governor is **judgment quality, improved by feedback**: the agent
-observes engagement in the transcript (reply / act / "stop") → writes it to
-memory (*"user valued the Friday heads-up"* / *"user muted deploy notes"*) →
-future judgments read it. Same loop as skill confidence.
+The deciding turn is a **normal turn**: `ClassifyRequest` (Lite notify vs
+Deliberate `PlanWorkflow`), `MemoryRetrieve` (preferences, "stop doing this"
+corrections, quiet hours — the "policy"), tool calls (the "situation" check),
+then it either **produces a message** (act, delivered) or **ends silently**
+(suppress). `FireIntention` gets the turn's outcome back; an `IntentionWorkflow`
+that is suppressed N times in a row self-cancels and writes a belief
+(*"user doesn't want X"*).
 
-**Floors** (deterministic, minimal):
-- a hard **daily cap** on agent-initiated turns;
-- the judgment prompt anchored: *"the bar for initiating is high — a peer who
-  interrupts constantly is worse than one who waits";*
-- **quiet hours** — a learned user-world fact; until learned, judgment is
-  conservative (only `raise` / `urgent`), and an early proactive message asks
-  *"when's off-limits, how should I reach you?"*
+Global "don't fire three at once" falls out for free: simultaneous fires all
+`SignalWithStart` the same per-session coordinator, which already serializes
+turns, so each deciding turn sees in `lcm` what the last one just said.
+
+### What's actually new
+
+1. **`IntentionWorkflow`** — one workflow type (loop-worker): a timer / poll loop
+   + `revise` / `snooze` / `cancel` / `reset` signals + a `status` query. The
+   single new primitive.
+2. **Search Attributes** `IntentionUser` / `IntentionKind` / `IntentionState` —
+   registered once, so visibility can be the registry.
+3. **Coordinator `Wake` signal** — a handful of lines in the existing selector
+   (`coordinator.go:102`), plus honouring `initiated_by` on the started turn.
+4. **`turns.initiated_by` / `episodes.initiated_by`** — one column, a provenance
+   string (`user` | `intn:<id>` | `plan`).
+5. **Activities** (tenant-worker, hold a Temporal client — `ModelCall` already
+   does): `ArmIntention` / `ReviseIntention` / `CancelIntention` behind agent
+   tools; `FireIntention` (`SignalWithStart` the coordinator); `CheckCondition`
+   (the generic probe runner for condition / state / event / inactivity).
+6. **One genesis Schedule per user** — the daily "review recent episodes for
+   anything worth raising" intention.
+
+### The agent's tools
+
+`create_intention` / `list_intentions` / `revise_intention` / `snooze_intention` /
+`cancel_intention` / `inspect_intention` — called from inside any turn, backed by
+the activities above (`list` / `inspect` are `ListWorkflowExecutions` /
+`query_workflow`). The agent's currently-armed intentions render into its prompt
+as a small block (like the plan), so it reasons about its commitments and prunes
+stale ones.
+
+### No per-user holder
+
+Each `IntentionWorkflow` arms its own trigger, so there is nothing for a parent
+to hold; Temporal visibility replaces "the list". Cross-intention coordination is
+the per-session coordinator's existing turn-serialization plus the deciding
+turn's judgment. A per-user holder would only add one place for global
+proactivity policy — promote it later if memory + the coordinator choke point
+prove insufficient.
+
+### Delivery — no fallback
+
+One target: the channel the session already uses (Discord → the bot posts; web →
+Postgres, surfaced on next open), via the existing `deliver:{platform}:{connection}`
+activities. Delivery failure fails the turn and is surfaced. No channel fallback
+— same stance as the rest of the system.
 
 ### Data model
 
 | thing | where |
 |---|---|
-| intentions (instances) | Temporal — running `IntentionWorkflow`s + Schedules. **No table**; `list_intentions()` queries Temporal. |
-| beliefs / reflection insights | agent-brain memory (`reflection` kind) |
-| `DeliberationWorkflow` accumulator | its own Temporal state |
-| deliberation watermark | `sessions.last_deliberated_at` (new column) |
-| turn provenance | `turns.initiated_by` — `'user'` \| `'agent'` \| `'intention'` (new column) |
-| a proactive turn's seed | a `system`-role `messages` row (the purpose) |
-| engagement feedback | agent-brain memory (written by a reflection turn observing the follow-up) |
+| intentions | Temporal — `IntentionWorkflow` executions + Schedules. **No table.** |
+| intention provenance on work | `turns.initiated_by` / `episodes.initiated_by` (one column) |
+| a proactive turn's seed | a `system`-role `messages` row |
+| preferences / quiet hours / "stop doing X" | agent-brain memory (already the store) |
+| engagement feedback | agent-brain memory (a deciding turn observing the follow-up writes it — same loop as skill confidence) |
 
-### Temporal shape
+### Degradation (no fallback)
 
-| unit | where | cadence | does |
-|---|---|---|---|
-| `DeliberationWorkflow` | loop-worker, long-lived, per session | importance-threshold or daily | reflect → arm/revise/drop intentions, write beliefs |
-| `IntentionWorkflow` | loop-worker | per spec (`delay` / `watch`) | fire → dispatch a reflection turn |
-| cron intention | Temporal Schedule | per the agent's cron | start a reflection turn |
-| `importance_event` | emitted from the existing episode-close / turn-end paths → `signal_workflow` | per event | accumulate into `DeliberationWorkflow` |
-| reflection turn | `TurnWorkflow` (`ParentType == "intention"`), started via the coordinator | per fired intention | reconsideration → judgment → act / defer / drop |
-| `ManageIntention` | tenant-worker activity (holds a Temporal client) | per meta-tool call | arm / list / revise / snooze / drop / inspect |
-| `EvaluateWatchCondition` | tenant-worker activity | per watch poll | probe + predicate → `{fired, note}` |
-| fold-in | `SignalExternalWorkflow` into the active turn | `mention` / `urgent` + turn active | hand the pending mention to the live model |
-| delivery | existing `deliver:{platform}:{connection}` activities | per proactive turn | post to the session's channel; no fallback |
-
-### Degradation
-
-No fallback. `DeliberationWorkflow` down → no reflection, a visible failure. A
-reflection turn errors → surfaced; the intention re-fires or the agent catches
-it at the next deliberation.
+- An `IntentionWorkflow`'s `CheckCondition` errors → Temporal retry; a persistent
+  failure surfaces the intention as failed, it is not silently dropped.
+- The deciding turn errors → Temporal retry → `failTurn`; the intention re-fires
+  on its next trigger.
+- Delivery fails → the turn fails, surfaced.
 
 ### Deferred
 
-- **Novel intention shapes** beyond `delay` / `watch` / `cron` — add a workflow
-  type when a real one appears (or via `software-engineering.md`, decoupled).
-- **Learning the importance weights** — start hand-tuned.
-- **Digests / batching** `raise`-tier items — start with individual turns.
-- **Web push** — start with surface-on-open.
-- **Cross-session deliberation** — one `DeliberationWorkflow` per session.
-- **VoI as an explicit calculation** — start with the model judging.
+- **Push EVENT triggers** — gateway webhook ingestion → signal the workflow.
+  Start with polling.
+- **A per-user proactivity-policy holder** — start with memory + the coordinator
+  choke point.
+- **Learned importance weights** for the daily review — start with the model
+  judging.
+- **Digests / batching** low-urgency items — start with individual turns.
+- **Cross-session reach** (fire against a user with no live session) — the
+  headless-coordinator path is sketched, not designed.
 
 ### Open Questions
 
-- **Coordinator's proactive-start path** — a fired intention starts a turn
-  against a session. `SignalWithStartWorkflow` with an
-  `{initiated_by: "intention", purpose, context_ref}` payload (reusing the
-  existing coordinator entry point) is the natural fit — the active-turn guard
-  and reply continuity both argue for going through the coordinator.
-- **`DeliberationWorkflow` lifetime** — session- or user-scoped? What starts it
-  (coordinator genesis?), and does it outlive coordinator idle-exits or
-  re-attach?
-- **Genesis** — does the agent start with zero intentions and the
-  `DeliberationWorkflow` is the only always-on piece, or is a "check in with the
-  user occasionally" intention seeded?
-- **`urgent` + active turn** — fold as priority (model surfaces it next step) or
-  cancel the in-flight `ModelCall` (the interrupt path)? Lean toward the former
-  unless time-critical.
-- **`EvaluateWatchCondition` predicate** — a fast-tier NL predicate check each
-  poll is a real cost for a frequently-polled watch. Cache the last result;
-  only re-evaluate on change? Or constrain `predicate` to a tiny expression
-  grammar over the probe result?
+- **Genesis** — what creates a user's daily-review Schedule, and when? (Same
+  question `CoordinatorWorkflow` has for its own first start.)
+- **`initiated_by` and the active-turn fold-in** — when a wake arrives mid-turn,
+  fold as a priority the model surfaces next step, or cancel the in-flight
+  `ModelCall` (the interrupt path)? Lean fold unless the intention is
+  time-critical.
+- **Quiet hours before they're learned** — until agent-brain has the fact, the
+  deciding turn is conservative and an early proactive message asks
+  *"when's off-limits, how should I reach you?"*
+- **`CheckCondition` cost** — a frequently-polled NL predicate check is a real
+  cost. Cache the last result and only re-judge on a raw-value change, or
+  constrain predicates to a small expression grammar over the probe result.
+- **Slug collisions / intention identity** — `intn:<user>:<slug>` where the slug
+  comes from the objective; how is it derived, and what happens when the agent
+  arms a near-duplicate (revise the existing one, or run both)?

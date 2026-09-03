@@ -41,6 +41,54 @@
 >
 > A browser-rendered version of this spec (diagrams, the retrieval algorithm
 > laid out) was produced alongside it for review.
+>
+> ## REVISION (2026-09-02) — recording collapsed, composition removed
+>
+> **RecordSkill collapse BUILT (Phase 3 slice A, branch `proactivity-substrate`;
+> Go build + tests green, py compiles, NOT deployed):** `RecordSkillOutcome` +
+> `skill_candidates` (table dropped, migration `022`) + `SkillSynthesizeWorkflow`
+> + `synthesize.py` → **one `RecordSkill` activity** (`skills/record.py`,
+> `RecordSkillWorkflow`, 5-min timeout for the inline `generalize` call). It
+> gathers the episode trajectory, EMA-updates `composed_from` procedures + the
+> co-occurrence graph, then match-or-inserts against `skill_procedures`:
+> match+success+divergence → `new_version`; match+success → positive EMA;
+> no-match+success → `generalize` + `insert_learned`; match+failure → caution
+> note; no-match+failure → dropped. `store.py` lost `insert_candidate` /
+> `CandidateRow` / `unsynthesized_candidates` / `mark_synthesized`. `cluster_radius`
+> stays `None` for now (single-candidate radius can't be measured — `_MATCH_RADIUS`
+> = 0.82 fallback). Composition (`ComposeSkill`) still exists until Phase 3 slice C.
+
+>
+> Driven by [`request-pipeline/08-planning.md`](request-pipeline/08-planning.md)'s
+> plan-and-execute revision and [`episode-lifecycle.md`](episode-lifecycle.md)'s
+> REVISION. **The reward model (below) is unchanged** — a procedure is still the
+> effective procedure reconstructed from a successful trajectory, an EMA-updated
+> prototype, cached on first success, a cluster not a threshold. What changes is
+> the plumbing:
+>
+> - **Recording + Synthesis collapse into one online activity, `RecordSkill`.**
+>   No `skill_candidates` table (migration `015` reverted), no
+>   `SkillSynthesisWorkflow`, no `"skill-synthesis"` debounce, no "OFFLINE every
+>   ~2h". At **episode close**, `RecordSkill` embeds the task, matches against
+>   current `skill_procedures`: **match → reinforce** (EMA the prototype +
+>   confidence, fold in new/revised checkpoints); **no match → insert** a new
+>   procedure whose body is the final PLAN.md checkpoint list. Dispatched
+>   detached (`ABANDON`).
+> - **Composition (step 6 / `ComposeSkill`) is removed.** `SkillDiscover`'s
+>   results feed the **planning turn** inside the `PlanWorkflow`, which drafts the
+>   checkpoint plan. There is no `kind='composed'` staging row and no separate
+>   merge model call.
+> - **`SkillDiscover` (step 5) is otherwise unchanged** — runs once per episode,
+>   flat cosine + scored selection (`sim + w_co + w_conf + w_rec`).
+> - **The co-occurrence graph survives**, updated by `RecordSkill` (procedures
+>   retrieved into this episode × each other, × earlier episodes in the session).
+> - **The generalization pass (topic → task-shape `trigger_text`)** folds into
+>   `RecordSkill` as an optional medium-tier step, or stays deferred (the
+>   `generalize.py` altitude gap, already open).
+> - `turn_retrieval` is dropped entirely (see the pipeline REVISION).
+>
+> Sections below still describe the candidate → offline-synthesis → cluster flow;
+> read them for the reward-model reasoning, not the mechanism.
 
 ### Role (one line)
 

@@ -1,12 +1,26 @@
 # Component: Episode Lifecycle
 
-> STATUS: BUILT (2026-09-01). Migration `018`; `activities/episode.py` +
-> `OpenEpisode` / `CompleteEpisode` / `CloseSubagentEpisode` /
-> `CloseSessionEpisodes` activities; `CloseSessionEpisodesWorkflow`;
-> `turn.go` / `coordinator.go` / `routing.go` wired; `ClassifyRequest` gains
-> `continues_prior`; `RecordSkillOutcome` and the plan ledger / staged
-> retrieval re-keyed on `episode_id`. Compile + `go test` clean; live
-> verification via `workflows/scenarios/superpowers-b/`.
+> STATUS: SUPERSEDED 2026-09-03 — **there is no `episodes` table and no "episode"
+> concept.** A Deliberate task-run *is* a `PlanWorkflow` (Phase 3 slice C+D,
+> built; see [`request-pipeline/08-planning.md`](request-pipeline/08-planning.md)
+> for the authoritative design). Migration `025` drops `episodes` and renames
+> `turns.episode_id` → `turns.plan_id`. `OpenEpisode` / `CompleteEpisode` /
+> `episode.py` / `CloseSessionEpisodesWorkflow` are deleted; `ResolveOpenPlan`
+> (checks for a running `<plan_id>:plan` workflow + `continues_prior`) replaces
+> the continuation logic. `RecordSkill` keys on `turns.plan_id`. `ClassifyRequest`
+> keeps `continues_prior`. `go build` + `go test ./internal/...` green,
+> `activities/` compiles; NOT deployed.
+>
+> Everything below is the **original 2026-09-01 design + its 2026-09-02
+> revision**, kept for the rationale (why a task-run spans turns, why recording
+> fires once). Read it for the "why"; read `08-planning.md` for the "what is
+> built". Where they conflict, `08-planning.md` wins. The multi-turn
+> fragmentation fix this component was built for still holds — a `PlanWorkflow`
+> is the single unit `RecordSkill` runs over.
+>
+> **See REVISION (2026-09-02) below** — the staged-retrieval bundle is being
+> removed (it duplicates the `lcm` → memory context loop); the task-run keeps only
+> plan ledger + trajectory + status.
 >
 > **Pre-existing bug found during live verification (2026-09-01):** the Session
 > Coordinator's idle-exit check (`coordinator.go`) fired on *every* turn
@@ -55,6 +69,105 @@
 > (the plan becomes episode-scoped), `skill-subsystem.md` "Recording" (one
 > candidate per episode), `turn.go` / `coordinator.go` (episode lifecycle).
 
+> ## REVISION (2026-09-02) — staged retrieval removed. Design agreed, not yet built.
+>
+> The episode as built owns **four** things: *plan ledger + staged retrieval
+> bundle + trajectory + status*. It should own **three** — the staged retrieval
+> bundle (`turn_retrieval` keyed on `episode_id`) is dropped.
+>
+> **Why.** The harness already closes a full context loop around every turn:
+>
+> ```
+> forward:   conversation ──lcm fold──▶ summary DAG ──WriteMemory──▶ agent-brain
+> backward:  agent-brain ──MemoryRetrieve (step 4)──▶ prompt
+> ```
+>
+> `turn_retrieval` pins a **third copy** of that same context — memory rows, tool
+> hints, composed prose — captured at episode-open and frozen for the life of the
+> task. Within a multi-turn task it is stale by the second turn: the work has
+> moved, different memory and tools are now relevant, but the pinned bundle does
+> not move. Running `MemoryRetrieve` / `ToolDiscover` **per turn** is both simpler
+> and more correct — `lcm` (fresh forward) + `MemoryRetrieve` (fresh backward)
+> already do this job.
+>
+> **What stays episode-scoped, and why `lcm` / memory can't do it:**
+>
+> | kept | why the context loop can't cover it |
+> |---|---|
+> | **plan ledger** (`turn_plan` on `episode_id`) | cross-turn checkpoint *state* — not conversation, not a belief |
+> | **trajectory + status** | the RL boundary: "these N turns are one task, recorded once" — the fragmentation fix, the whole point of this component |
+>
+> These three are really just *the plan ledger given a lifecycle and an outcome* —
+> a task-run record, not a parallel context system.
+>
+> **The composed skill** is the one expensive thing not re-run per turn
+> (`ComposeSkill`, medium tier, ~7s). Under the revision it runs **once at episode
+> open**: its checkpoints seed `turn_plan` (unchanged), and its **prose enters the
+> conversation as a system message on the anchor turn** — `lcm` then carries it
+> forward and folds it like any other context. No pinned `kind='composed'` row, no
+> `prompt.assemble` special-casing it as never-shed; the plan ledger (itself never
+> shed) is the durable form of that guidance.
+>
+> **Memory and tools go per-turn, fresh** — `MemoryRetrieve` and `ToolDiscover`
+> run each turn against the current conversation and are injected directly, never
+> staged.
+>
+> **Consequences:**
+> - `turn_retrieval` table: **deleted** (a later migration drops it; the `018`
+>   rename becomes moot).
+> - `episodes` row: essentially unchanged — it was already thin. `retrieval_query`
+>   stays as the continuation-detection hint; `task_embedding` stays as episode
+>   identity for the low-confidence tiebreaker. Neither is a context copy.
+> - `prompt.py`: `_staged_texts` removed; `assemble` = `lcm.assemble` + plan block
+>   + per-turn memory/tools injected fresh.
+> - `RoutingWorkflow` `Mode="reconcile"`: loses its **between-turn continuation**
+>   trigger (there's no bundle to refresh — the next turn's normal per-turn
+>   retrieval picks up the new input). The **mid-turn** follow-up trigger from
+>   `08-planning.md` is unaffected.
+> - "What runs once per episode vs every turn" table below: `ToolDiscover` and the
+>   reconcile refresh move to **every turn**; only the `episodes` row + plan seed +
+>   `ComposeSkill` stay **once**.
+>
+> The as-built sections below still describe the four-thing episode. Treat this
+> block as the authority where they conflict, until the doc is rewritten
+> post-build.
+>
+> **Decision (2026-09-02): fold the `episodes` table away (option B).** The
+> `PlanWorkflow` ([`request-pipeline/08-planning.md`](request-pipeline/08-planning.md))
+> *is* the task-run. "episode" stops being a noun in the schema:
+> - `episodes` table — **dropped**. `turns.episode_id` → `turns.plan_id`
+>   (nullable text, points at the `PlanWorkflow` id; null = Lite / standalone turn).
+> - `status` → the `PlanWorkflow`'s execution status + PLAN.md's `status:` line.
+> - `intent` / `complexity` (the `RecordSkill` gate + the question→task upgrade) →
+>   carried as `PlanWorkflow` state.
+> - `task_embedding` (low-confidence continuation tiebreaker) → `PlanWorkflow`
+>   state, or recomputed on demand.
+> - `opened_at` / `closed_at` / `close_reason` → `PlanWorkflow` start/close + history.
+> - "is there an open episode for this session?" → "is there a running
+>   `PlanWorkflow` for this session?" (a `turns.plan_id` lookup on the latest turn,
+>   or a workflow-id-prefix query).
+> - `RecordSkill` trajectory gather keys on `turns.plan_id`.
+> - Subagents: a Deliberate subagent starts its own `PlanWorkflow` / `plan_id`,
+>   same as a top-level task; a Lite subagent has none.
+>
+> The `importance` score is **not** a stored column — the periodic reflection turn
+> computes it itself from raw signals (recent turns' `stop_reason`, correction
+> counts, plan outcomes). Nothing new is needed for proactivity's daily review:
+> its watermark is derived (`MAX(turns.started_at) WHERE initiated_by =
+> 'intn:<scope>:daily-review'`) — see [`proactivity.md`](proactivity.md).
+>
+> **Follow-on (same day):** [`request-pipeline/08-planning.md`](request-pipeline/08-planning.md)
+> was then reversed to a **plan-and-execute orchestrator** — a `PlanWorkflow`
+> runs a planning turn → PLAN.md → approval gate → one child turn per checkpoint.
+> So within this doc: "the plan" now means an approved PLAN.md at
+> `/sessions/<key>/plans/<episode_id>/` (not `turn_plan`, dropped); `ComposeSkill`
+> seeding the plan (in "Execute" below) is replaced by the planning turn;
+> `RecordSkillOutcome` + candidates + synthesis collapse to one async
+> `RecordSkill`; and the "Reconciliation, unified" section is obsolete
+> (per-turn `MemoryRetrieve`/`ToolDiscover` + per-checkpoint tail re-planning
+> cover it — the mid-turn `Mode="reconcile"` trigger's fate is an 08 open
+> question).
+
 ### The simple model this restores
 
 > *"A plan was created for a particular task. That plan is executed across
@@ -83,8 +196,8 @@ interactively** — same lifecycle, human turns interleaved. The code assumed
 An **episode** is one task from first message to completion. It owns:
 
 - the **plan** (`turn_plan`, the checkpoint ledger) — seeded once,
-- the **staged retrieval** (`episode_retrieval`: composed skill, memory, tools,
-  skill rows) — snapshotted once, refreshed on continuation,
+- ~~the **staged retrieval**~~ — **removed, see REVISION (2026-09-02) above**;
+  memory/tools go per-turn, the composed prose enters the conversation once,
 - an accumulating **trajectory** — every turn's messages and tool calls,
 - a **status**: `open` → `complete` | `abandoned` | `superseded`.
 
@@ -248,6 +361,11 @@ for both.
 
 ### Reconciliation, unified
 
+> **OBSOLETE (2026-09-02)** — see the REVISION block. `turn_retrieval` is gone,
+> so there's no bundle to "refresh". Per-turn `MemoryRetrieve` / `ToolDiscover`
+> plus per-checkpoint tail re-planning (`08-planning.md`) do this job. Kept for
+> history.
+
 `08-planning.md`'s reconciliation trigger fired a `Mode="reconcile"`
 `RoutingWorkflow` on a **mid-turn** follow-up (a second message while a turn is
 still running). Episodes add a second caller: a **between-turn continuation**
@@ -258,11 +376,13 @@ alone* — and it has two triggers now instead of one. `replace_rows` keys on
 
 ### What runs once per episode vs every turn
 
+> Revised by REVISION (2026-09-02): `ToolDiscover` + `MemoryRetrieve` move to
+> *every turn*; the composed prose is a one-time conversation insert at open.
+
 | once per episode (open) | every turn |
 |---|---|
 | `Route()` gate | `ClassifyRequest` (+ `continues_prior`) |
-| `ToolDiscover` | reconcile refresh of memory + skill rows |
-| `ComposeSkill` **plan seed** | `ComposeSkill` prose regen (reconcile) |
+| `ComposeSkill` **plan seed** + prose inserted into the conversation once | `MemoryRetrieve`, `ToolDiscover` (fresh, injected directly) |
 | `episodes` row + `task_embedding` | the reason-act loop, `plan_progress` |
 
 The pipeline stops re-running wholesale on every follow-up — a latency and cost

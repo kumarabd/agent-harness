@@ -11,6 +11,22 @@
 >
 > Parent: [`../request-pipeline.md`](../request-pipeline.md).
 > Owns: the `Route()` decision, and `RoutingWorkflow` (steps 3–6).
+>
+> ## REVISION (2026-09-02) — Phase 2 slice 2.1 BUILT (branch proactivity-substrate; compiles + Go tests green, not deployed)
+>
+> `RoutingWorkflow` now: `Route()` gate → **memory + tool discovery every turn**
+> (staged under `TurnID` via `turn_retrieval.owner_id`, migration `021`) →
+> **skill discovery + `ComposeSkill` only when `EpisodeID` is set** (a fresh
+> Deliberate episode's opening turn — they seed the plan once). `Mode="reconcile"`
+> and `dispatchReconcileRouting` are **gone** (`reconcile.py` deleted); a mid-turn
+> follow-up just lands in the conversation. `RoutingWorkflowInput` lost `Mode`;
+> the retrieval-activity inputs use `OwnerID`.
+>
+> **Still open for Phase 3:** `ComposeSkill` + `SkillDiscover` move into the
+> `PlanWorkflow`'s planning turn, `turn_retrieval` is dropped, and `RoutingWorkflow`
+> collapses to just the `Route()` / `laneIsDeliberate()` decision (which is pure
+> Go and already the `OpenEpisode` trigger). Everything below still describes the
+> pre-2.1 staging design.
 
 ### Role
 

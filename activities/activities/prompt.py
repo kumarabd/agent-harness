@@ -47,7 +47,7 @@ _MEMORY_HEADER = (
 _ENRICHMENT_BUDGET_FRACTION = 0.25
 
 # Shed order when over budget — least task-critical first. composed_skill and
-# plan_progress are never in this list: they ARE the task, and there's little
+# the plan ledger are never in this list: they ARE the task, and there's little
 # point running the model without them once they exist.
 _SHED_ORDER = ("capabilities", "memory")
 
@@ -60,28 +60,27 @@ class _Section:
 
 
 async def assemble(
-    conn, turn_id: str, episode_id: str, system_prompt: str, context_window: int = 0
+    conn, turn_id: str, plan_id: str, system_prompt: str, context_window: int = 0
 ) -> tuple[list[dict], int]:
     """Returns (conversation, context_tokens) — context_tokens is threaded back
     through ModelCallOutput to the workflow for the compression-gate check (see
     lcm.assemble's own docstring for why it can't be accumulated workflow-side).
 
-    The live conversation is keyed on the session (via turn_id); the enrichment
-    sections — composed skill, plan ledger, tools, memory — are keyed on
-    episode_id (docs/components/episode-lifecycle.md), so a continuation turn
-    renders the episode's one bundle. episode_id is empty for a conversational
-    fast-path turn — the enrichment reads all no-op then."""
+    The live conversation is keyed on the session (via turn_id). REVISED
+    2026-09-02: memory + discovered tools are staged PER TURN (owner_id =
+    turn_id) — fresh every turn. The composed skill and plan ledger stay
+    plan-scoped (owner_id = plan_id), seeded once when the plan opens. plan_id
+    is empty for a Lite / conversational turn — the composed/plan reads no-op
+    then."""
     session_key = ids.session_key_of(turn_id)
     conversation, context_tokens = await lcm.assemble(conn, session_key, system_prompt)
 
     sections: list[_Section] = []
-    ep = episode_id or turn_id
-    # composed skill / tools / memory are all turn_retrieval rows for this
-    # episode — one query, split by kind. plan progress is its own table.
-    staged = await _staged_texts(conn, ep)
+    ep = plan_id or turn_id
+    staged = await _staged_texts(conn, turn_id, ep)
     for name, text in (
         ("composed_skill", staged["composed_skill"]),
-        ("plan_progress", await _plan_text(conn, ep)),
+        ("plan", await _plan_text(ep)),
         ("capabilities", staged["capabilities"]),
         ("memory", staged["memory"]),
     ):
@@ -122,17 +121,19 @@ async def assemble(
     return conversation, context_tokens
 
 
-async def _staged_texts(conn, episode_id: str) -> dict[str, str | None]:
-    """The composed skill (step 6), discovered tools (step 7), and long-term
-    memory (step 4) for this episode — one query over turn_retrieval, split by
-    `kind`. Each renders to its section text, or None when nothing was staged
-    (or, for composed, when the staged row is blank)."""
+async def _staged_texts(conn, turn_id: str, plan_id: str) -> dict[str, str | None]:
+    """Discovered tools (step 7) + long-term memory (step 4) for THIS turn
+    (owner_id = turn_id), and the composed skill (step 6) for the plan
+    (owner_id = plan_id) — one query over turn_retrieval, split by kind. Each
+    renders to its section text, or None when nothing was staged."""
     by_kind: dict[str, list[str]] = {}
     for r in await conn.fetch(
         "SELECT kind, content FROM turn_retrieval "
-        "WHERE episode_id = $1 AND kind IN ('composed', 'tool', 'memory') "
+        "WHERE (owner_id = $1 AND kind IN ('tool', 'memory')) "
+        "   OR (owner_id = $2 AND kind = 'composed') "
         "ORDER BY kind, seq",
-        episode_id,
+        turn_id,
+        plan_id,
     ):
         by_kind.setdefault(r["kind"], []).append(r["content"])
 
@@ -146,6 +147,6 @@ async def _staged_texts(conn, episode_id: str) -> dict[str, str | None]:
     }
 
 
-async def _plan_text(conn, episode_id: str) -> str | None:
-    checkpoints = await plan.read(conn, episode_id)
+async def _plan_text(plan_id: str) -> str | None:
+    checkpoints = await plan.read(plan_id)
     return plan.render_block(checkpoints) or None

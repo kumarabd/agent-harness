@@ -125,7 +125,7 @@ records promptly. `cleanup_test_data.sh` also clears the new `episodes` table.
 
 The multi-turn episode → **single** candidate behaviour (the whole point of
 the change) has its own chained pair, **`episode-multiturn-initial.json` /
-`episode-multiturn-followup.json`** (run manually, same shape as `reconcile-*`
+`episode-multiturn-followup.json`** (run manually, same shape as `interrupt-*`
 — back to back, same session key, within `idleTTL` so the coordinator hasn't
 closed the episode):
 
@@ -175,9 +175,7 @@ no scripting).
   `_upgrade_classification` bumps the episode `question→task`, so it records.
 
 Run the chained ones like `episode-multiturn` above; each `*-followup.expect.sh`
-carries its own manual invocation line. `reconcile-followup.expect.sh` now
-discovers the reconcile child by `{turn}:reconcile:` prefix rather than a
-hard-coded suffix.
+carries its own manual invocation line.
 
 ## Coverage added 2026-09-01 — request pipeline steps 8 & 9
 
@@ -208,19 +206,10 @@ In `run_all.sh` (standalone, real steps 2–8, scripted loop):
 
 Run manually (not in `run_all.sh`):
 
-- **`reconcile-initial.json` / `reconcile-followup.json`** — a chained pair
-  (same shape as `interrupt-*`): run the second against the same session
-  while the first is parked on `slow_tool`. The mid-turn follow-up must
-  trigger a detached `RoutingWorkflow` in `Mode="reconcile"`
-  (`{turn}:reconcile:1`, Memory + Skill re-key only, no `Route()` gate, no
-  `turn_plan` re-seed). `reconcile-followup.expect.sh` checks that workflow
-  ran to completion.
-  ```
-  KEY="test:reconcile:$(date +%s)"
-  nohup workflows/scenarios/run_scenario.sh reconcile-initial "$KEY" >/tmp/ri.log 2>&1 & disown
-  sleep 6
-  workflows/scenarios/run_scenario.sh reconcile-followup "$KEY"
-  ```
+- ~~`reconcile-*`~~ — **removed 2026-09-02** (episode-lifecycle.md REVISION):
+  `MemoryRetrieve` / `ToolDiscover` run per-turn now, so there is no stale
+  bundle to reconcile. `RoutingWorkflow` lost its `Mode="reconcile"` path. A
+  mid-turn follow-up just lands in the conversation.
 - **`real-llm-pipeline.json`** — spends real money. The only end-to-end
   check of step 9 (`prompt.assemble`), which the scripted path skips
   entirely. A real ModelCall gets the composed skill + plan progress +

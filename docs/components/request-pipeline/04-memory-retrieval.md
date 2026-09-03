@@ -10,6 +10,19 @@
 > Parent: [`../request-pipeline.md`](../request-pipeline.md).
 > Orchestrated by [`03-routing.md`](03-routing.md)'s `RoutingWorkflow`.
 > Backend contract: [`../memory-slot.md`](../memory-slot.md).
+>
+> ## REVISION (2026-09-02) — BUILT (Phase 2 slice 2.1, branch proactivity-substrate; compiles + Go tests green, not deployed)
+>
+> Per [`08-planning.md`](08-planning.md) + [`../episode-lifecycle.md`](../episode-lifecycle.md)
+> REVISION: `MemoryRetrieve` runs **per turn**, staged under the current turn's
+> id (`turn_retrieval.owner_id = turn_id`, migration `021`) and read back per
+> `ModelCall` — no episode-scoped bundle, no reconcile pass (both duplicated the
+> `lcm` → `WriteMemory` → agent-brain → back loop). The mechanism (agent-brain
+> `memory_search`, dedup, budget) is unchanged; only *when* it runs and *what
+> it's keyed on* change. The subagent path still inherits `kind='memory'` rows,
+> now from the **parent turn** (was: parent episode). `ComposeSkill` still reads
+> memory at episode open — the anchor turn's own per-turn rows. `turn_retrieval`
+> + `ComposeSkill` themselves go away in Phase 3.
 
 ### Role
 

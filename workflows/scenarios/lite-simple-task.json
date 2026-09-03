@@ -1,5 +1,5 @@
 {
-  "_comment": "docs/components/lane-model.md \u2014 the Lite lane. A plainly simple task: the classifier should return intent=task, complexity=simple (obvious steps). It must NOT open an episode, NOT run SkillDiscover/ToolDiscover/ComposeSkill, NOT seed turn_plan \u2014 only MemoryRetrieve, staged under the turn's own id. lite-simple-task.expect.sh checks exactly that. If the real classifier says moderate/complex instead, the check reads the classify log line and skips rather than failing.",
+  "_comment": "docs/components/lane-model.md \u2014 the Lite lane. A plainly simple task: the classifier should return intent=task, complexity=simple (obvious steps). It must NOT open a task-run (no PlanWorkflow, turns.plan_id stays null), NOT run SkillDiscover/ToolDiscover, NOT seed a PLAN.md ledger \u2014 only MemoryRetrieve, staged under the turn's own id. lite-simple-task.expect.sh checks exactly that. If the real classifier says moderate/complex instead, the check reads the classify log line and skips rather than failing.",
   "message": {
     "role": "user",
     "content": "What is the current git branch in this repo?"

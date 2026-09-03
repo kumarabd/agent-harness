@@ -33,23 +33,22 @@ DELETE FROM messages WHERE parent_id IN (
 DELETE FROM user_input_requests WHERE turn_id IN (
   SELECT turn_id FROM turns WHERE parent_id LIKE 'test:%' OR turn_id LIKE 'test:%'
 );
--- request-pipeline tables — turn_retrieval/turn_plan FK episode_id -> turns(turn_id)
--- (migrations 013/017, key column renamed by 018), skill_candidates FK turn_id ->
--- turns(turn_id) (015). All must go before the turns rows they reference.
--- skill_cooccurrence has no FK (migration 016); its edges reference
--- skill_procedures ids, not turns, so nothing to clean here per-session.
-DELETE FROM turn_retrieval WHERE episode_id IN (
+-- request-pipeline tables — turn_retrieval (013, key col owner_id since 021)
+-- FKs turns(turn_id), so it goes before the turns rows it references.
+-- skill_candidates is gone (migration 022 — RecordSkill match-or-inserts
+-- directly). skill_procedures.source_ids holds test plan_ids on `learned` rows
+-- the tests create; clean those too.
+DELETE FROM turn_retrieval WHERE owner_id IN (
   SELECT turn_id FROM turns WHERE parent_id LIKE 'test:%' OR turn_id LIKE 'test:%'
 );
-DELETE FROM turn_plan WHERE episode_id IN (
-  SELECT turn_id FROM turns WHERE parent_id LIKE 'test:%' OR turn_id LIKE 'test:%'
-);
-DELETE FROM skill_candidates WHERE turn_id IN (
-  SELECT turn_id FROM turns WHERE parent_id LIKE 'test:%' OR turn_id LIKE 'test:%'
-);
--- turns.episode_id FKs episodes(episode_id) (migration 018): drop turns before
--- episodes. episodes FKs sessions(session_key), so it goes before sessions.
+-- turn_plan is gone (migration 023 — the per-run ledger is a PLAN.md file on
+-- the tenant PV, not a table; those files aren't cleaned from here).
+DELETE FROM skill_procedures
+  WHERE provenance = 'learned'
+    AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(source_ids) s(v)
+                WHERE s.v LIKE 'test:%');
+-- The `episodes` table is gone (migration 025 — a task-run is a PlanWorkflow,
+-- and turns.episode_id was renamed to turns.plan_id, no FK). Just drop turns.
 DELETE FROM turns WHERE parent_id LIKE 'test:%' OR turn_id LIKE 'test:%';
-DELETE FROM episodes WHERE session_key LIKE 'test:%';
 DELETE FROM sessions WHERE session_key LIKE 'test:%';
 SQL

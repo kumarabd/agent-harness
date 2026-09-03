@@ -1,10 +1,10 @@
 """Read/write helpers for the `skill_procedures` table
 (docs/components/skill-subsystem.md, "Data model").
 
-Phases 1–4: read current procedures (retrieval), upsert authored seeds,
-write skill_candidates + EMA-update procedures (recording), the synthesis
-writes (insert/version/notes/mark), and the co-occurrence graph
-(update_cooccurrence / edge_weights). The cluster tables belong to phase 5.
+Read current procedures (retrieval), upsert authored seeds, EMA-update
+procedures + the write path (insert / new version / notes) — all now driven by
+`RecordSkill` (skill-subsystem.md REVISION 2026-09-02) — and the co-occurrence
+graph (update_cooccurrence / edge_weights).
 """
 
 from __future__ import annotations
@@ -138,34 +138,7 @@ async def upsert_authored(db, spec: dict, embedding: list[float] | None) -> None
     )
 
 
-# --- phase 2: recording -----------------------------------------------------
-
-
-async def insert_candidate(
-    db,
-    turn_id: str,
-    task_text: str,
-    task_embedding: list[float] | None,
-    transcript: str,
-    outcome: str,
-    required_correction: bool,
-    composed_from: list[str],
-) -> None:
-    """One `skill_candidates` row. Idempotent per turn — a Temporal activity
-    retry replaces the prior row for this turn rather than duplicating."""
-    await db.execute("DELETE FROM skill_candidates WHERE turn_id = $1 AND synthesized_at IS NULL", turn_id)
-    await db.execute(
-        "INSERT INTO skill_candidates "
-        "(turn_id, task_text, task_embedding, transcript, outcome, required_correction, composed_from) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        turn_id,
-        task_text,
-        task_embedding,
-        transcript,
-        outcome,
-        required_correction,
-        json.dumps(composed_from),
-    )
+# --- recording -------------------------------------------------------------
 
 
 async def ema_update(
@@ -199,54 +172,7 @@ async def ema_update(
     )
 
 
-# --- phase 3: synthesis ---------------------------------------------------------
-
-
-@dataclass
-class CandidateRow:
-    id: str
-    turn_id: str
-    task_text: str
-    task_embedding: list[float] | None
-    transcript: str
-    outcome: str
-    required_correction: bool
-    composed_from: list[str]
-
-
-async def unsynthesized_candidates(db, limit: int = 200) -> list[CandidateRow]:
-    """Oldest-first. Only rows with an embedding — an unembeddable candidate
-    can't be assigned to a cluster, so there's nothing synthesis can do with
-    it; it stays queued in case the embedding backend is configured later."""
-    rows = await db.fetch(
-        "SELECT id, turn_id, task_text, task_embedding, transcript, outcome, "
-        "required_correction, composed_from FROM skill_candidates "
-        "WHERE synthesized_at IS NULL AND task_embedding IS NOT NULL "
-        "ORDER BY created_at LIMIT $1",
-        limit,
-    )
-    return [
-        CandidateRow(
-            id=str(r["id"]),
-            turn_id=r["turn_id"],
-            task_text=r["task_text"],
-            task_embedding=[float(x) for x in r["task_embedding"]] if r["task_embedding"] is not None else None,
-            transcript=r["transcript"],
-            outcome=r["outcome"],
-            required_correction=r["required_correction"],
-            composed_from=json.loads(r["composed_from"]),
-        )
-        for r in rows
-    ]
-
-
-async def mark_synthesized(db, candidate_ids: list[str]) -> None:
-    if not candidate_ids:
-        return
-    await db.execute(
-        "UPDATE skill_candidates SET synthesized_at = now() WHERE id = ANY($1::uuid[])",
-        candidate_ids,
-    )
+# --- write path: insert / new version / notes -----------------------------------
 
 
 async def insert_learned(
@@ -377,9 +303,9 @@ async def session_composed_procedure_ids(db, session_key: str, exclude_turn_id: 
     project scope wired, which isn't yet."""
     rows = await db.fetch(
         "SELECT DISTINCT tr.metadata->>'procedure_id' AS pid "
-        "FROM turn_retrieval tr JOIN turns t ON tr.episode_id = t.turn_id "
+        "FROM turn_retrieval tr JOIN turns t ON tr.owner_id = t.turn_id "
         "WHERE t.parent_id = $1 AND t.parent_type = 'session' AND tr.kind = 'skill' "
-        "  AND tr.episode_id <> $2 AND tr.metadata->>'procedure_id' IS NOT NULL",
+        "  AND tr.owner_id <> $2 AND tr.metadata->>'procedure_id' IS NOT NULL",
         session_key,
         exclude_turn_id,
     )

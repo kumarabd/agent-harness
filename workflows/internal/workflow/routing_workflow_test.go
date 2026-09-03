@@ -50,6 +50,7 @@ func TestRoutingWorkflow_FullFanOut(t *testing.T) {
 
 	env.ExecuteWorkflow(RoutingWorkflow, RoutingWorkflowInput{
 		TurnID: "s:turn:1",
+		PlanID: "s:turn:1", // fresh episode's opening turn — skills seed the plan
 		Task:   types.TaskRepresentation{Intent: "task", Complexity: "moderate", Confidence: 0.9},
 	})
 
@@ -98,7 +99,7 @@ func TestRoutingWorkflow_SubagentInheritsParentMemory(t *testing.T) {
 	mockSubsystem[types.SkillDiscoverInput](env, "SkillDiscover", types.SubsystemResult{Status: "empty"}, nil)
 
 	env.ExecuteWorkflow(RoutingWorkflow, RoutingWorkflowInput{
-		EpisodeID:    "s:turn:1:sub:1",
+		PlanID:       "s:turn:1:sub:1",
 		TurnID:       "s:turn:1:sub:1",
 		Task:         types.TaskRepresentation{Intent: "task", Complexity: "moderate", Confidence: 0.9},
 		ParentTurnID: "s:turn:1",
@@ -109,17 +110,17 @@ func TestRoutingWorkflow_SubagentInheritsParentMemory(t *testing.T) {
 	// which resolves the parent's episode and copies its staged rows rather than
 	// re-querying agent-brain. Staging is keyed on the subagent's own episode.
 	require.Equal(t, "s:turn:1", gotMemInput.ParentTurnID)
-	require.Equal(t, "s:turn:1:sub:1", gotMemInput.EpisodeID)
+	require.Equal(t, "s:turn:1:sub:1", gotMemInput.OwnerID)
 }
 
-func TestRoutingWorkflow_ReconcileMode(t *testing.T) {
+func TestRoutingWorkflow_ContinuationSkipsSkills(t *testing.T) {
+	// A continuation turn (no PlanID) still retrieves fresh memory + tools
+	// under its own turn id, but does not re-run skill discovery / ComposeSkill.
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()
 
 	var memIn types.MemoryRetrieveInput
-	var skillIn types.SkillDiscoverInput
-	var composeIn types.ComposeSkillInput
-	toolsCalled := false
+	skillsCalled := false
 	env.RegisterActivityWithOptions(
 		func(_ context.Context, in types.MemoryRetrieveInput) (types.SubsystemResult, error) {
 			memIn = in
@@ -127,6 +128,38 @@ func TestRoutingWorkflow_ReconcileMode(t *testing.T) {
 		},
 		activity.RegisterOptions{Name: "MemoryRetrieve"},
 	)
+	mockSubsystem[types.ToolDiscoverInput](env, "ToolDiscover", types.SubsystemResult{Status: "ok", Count: 1}, nil)
+	env.RegisterActivityWithOptions(
+		func(_ context.Context, _ types.SkillDiscoverInput) (types.SubsystemResult, error) {
+			skillsCalled = true
+			return types.SubsystemResult{Status: "ok", Count: 2}, nil
+		},
+		activity.RegisterOptions{Name: "SkillDiscover"},
+	)
+
+	env.ExecuteWorkflow(RoutingWorkflow, RoutingWorkflowInput{
+		TurnID: "s:turn:4", // continuation — no PlanID
+		Task:   types.TaskRepresentation{Intent: "task", Complexity: "moderate", Confidence: 0.9},
+	})
+
+	require.NoError(t, env.GetWorkflowError())
+	var result RoutingResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "s:turn:4", memIn.OwnerID)
+	require.Equal(t, "ok", result.Memory.Status)
+	require.False(t, skillsCalled, "continuation turn does not re-run skill discovery")
+	require.Equal(t, "skipped", result.Skills.Status)
+}
+
+func TestRoutingWorkflow_SkillDiscoverRunsForFreshPlan(t *testing.T) {
+	// A fresh Deliberate task-run (PlanID set) runs SkillDiscover under it —
+	// its rows feed the planning turn. ComposeSkill is gone (Phase 3C).
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+
+	mockSubsystem[types.MemoryRetrieveInput](env, "MemoryRetrieve", types.SubsystemResult{Status: "ok", Count: 1}, nil)
+	mockSubsystem[types.ToolDiscoverInput](env, "ToolDiscover", types.SubsystemResult{Status: "ok", Count: 1}, nil)
+	var skillIn types.SkillDiscoverInput
 	env.RegisterActivityWithOptions(
 		func(_ context.Context, in types.SkillDiscoverInput) (types.SubsystemResult, error) {
 			skillIn = in
@@ -134,93 +167,16 @@ func TestRoutingWorkflow_ReconcileMode(t *testing.T) {
 		},
 		activity.RegisterOptions{Name: "SkillDiscover"},
 	)
-	env.RegisterActivityWithOptions(
-		func(_ context.Context, _ types.ToolDiscoverInput) (types.SubsystemResult, error) {
-			toolsCalled = true
-			return types.SubsystemResult{Status: "ok", Count: 1}, nil
-		},
-		activity.RegisterOptions{Name: "ToolDiscover"},
-	)
-	env.RegisterActivityWithOptions(
-		func(_ context.Context, in types.ComposeSkillInput) (types.SubsystemResult, error) {
-			composeIn = in
-			return types.SubsystemResult{Status: "ok", Count: 1}, nil
-		},
-		activity.RegisterOptions{Name: "ComposeSkill"},
-	)
-
-	// A conversational task would normally fast-path; reconcile mode ignores that.
-	// A between-turn continuation reconcile keys staging on the anchor episode
-	// while reading the new message from the current turn.
-	env.ExecuteWorkflow(RoutingWorkflow, RoutingWorkflowInput{
-		EpisodeID: "s:turn:1",
-		TurnID:    "s:turn:4",
-		Task:      types.TaskRepresentation{Intent: "conversational", Complexity: "trivial", Confidence: 0.95},
-		Mode:      "reconcile",
-	})
-
-	require.NoError(t, env.GetWorkflowError())
-	var result RoutingResult
-	require.NoError(t, env.GetWorkflowResult(&result))
-	require.False(t, result.Plan.FastPath)
-	require.False(t, toolsCalled, "reconcile mode skips tool discovery")
-	require.True(t, memIn.Reconcile)
-	require.True(t, skillIn.Reconcile)
-	require.True(t, composeIn.Reconcile)
-	require.Equal(t, "s:turn:1", memIn.EpisodeID)
-	require.Equal(t, "s:turn:4", memIn.TurnID)
-	require.Equal(t, "s:turn:1", composeIn.EpisodeID)
-	require.True(t, result.ComposedSkill)
-}
-
-func TestRoutingWorkflow_ComposeRunsWhenSkillsFound(t *testing.T) {
-	var ts testsuite.WorkflowTestSuite
-	env := ts.NewTestWorkflowEnvironment()
-
-	mockSubsystem[types.MemoryRetrieveInput](env, "MemoryRetrieve", types.SubsystemResult{Status: "ok", Count: 1}, nil)
-	mockSubsystem[types.ToolDiscoverInput](env, "ToolDiscover", types.SubsystemResult{Status: "ok", Count: 1}, nil)
-	mockSubsystem[types.SkillDiscoverInput](env, "SkillDiscover", types.SubsystemResult{Status: "ok", Count: 2}, nil)
-	composeCalled := false
-	env.RegisterActivityWithOptions(
-		func(_ context.Context, _ types.ComposeSkillInput) (types.SubsystemResult, error) {
-			composeCalled = true
-			return types.SubsystemResult{Status: "ok", Count: 1}, nil
-		},
-		activity.RegisterOptions{Name: "ComposeSkill"},
-	)
 
 	env.ExecuteWorkflow(RoutingWorkflow, RoutingWorkflowInput{
 		TurnID: "s:turn:1",
+		PlanID: "s:turn:1",
 		Task:   types.TaskRepresentation{Intent: "task", Complexity: "complex", Confidence: 0.9},
 	})
 
 	require.NoError(t, env.GetWorkflowError())
 	var result RoutingResult
 	require.NoError(t, env.GetWorkflowResult(&result))
-	require.True(t, composeCalled)
-	require.True(t, result.ComposedSkill)
-}
-
-func TestRoutingWorkflow_ComposeFailureFailsRouting(t *testing.T) {
-	var ts testsuite.WorkflowTestSuite
-	env := ts.NewTestWorkflowEnvironment()
-
-	mockSubsystem[types.MemoryRetrieveInput](env, "MemoryRetrieve", types.SubsystemResult{Status: "ok", Count: 1}, nil)
-	mockSubsystem[types.ToolDiscoverInput](env, "ToolDiscover", types.SubsystemResult{Status: "empty"}, nil)
-	mockSubsystem[types.SkillDiscoverInput](env, "SkillDiscover", types.SubsystemResult{Status: "ok", Count: 2}, nil)
-	env.RegisterActivityWithOptions(
-		func(_ context.Context, _ types.ComposeSkillInput) (types.SubsystemResult, error) {
-			return types.SubsystemResult{}, context.DeadlineExceeded
-		},
-		activity.RegisterOptions{Name: "ComposeSkill"},
-	)
-
-	env.ExecuteWorkflow(RoutingWorkflow, RoutingWorkflowInput{
-		TurnID: "s:turn:1",
-		Task:   types.TaskRepresentation{Intent: "task", Complexity: "complex", Confidence: 0.9},
-	})
-
-	// No fallback: a ComposeSkill failure is NOT swallowed — it fails the
-	// workflow, which turn.go turns into a failed turn.
-	require.Error(t, env.GetWorkflowError())
+	require.Equal(t, "s:turn:1", skillIn.PlanID)
+	require.Equal(t, "ok", result.Skills.Status)
 }

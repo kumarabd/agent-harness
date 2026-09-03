@@ -118,6 +118,26 @@ DEFAULT_SYSTEM_PROMPT = (
     "else you call, declaring what the next step needs."
 )
 
+# docs/components/request-pipeline/08-planning.md (Phase 3C, plan-and-execute) —
+# the planning turn's system prompt. This turn does NOT execute anything: it
+# reads the task (and any composed skill / retrieved procedures already in the
+# prompt), decides the shape of the work, and emits a checkpoint plan via
+# propose_plan. PlanWorkflow then runs one checkpoint turn per checkpoint, and
+# each of those may re-plan the remainder — so the plan is a first draft, not a
+# contract. Keep checkpoints coarse (a handful, each a meaningful unit of
+# progress with an observable 'done when'), not a keystroke-level script.
+PLANNING_SYSTEM_PROMPT = (
+    "You are planning a task, not executing it. Think through what the task requires, draw on any "
+    "procedure or skill already shown in your context, and lay out a short ordered list of "
+    "checkpoints — each a meaningful unit of progress with an observable condition that means it's "
+    "done. Aim for a handful of coarse steps, not a line-by-line script; the agent executing each "
+    "checkpoint can re-plan the rest as it learns more. Mark a checkpoint complex=true when it is "
+    "itself a multi-step subtask worth its own plan. Call propose_plan with your checkpoints "
+    "and nothing else — set needs_approval=true when the work is risky, expensive, or hard to "
+    "reverse and the user should see the plan before it runs; leave it off for routine work. "
+    f"Also call {_NEXT_STEP_HINT_TOOL_NAME}, declaring what the first checkpoint needs."
+)
+
 TOOLS_SCHEMA = [
     {
         "type": "function",
@@ -304,6 +324,116 @@ TOOLS_SCHEMA = [
             },
         },
     },
+    # docs/components/proactivity.md — the agent's own standing intentions.
+    # Each is an IntentionWorkflow execution (no table); these tools start /
+    # signal / cancel / query it via the Temporal client (tools_intention.py).
+    {
+        "type": "function",
+        "function": {
+            "name": "create_intention",
+            "description": (
+                "Arm a standing intention — something you should keep watching for or doing on the "
+                "user's behalf, beyond this turn (\"remind me to leave 2h before my flight\", "
+                "\"tell me when the deploy goes green\", \"every weekday morning give me my priorities\"). "
+                "When it triggers, you get woken with a fresh turn to decide whether and how to act. "
+                "The bar is high — arm one only when there's a real, lasting reason to."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "objective": {"type": "string", "description": "What you're committing to, in the user's terms."},
+                    "why": {"type": "string", "description": "Optional one line of context carried to the future turn."},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["time", "deadline", "condition", "state", "event", "inactivity", "schedule"],
+                        "description": "time/deadline = fire once at fire_at; condition/state/event = poll a probe until it holds; inactivity = fire if the user goes quiet for idle_for_seconds; schedule = recurring, needs cron or every_seconds.",
+                    },
+                    "fire_at": {"type": "string", "description": "ISO-8601 timestamp (kind=time/deadline)."},
+                    "idle_for_seconds": {"type": "number", "description": "Seconds of user silence before firing (kind=inactivity)."},
+                    "cron": {"type": "string", "description": "Cron expression, UTC (kind=schedule) — e.g. \"0 9 * * MON-FRI\"."},
+                    "every_seconds": {"type": "number", "description": "Fixed interval in seconds (kind=schedule), alternative to cron."},
+                    "poll_every_seconds": {"type": "number", "description": "Poll interval (kind=condition/state/event; default 300)."},
+                    "expires_at": {"type": "string", "description": "ISO-8601; give up unfired after this (poll kinds)."},
+                    "probe": {
+                        "type": "object",
+                        "description": "What to check each poll (kind=condition/state/event).",
+                        "properties": {
+                            "tool": {"type": "string", "description": "A call_tool \"server/tool\" to run."},
+                            "args": {"type": "object", "description": "Arguments for that tool."},
+                            "predicate": {"type": "string", "description": "Natural-language condition to judge against the result."},
+                        },
+                        "required": ["tool", "predicate"],
+                    },
+                },
+                "required": ["objective", "kind"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_intentions",
+            "description": "List the intentions you currently have armed for this session, with their state and fire count.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_intention",
+            "description": "Show one armed intention's current objective, kind, state and fire count.",
+            "parameters": {
+                "type": "object",
+                "properties": {"intention_id": {"type": "string"}},
+                "required": ["intention_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "revise_intention",
+            "description": "Change an armed intention's objective, context, fire time, or poll interval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "intention_id": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "why": {"type": "string"},
+                    "fire_at": {"type": "string", "description": "ISO-8601."},
+                    "poll_every_seconds": {"type": "number"},
+                },
+                "required": ["intention_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "snooze_intention",
+            "description": "Push an armed intention's next fire out by a number of seconds.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "intention_id": {"type": "string"},
+                    "by_seconds": {"type": "number"},
+                },
+                "required": ["intention_id", "by_seconds"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_intention",
+            "description": "Drop an armed intention — it will never fire again.",
+            "parameters": {
+                "type": "object",
+                "properties": {"intention_id": {"type": "string"}},
+                "required": ["intention_id"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -374,55 +504,6 @@ TOOLS_SCHEMA = [
                     "summary_id": {"type": "string", "description": "A summary_id (from lcm_grep or lcm_describe)."},
                 },
                 "required": ["summary_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            # docs/components/request-pipeline/08-planning.md — the living
-            # checkpoint ledger. A meta-tool like declare_next_step_hint: it
-            # rides the response's existing round-trip, carries no work of its
-            # own, and ModelCall peels it out of the tool stream to apply
-            # against turn_plan rather than minting a tool_calls row for it.
-            # Offered on every turn; it's a no-op the model omits when no plan
-            # is shown or nothing changed.
-            "name": "plan_progress",
-            "description": (
-                "When a plan is shown in your context, call this alongside your response whenever a "
-                "checkpoint's state changes: mark it \"done\" once its 'done when' condition is met, "
-                "\"skipped\" if you're deliberately bypassing it, or \"revised\" (with a note) if the "
-                "task diverged from what that step assumed. You may also add a step the plan is "
-                "missing by giving a new checkpoint_id together with an intent. Omit this tool "
-                "entirely on steps where no checkpoint changed."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "updates": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "checkpoint_id": {
-                                    "type": "string",
-                                    "description": "The cp id shown in the plan block (e.g. \"cp2\"), or a new id to add a missing step.",
-                                },
-                                "status": {"type": "string", "enum": ["done", "skipped", "revised"]},
-                                "note": {
-                                    "type": "string",
-                                    "description": "Why the step was revised or skipped, or what a correction changed.",
-                                },
-                                "intent": {
-                                    "type": "string",
-                                    "description": "Only when adding a step the plan is missing: what the new step accomplishes.",
-                                },
-                            },
-                            "required": ["checkpoint_id"],
-                        },
-                    },
-                },
-                "required": ["updates"],
             },
         },
     },
@@ -504,18 +585,131 @@ _SPAWN_SUBAGENT_NESTED_SCHEMA = {
 }
 
 
-def tools_schema_for(is_subagent: bool) -> list[dict]:
+# docs/components/request-pipeline/08-planning.md (Phase 3C) — the checkpoint
+# turn's completion report. A meta-tool like declare_next_step_hint: it rides
+# the response's existing round-trip, carries no work of its own, and ModelCall
+# peels it to apply against PLAN.md rather than minting a tool_calls row. Only
+# offered to a checkpoint turn (the seed message names the checkpoint).
+_CHECKPOINT_DONE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "checkpoint_done",
+        "description": (
+            "You are executing one checkpoint of a plan. Call this once the checkpoint's "
+            "'done when' condition is met: status \"done\", or \"skipped\" if you deliberately "
+            "bypassed it, or \"revised\" (with a note) if the task diverged from what the step "
+            "assumed. If what you found means the REST of the plan should change, pass "
+            "revised_tail — an ordered list of the remaining checkpoints, which replaces every "
+            "still-pending step after this one."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "checkpoint_id": {
+                    "type": "string",
+                    "description": "The cp id from the seed message (e.g. \"cp2\").",
+                },
+                "status": {"type": "string", "enum": ["done", "skipped", "revised"]},
+                "note": {
+                    "type": "string",
+                    "description": "Why the step was revised or skipped, or anything the next checkpoint needs to know.",
+                },
+                "revised_tail": {
+                    "type": "array",
+                    "description": "Optional. The remaining plan, re-planned: replaces all still-pending checkpoints after this one.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "intent": {"type": "string", "description": "What this step accomplishes."},
+                            "done_when": {"type": "string", "description": "The observable condition that means it's complete."},
+                        },
+                        "required": ["intent"],
+                    },
+                },
+            },
+            "required": ["checkpoint_id", "status"],
+        },
+    },
+}
+
+
+_PROPOSE_PLAN_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "propose_plan",
+        "description": (
+            "Emit the checkpoint plan for this task: an ordered list of coarse steps, each with an "
+            "intent and an observable 'done_when'. This is the only tool you call on a planning turn."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "checkpoints": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "intent": {"type": "string", "description": "What this step accomplishes."},
+                            "done_when": {"type": "string", "description": "The observable condition that means it's complete."},
+                            "complex": {
+                                "type": "boolean",
+                                "description": "True if this step is itself a multi-step subtask that deserves its own plan (it will be run as a nested planning+execution pass). Leave off for ordinary steps.",
+                            },
+                        },
+                        "required": ["intent"],
+                    },
+                },
+                "needs_approval": {
+                    "type": "boolean",
+                    "description": "True if the plan should be shown to the user for approval before execution begins.",
+                },
+            },
+            "required": ["checkpoints"],
+        },
+    },
+}
+
+
+def tools_schema_for(
+    is_subagent: bool,
+    planning: bool = False,
+    plan_handling: bool = False,
+    checkpoint: bool = False,
+) -> list[dict]:
     """model_call.py's one call site for what used to be the flat
-    TOOLS_SCHEMA constant — every ModelCall now goes through this so both
-    the lcm_expand exclusion and the spawn_subagent variant substitution
-    above are enforced uniformly on both the streaming and non-streaming
-    call paths, not duplicated at each site."""
-    if is_subagent:
+    TOOLS_SCHEMA constant — every ModelCall now goes through this so the
+    lcm_expand exclusion, the spawn_subagent variant substitution, and the
+    plan-turn schemas are enforced uniformly on both the streaming and
+    non-streaming call paths, not duplicated at each site.
+
+    Base TOOLS_SCHEMA carries NEITHER plan meta-tool — they're added here only
+    for the turn kind that should see them, so a stray call can't reach a turn
+    that has no PLAN.md to apply it to:
+
+    - `planning` (08-planning.md): the planning turn does no work — only
+      propose_plan + the next-step hint tool.
+    - `plan_handling`: a mid-plan follow-up turn — the full normal toolset (it
+      answers the user and may need tools) PLUS propose_plan, to reshape the
+      pending tail.
+    - `checkpoint`: a checkpoint turn — the full toolset PLUS checkpoint_done.
+    """
+    if planning:
         return [
+            _PROPOSE_PLAN_SCHEMA,
+            *[t for t in TOOLS_SCHEMA if t["function"]["name"] == _NEXT_STEP_HINT_TOOL_NAME],
+        ]
+    if is_subagent:
+        base = [
             _SPAWN_SUBAGENT_NESTED_SCHEMA if tool["function"]["name"] == _SPAWN_SUBAGENT_TOOL_NAME else tool
             for tool in TOOLS_SCHEMA
         ]
-    return [tool for tool in TOOLS_SCHEMA if tool["function"]["name"] not in _SUBAGENT_ONLY_TOOL_NAMES]
+    else:
+        base = [tool for tool in TOOLS_SCHEMA if tool["function"]["name"] not in _SUBAGENT_ONLY_TOOL_NAMES]
+    if plan_handling:
+        return [*base, _PROPOSE_PLAN_SCHEMA]
+    if checkpoint:
+        return [*base, _CHECKPOINT_DONE_SCHEMA]
+    return base
 
 
 @dataclass
@@ -533,17 +727,17 @@ class RealModelResult:
 
 
 async def build_conversation(
-    conn, turn_id: str, episode_id: str, system_prompt: str, context_window: int = 0
+    conn, turn_id: str, plan_id: str, system_prompt: str, context_window: int = 0
 ) -> tuple[list[dict], int]:
     """Thin call-through to `prompt.assemble` — request pipeline step 9
     (docs/components/request-pipeline/09-prompt-assembly.md) owns the section
     model, ordering, and budget arbitration; this stays the stable call site
-    model_call.py already uses. `episode_id` (docs/components/episode-lifecycle.md)
+    model_call.py already uses. `plan_id` (docs/components/episode-lifecycle.md)
     keys the enrichment sections; empty for a conversational fast-path turn.
     `context_window` (0 if unknown, e.g. the fixture path) bounds how much of it
     enrichment may consume before `prompt.assemble` starts shedding sections.
     """
-    return await prompt.assemble(conn, turn_id, episode_id, system_prompt, context_window)
+    return await prompt.assemble(conn, turn_id, plan_id, system_prompt, context_window)
 
 
 # call_model / call_model_streaming moved to

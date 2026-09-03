@@ -14,6 +14,16 @@
 > [`../skills.md`](../skills.md).
 >
 > Parent: [`../request-pipeline.md`](../request-pipeline.md).
+>
+> ## REVISION (2026-09-02)
+>
+> Per [`08-planning.md`](08-planning.md): `SkillDiscover` runs **once per
+> episode**, and its output feeds the **planning turn** (which drafts PLAN.md),
+> not `ComposeSkill` (removed) and not a `turn_retrieval` `kind='skill'` staging
+> row (the table is dropped). The retrieval algorithm — embed `retrieval_query`,
+> flat cosine over the session's procedures, scored selection — is unchanged. It
+> now hands the selected procedures to the planning turn as context. "Gates step
+> 6" no longer applies (there is no step 6).
 
 ### Pipeline contract
 

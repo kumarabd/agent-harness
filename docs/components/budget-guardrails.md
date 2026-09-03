@@ -39,6 +39,12 @@ Scoped narrowly and deliberately: **visibility only** — token consumption, cal
 
 ### Resolved: Pipeline-Phase Visibility (2026-09-02)
 
+> **Note (2026-09-02, later):** the plan-and-execute revision
+> (`request-pipeline/08-planning.md`) **removes `ComposeSkill`** — the ~7.2s
+> medium-tier merge below stops existing; the planning turn (one model call per
+> episode) replaces it. The observability wiring stays useful for the remaining
+> activities; re-point the `ComposeSkill` panels at the planning turn once built.
+
 A Grafana pass on a full scenario-suite run showed the pre-LLM pipeline
 (`components/request-pipeline.md`) is ~60% of turn wall-time — `RoutingWorkflow`
 alone averaged 7.4s, and inside it `ComposeSkill` is ~7.2s (a medium-tier merge

@@ -8,6 +8,18 @@
 > Parent: [`../request-pipeline.md`](../request-pipeline.md).
 > Orchestrated by [`03-routing.md`](03-routing.md)'s `RoutingWorkflow`.
 > Backend: [`../tool-registry.md`](../tool-registry.md) (`discover_tools`).
+>
+> ## REVISION (2026-09-02) — BUILT (Phase 2 slice 2.1, branch proactivity-substrate; compiles + Go tests green, not deployed)
+>
+> Per [`../episode-lifecycle.md`](../episode-lifecycle.md) REVISION: `ToolDiscover`
+> runs **per turn**, staged under the current turn's id
+> (`turn_retrieval.owner_id = turn_id`, migration `021`), read back by
+> `prompt.assemble` as the capabilities-hint block — no once-per-episode
+> snapshot, no reconcile. `input.owner_id` replaces `input.episode_id`. The
+> `discover_tools` mechanism (mcp-hub + shell-hub fan-out, `top_k` split) is
+> unchanged. `ComposeSkill` still reads the anchor turn's tool rows at episode
+> open for `tool_ref` binding; `ComposeSkill` itself goes away in Phase 3, after
+> which the model binds tools at execution time from the hint block.
 
 ### Role
 

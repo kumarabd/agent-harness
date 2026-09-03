@@ -86,15 +86,15 @@ class ToolDiscoverActivity:
     async def __call__(self, input: ToolDiscoverInput) -> SubsystemResult:
         query = _query(input)
         if not query:
-            logger.info("ToolDiscover[%s]: empty query — nothing to discover", input.episode_id)
+            logger.info("ToolDiscover[%s]: empty query — nothing to discover", input.owner_id)
             return SubsystemResult(status="empty", count=0)
 
         results = await discover_tools(query, _TOP_K)
         rows = _rows(results)
         if not rows:
-            logger.info("ToolDiscover[%s]: no tools discovered (query=%r)", input.episode_id, query)
+            logger.info("ToolDiscover[%s]: no tools discovered (query=%r)", input.owner_id, query)
             return SubsystemResult(status="empty", count=0)
 
-        written = await write_rows(self._pool, input.episode_id, rows)
-        logger.info("ToolDiscover[%s]: staged %d tool rows (query=%r)", input.episode_id, written, query)
+        written = await write_rows(self._pool, input.owner_id, rows)
+        logger.info("ToolDiscover[%s]: staged %d tool rows (query=%r)", input.owner_id, written, query)
         return SubsystemResult(status="ok", count=written)

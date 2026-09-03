@@ -14,6 +14,25 @@
 > [`08-planning.md`](08-planning.md) (`turn_plan`).
 > Delegates to: `docs/components/context-slot.md`'s `lcm.assemble` for the
 > summary DAG + verbatim window.
+>
+> ## REVISION (2026-09-02)
+>
+> Per [`08-planning.md`](08-planning.md) + [`../episode-lifecycle.md`](../episode-lifecycle.md)
+> REVISION, the section model changes:
+>
+> - **"Composed skill" section — removed.** `ComposeSkill` is deleted; the
+>   planning turn's PLAN.md carries the procedure. On a *checkpoint* turn, the
+>   plan itself is the "what to do" context.
+> - **"Plan progress" → "Current checkpoint".** Sourced from **PLAN.md**
+>   (`plan_read` activity), not `turn_plan` (dropped). Renders the checkpoint this
+>   turn is executing + the surrounding plan. Still never shed.
+> - **"Capabilities" + "Long-term memory"** — now filled from **this turn's own
+>   fresh `ToolDiscover` / `MemoryRetrieve`** (passed into `assemble`), not read
+>   from `turn_retrieval`. `_staged_texts` is removed. Shed order unchanged.
+> - `assemble`'s signature loses `turn_retrieval` reads; gains the per-turn
+>   memory + tools results as inputs.
+>
+> The budget-arbitration logic and everything below are otherwise intact.
 
 ### Role
 
@@ -43,10 +62,10 @@ DAG + verbatim window.
 | # | Section | Source | Droppable |
 |---|---|---|---|
 | 1 | System prompt | `DEFAULT_SYSTEM_PROMPT` / session override | never |
-| 2 | Composed skill | `turn_retrieval` `kind='composed'` | never |
-| 3 | Plan progress | `turn_plan` (step 8) | never |
-| 4 | **Capabilities** | `turn_retrieval` `kind='tool'` | yes — shed 1st |
-| 5 | Long-term memory | `turn_retrieval` `kind='memory'` | yes — shed 2nd |
+| 2 | ~~Composed skill~~ | **removed 2026-09-02** | — |
+| 3 | Current checkpoint | **PLAN.md** (`plan_read`) — the checkpoint this turn runs + surrounding plan | never |
+| 4 | **Capabilities** | this turn's fresh `ToolDiscover` | yes — shed 1st |
+| 5 | Long-term memory | this turn's fresh `MemoryRetrieve` | yes — shed 2nd |
 | 6 | Summary DAG | `lcm.assemble` | (context-slot.md's own concern) |
 | 7 | Verbatim window | `lcm.assemble` | (the compression gate's job) |
 

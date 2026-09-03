@@ -4,10 +4,8 @@ import (
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
-	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	"agent-harness/workflows/internal/ids"
 	"agent-harness/workflows/internal/types"
 )
 
@@ -79,22 +77,36 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 		maxTurnSeq = 0
 	}
 	turnSeq := maxTurnSeq
-	var currentTurnHandle workflow.ChildWorkflowFuture
-	var currentTurnID string
-	turnActive := false
+	// The active unit of work: a plain TurnWorkflow (Lite / conversational) or a
+	// PlanWorkflow (a Deliberate episode) — dispatchWork decides. workHandle is
+	// nil when we're attached to a PlanWorkflow the coordinator didn't start
+	// (a restart mid-plan); completion then arrives via the PlanDone signal.
+	var workHandle workflow.ChildWorkflowFuture
+	var workID string
+	var workKind WorkKind
+	workActive := false
 
 	signalChan := workflow.GetSignalChannel(ctx, NewMessageSignalName)
+	planDoneChan := workflow.GetSignalChannel(ctx, PlanDoneSignalName)
 	var pendingSignal *types.SignalPayload
 	haveSignal := false
+
+	// docs/components/proactivity.md — a fired IntentionWorkflow wakes the
+	// coordinator here. Handled as a sibling of NewMessage: no active turn →
+	// start a proactive turn from a synthesised seed; active turn → fold the
+	// objective in as a follow-up and let the live turn place it.
+	wakeChan := workflow.GetSignalChannel(ctx, WakeSignalName)
+	var pendingWake *types.WakePayload
+	haveWake := false
 
 	for {
 		// Were we actually idle-waiting on entry to this iteration? Only then
 		// can the idle timer be what wakes us — a turn completing (which also
-		// clears turnActive, below) must NOT be mistaken for an idle timeout,
+		// clears workActive, below) must NOT be mistaken for an idle timeout,
 		// or the coordinator exits the instant every turn ends and no episode
 		// (docs/components/episode-lifecycle.md) ever survives to a follow-up
 		// turn. Before episodes this was a harmless early exit + recreate.
-		wasIdle := !turnActive
+		wasIdle := !workActive
 		idleTimerCtx, cancelIdleTimer := workflow.WithCancel(ctx)
 		idleTimer := workflow.NewTimer(idleTimerCtx, idleTTL)
 
@@ -105,31 +117,52 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			pendingSignal = &payload
 			haveSignal = true
 		})
-		if turnActive {
-			sel.AddFuture(currentTurnHandle, func(f workflow.Future) {
-				var result types.TurnResult
-				err := f.Get(ctx, &result)
-				if err != nil {
-					logger.Error("turn workflow ended with error", "turn_id", currentTurnID, "error", err)
-				} else {
-					logger.Info("turn workflow completed", "turn_id", currentTurnID, "stop_reason", result.StopReason)
-				}
-				turnActive = false
-				currentTurnID = ""
-				// docs/components/gateway/discord-voice.md's "Resolved:
-				// Overlapping Speech / Interrupts" gap, closed 2026-08-25:
-				// a signal that arrived while this turn's connection-based
-				// delivery was still in flight got cancelled and handed
-				// back here (TurnWorkflow's own signal-drain queue is
-				// gone along with that execution) rather than lost.
-				// Treated exactly like a freshly-arrived signal — the very
-				// next loop iteration starts a brand-new turn with it, the
-				// same path an ordinary NewMessage signal already takes.
-				if result.InterruptedDuringDelivery != nil {
-					pendingSignal = result.InterruptedDuringDelivery
-					haveSignal = true
-				}
-			})
+		sel.AddReceive(wakeChan, func(c workflow.ReceiveChannel, more bool) {
+			var w types.WakePayload
+			c.Receive(ctx, &w)
+			pendingWake = &w
+			haveWake = true
+		})
+		// PlanDone: a PlanWorkflow finished its episode. Clears the guard even
+		// when we hold no handle for it (attached after a restart).
+		sel.AddReceive(planDoneChan, func(c workflow.ReceiveChannel, _ bool) {
+			var planID string
+			c.Receive(ctx, &planID)
+			if workKind == WorkPlan {
+				logger.Info("plan workflow reported done", "episode_id", planID)
+				workActive = false
+				workID = ""
+				workHandle = nil
+			}
+		})
+		if workActive {
+			if workHandle != nil {
+				sel.AddFuture(workHandle, func(f workflow.Future) {
+					var result types.TurnResult
+					err := f.Get(ctx, &result)
+					if err != nil {
+						logger.Error("work workflow ended with error", "work_id", workID, "kind", workKind, "error", err)
+					} else {
+						logger.Info("work workflow completed", "work_id", workID, "kind", workKind, "stop_reason", result.StopReason)
+					}
+					workActive = false
+					workID = ""
+					workHandle = nil
+					// docs/components/gateway/discord-voice.md's "Resolved:
+					// Overlapping Speech / Interrupts" gap, closed 2026-08-25:
+					// a signal that arrived while this turn's connection-based
+					// delivery was still in flight got cancelled and handed
+					// back here (TurnWorkflow's own signal-drain queue is
+					// gone along with that execution) rather than lost.
+					// Treated exactly like a freshly-arrived signal — the very
+					// next loop iteration starts a brand-new turn with it, the
+					// same path an ordinary NewMessage signal already takes.
+					if result.InterruptedDuringDelivery != nil {
+						pendingSignal = result.InterruptedDuringDelivery
+						haveSignal = true
+					}
+				})
+			}
 		} else {
 			sel.AddFuture(idleTimer, func(f workflow.Future) {
 				// no-op callback; presence in the selector is what lets the
@@ -139,7 +172,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 		sel.Select(ctx)
 		cancelIdleTimer()
 
-		if wasIdle && !turnActive && !haveSignal {
+		if wasIdle && !workActive && !haveSignal && !haveWake {
 			// The idle timer fired while we were genuinely idle (no turn just
 			// completed into this branch) — self-terminate per the resolved TTL
 			// design (components/session-coordinator.md). A fresh
@@ -166,83 +199,107 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			wmFuture := workflow.ExecuteChildWorkflow(wcctx, WriteMemoryWorkflow, input.SessionKey)
 			_ = wmFuture.GetChildWorkflowExecution().Get(wcctx, nil)
 
-			// docs/components/episode-lifecycle.md — session completion is also
-			// the catch-all episode-close boundary: any top-level episode still
-			// open (the model never marked the last checkpoint, or it had no
-			// plan) is closed and recorded here. Detached, same ABANDON
-			// reasoning as the WriteMemory dispatch above.
-			ecwo := workflow.ChildWorkflowOptions{
-				WorkflowID:        input.SessionKey + ":close-episodes:" + workflow.GetInfo(ctx).WorkflowExecution.RunID,
-				ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
-			}
-			ecctx := workflow.WithChildOptions(ctx, ecwo)
-			ecFuture := workflow.ExecuteChildWorkflow(ecctx, CloseSessionEpisodesWorkflow, input.SessionKey)
-			_ = ecFuture.GetChildWorkflowExecution().Get(ecctx, nil)
+			// No episode-close sweep any more (decision B — no `episodes` table):
+			// a PlanWorkflow that's still running when the coordinator idles
+			// keeps going under ABANDON and records itself when it finishes.
 
 			return nil
 		}
 
-		if !haveSignal {
-			// Turn completion path looped back around with no new signal yet;
+		if !haveSignal && !haveWake {
+			// Turn completion path looped back around with nothing new yet;
 			// go wait again.
 			continue
 		}
 
-		payload := *pendingSignal
-		pendingSignal = nil
-		haveSignal = false
+		// A real inbound message takes priority over a proactive wake — if both
+		// landed, handle the message this iteration and the wake next.
+		if haveSignal {
+			payload := *pendingSignal
+			pendingSignal = nil
+			haveSignal = false
 
-		if turnActive {
-			// Forward into the running Turn Workflow rather than starting a
-			// second one — this IS the distributed active-session guard
-			// (02-architecture-temporal-execution.md §2).
-			err := workflow.SignalExternalWorkflow(ctx, currentTurnID, "", NewMessageSignalName, payload).Get(ctx, nil)
+			if workActive {
+				// Forward into the running Turn Workflow rather than starting a
+				// second one — this IS the distributed active-session guard
+				// (02-architecture-temporal-execution.md §2).
+				if err := workflow.SignalExternalWorkflow(ctx, workID, "", NewMessageSignalName, payload).Get(ctx, nil); err != nil {
+					logger.Error("failed to forward signal to active turn", "turn_id", workID, "error", err)
+				}
+				continue
+			}
+
+			turnSeq++
+			res, err := dispatchWork(ctx, input.SessionKey, input.ConnectionID, turnSeq, payload.Message, "user")
 			if err != nil {
-				logger.Error("failed to forward signal to active turn", "turn_id", currentTurnID, "error", err)
+				logger.Error("dispatchWork failed", "session_key", input.SessionKey, "error", err)
+				continue
+			}
+			workHandle, workID, workKind = applyWork(ctx, res, &payload)
+			workActive = true
+			continue
+		}
+
+		// docs/components/proactivity.md — a fired intention.
+		wake := *pendingWake
+		pendingWake = nil
+		haveWake = false
+
+		if workActive {
+			// Fold the objective into the live turn as an ordinary follow-up;
+			// that turn's model decides whether/where to surface it — it has the
+			// live conversation, this workflow does not.
+			fold := types.SignalPayload{Message: types.Message{Role: "user", Content: proactiveFoldText(wake)}}
+			if err := workflow.SignalExternalWorkflow(ctx, workID, "", NewMessageSignalName, fold).Get(ctx, nil); err != nil {
+				logger.Error("failed to fold wake into active turn", "turn_id", workID, "intention_id", wake.IntentionID, "error", err)
 			}
 			continue
 		}
 
 		turnSeq++
-		newTurnID := ids.TurnID(input.SessionKey, turnSeq)
-		turnSeqCopy := turnSeq // TurnInput.TurnSeq is a pointer; don't let it alias the loop variable
-		childInput := types.TurnInput{
-			SessionKey:     input.SessionKey,
-			TurnID:         newTurnID,
-			ParentType:     "session",
-			ParentID:       input.SessionKey,
-			TurnSeq:        &turnSeqCopy,
-			InitialMessage: payload.Message,
-			ConnectionID:   input.ConnectionID,
+		res, err := dispatchWork(ctx, input.SessionKey, input.ConnectionID, turnSeq,
+			types.Message{Role: "user", Content: proactiveSeedText(wake)}, "intn:"+wake.IntentionID)
+		if err != nil {
+			logger.Error("dispatchWork (proactive) failed", "intention_id", wake.IntentionID, "error", err)
+			continue
 		}
-		cwo := workflow.ChildWorkflowOptions{
-			WorkflowID:        newTurnID,
-			ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON, // coordinator crash never tears down an in-flight turn
-		}
-		cctx := workflow.WithChildOptions(ctx, cwo)
-		handle := workflow.ExecuteChildWorkflow(cctx, TurnWorkflow, childInput)
-
-		// Wait for the child to actually be accepted by the server before
-		// treating it as active — this is where the resolved "already
-		// started" reconciliation would surface an ABANDON-survived turn from
-		// a prior coordinator crash (components/02-architecture-temporal-execution.md §2).
-		var childWE workflow.Execution
-		startErr := handle.GetChildWorkflowExecution().Get(ctx, &childWE)
-		if startErr != nil {
-			if temporal.IsWorkflowExecutionAlreadyStartedError(startErr) {
-				// A turn with this ID is still genuinely running (survived a
-				// prior coordinator crash under ABANDON) — attach to it
-				// rather than trusting our freshly-reset "no active turn"
-				// assumption (02-architecture-temporal-execution.md §2).
-				logger.Info("turn already running, attaching instead of starting fresh", "turn_id", newTurnID)
-			} else {
-				logger.Error("failed to start turn workflow", "turn_id", newTurnID, "error", startErr)
-				continue
-			}
-		}
-
-		currentTurnHandle = handle
-		currentTurnID = newTurnID
-		turnActive = true
+		workHandle, workID, workKind = applyWork(ctx, res, nil)
+		workActive = true
 	}
+}
+
+// applyWork maps a dispatchWork decision onto the coordinator's tracking vars.
+// For WorkAttach (a follow-up to a PlanWorkflow the coordinator isn't holding a
+// handle for — e.g. after a mid-plan restart), it forwards the message and
+// returns a nil handle: completion then arrives via the PlanDone signal.
+func applyWork(ctx workflow.Context, res WorkResult, payload *types.SignalPayload) (workflow.ChildWorkflowFuture, string, WorkKind) {
+	if res.Kind == WorkAttach {
+		if payload != nil {
+			_ = workflow.SignalExternalWorkflow(ctx, res.WorkflowID, "", NewMessageSignalName, *payload).Get(ctx, nil)
+		}
+		return nil, res.WorkflowID, WorkPlan
+	}
+	return res.Handle, res.WorkflowID, res.Kind
+}
+
+// proactiveSeedText builds the seed "user" message (ClassifyRequest requires
+// role='user', seq=0 — turns.initiated_by carries the real provenance) for a
+// proactive turn started with no conversation in flight.
+func proactiveSeedText(w types.WakePayload) string {
+	s := "[Proactive check — you set this intention for yourself; the user did not send this message]\n\n" + w.Objective
+	if w.Why != "" {
+		s += "\n\n" + w.Why
+	}
+	return s + "\n\nDecide whether and how to surface this to the user now. Check whatever you need to " +
+		"first. If nothing is worth saying right now, end the turn without responding."
+}
+
+// proactiveFoldText builds the follow-up message when a wake arrives while a
+// turn is already running — the live turn's model decides placement.
+func proactiveFoldText(w types.WakePayload) string {
+	s := "[Proactive note — surface this to the user if and when it fits the conversation]\n\n" + w.Objective
+	if w.Why != "" {
+		s += "\n\n" + w.Why
+	}
+	return s
 }
