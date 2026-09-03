@@ -69,6 +69,14 @@ for _ in $(seq 1 20); do
   sleep 0.5
 done
 
+# Clear any leftover test:% data from a prior run BEFORE starting — several
+# setup.sql files seed fixed-UUID rows (lcm-retrieval, lcm-grep-nested-fold,
+# real-assembly) that collide on messages_pkey if a previous run's rows are
+# still around. The setup files also self-clean their own UUIDs, but this
+# also sweeps stale turns/sessions/skill_procedures the suite created.
+echo "--- cleaning leftover test data ---"
+bash "$SCRIPT_DIR/cleanup_test_data.sh" || echo "  (cleanup had non-fatal errors — continuing)"
+
 SCENARIOS=(
   happy-path
   shell-exec-slow
@@ -83,10 +91,10 @@ SCENARIOS=(
   lcm-retrieval
   lcm-grep-nested-fold
   anthropic-basic
-  plan-progress-lifecycle
-  skill-plan-integration
+  lite-simple-task
+  plan-lifecycle
+  plan-checkpoint-revise
   subagent-full-agent
-  episode-plan-complete
   real-assembly
 )
 

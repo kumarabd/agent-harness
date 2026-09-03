@@ -1,47 +1,60 @@
 #!/usr/bin/env bash
 # Expectations for real-llm-pipeline.json — REAL provider calls, run manually.
 #
-# This is the only end-to-end check of step 9 (prompt.assemble), which the
-# scripted-fixture path skips entirely. Verifies the real ModelCall's context
-# was assembled from all four enrichment sources without error, and the model
-# produced a real answer.
+# End-to-end plan-and-execute: real ClassifyRequest -> PlanWorkflow -> real
+# planning turn -> PLAN.md -> real checkpoint turns. run_scenario.sh returns
+# after the planning turn (no :cp: fixtures to detect); this script polls for
+# the plan to finish itself.
 #
 # Called by run_scenario.sh as: expect.sh <session_key> <root_turn_id>
 set -euo pipefail
 
 SESSION_KEY="$1"
-ROOT_TURN_ID="$2"
+PLAN_ID="$2"
 
-pg_query() {
+pg() {
   kubectl exec -i -n "$NAMESPACE" "$PG_POD" -- sh -c \
     "PGPASSWORD=\$(cat /opt/bitnami/postgresql/secrets/password) psql -U $PG_USER -d $PG_DB -tAc \"$1\""
+}
+plan_md() {
+  kubectl exec -n "$NAMESPACE" deploy/abishekk-worker -- \
+    cat "/sessions/session/$SESSION_KEY/plans/${1//:/_}/PLAN.md" 2>/dev/null || true
 }
 fail() { echo "  FAIL: $1"; exit 1; }
 ok() { echo "  ok: $1"; }
 
-root_status="$(pg_query "SELECT status FROM turns WHERE turn_id = '$ROOT_TURN_ID'")"
-[ "$root_status" = "completed" ] || fail "root turn status = '$root_status', expected 'completed' — a real ModelCall through prompt.assemble errored or the model looped past max-iterations"
-ok "root turn completed (real ModelCall via prompt.assemble succeeded)"
+[ "$(pg "SELECT status FROM turns WHERE turn_id = '$PLAN_ID'")" = "completed" ] \
+  || fail "planning turn ($PLAN_ID) not completed — a real ModelCall through prompt.assemble errored, or the model never called propose_plan"
+ok "real planning turn completed"
 
-for kind in skill composed memory tool; do
-  n="$(pg_query "SELECT count(*) FROM turn_retrieval WHERE owner_id = '$ROOT_TURN_ID' AND kind = '$kind'")"
-  [ "${n:-0}" -ge 1 ] && ok "enrichment source present: kind='$kind' ($n rows)" \
-    || echo "  NOTE: no kind='$kind' rows — that section was absent from the assembled prompt this run"
+# SkillDiscover fed the planning turn
+for kind in skill memory tool; do
+  n="$(pg "SELECT count(*) FROM turn_retrieval WHERE owner_id IN ('$PLAN_ID') AND kind = '$kind'")"
+  [ "${n:-0}" -ge 1 ] && ok "enrichment: kind='$kind' ($n rows)" \
+    || echo "  NOTE: no kind='$kind' rows staged this run"
 done
 
-# Phase 3 slice B: the plan ledger is a PLAN.md file on the tenant PV.
-plan_n="$(kubectl exec -n "$NAMESPACE" deploy/abishekk-worker -- \
-  sh -c "grep -cE '^- ' \"/sessions/session/$1/plans/${ROOT_TURN_ID//:/_}/PLAN.md\" 2>/dev/null" || true)"
-[ "${plan_n:-0}" -ge 1 ] && ok "PLAN.md seeded ($plan_n checkpoints) — plan-progress section had content" \
-  || echo "  NOTE: no PLAN.md — no composed skill produced checkpoints this run"
+# PLAN.md seeded by the real propose_plan
+PLAN="$(plan_md "$PLAN_ID")"
+[ -n "$PLAN" ] || fail "no PLAN.md — the real planning turn did not call propose_plan"
+n_cp="$(echo "$PLAN" | grep -cE '^- cp[0-9]+ ' || true)"
+[ "${n_cp:-0}" -ge 1 ] || fail "PLAN.md has no checkpoints"
+ok "real propose_plan seeded $n_cp checkpoints"
 
-reply="$(pg_query "SELECT length(content) FROM messages WHERE parent_id = '$ROOT_TURN_ID' AND role = 'assistant' ORDER BY seq DESC LIMIT 1")"
-[ "${reply:-0}" -ge 200 ] || fail "final assistant message is only ${reply:-0} chars — model did not produce a real answer"
-ok "model produced a substantive answer (${reply} chars)"
+# wait for the plan to drive to completion (real checkpoint turns)
+echo "  --- waiting for the plan to complete (real checkpoint calls) ---"
+for _ in $(seq 1 300); do
+  RUNNING="$(pg "SELECT count(*) FROM turns WHERE parent_id = '$PLAN_ID' AND parent_type = 'plan' AND status = 'running'")"
+  DONE="$(plan_md "$PLAN_ID" | grep -cE '^status: complete' || true)"
+  { [ "${RUNNING:-1}" = "0" ] && [ "${DONE:-0}" = "1" ]; } && break
+  sleep 2
+done
+plan_md "$PLAN_ID" | grep -qE '^status: complete' || fail "plan never reached 'complete' — checkpoint turns stalled or failed"
+n_done="$(plan_md "$PLAN_ID" | grep -cE '^- cp[0-9]+ \[[x-]\]' || true)"
+ok "plan completed ($n_done/$n_cp checkpoints terminal)"
 
-echo ""
-echo "  --- prompt.assemble section breakdown (needs the redeploy that adds the log line) ---"
-kubectl logs -n "$NAMESPACE" deploy/abishekk-worker --since=10m 2>/dev/null \
-  | grep -F "prompt.assemble[$ROOT_TURN_ID]" || echo "  (no prompt.assemble log line — worker predates the observability log, or no sections)"
+# RecordSkill fired
+line="$(kubectl logs -n "$NAMESPACE" deploy/abishekk-worker --since=20m 2>/dev/null | grep -F "RecordSkill[$PLAN_ID]:" | tail -1 || true)"
+[ -n "$line" ] && ok "RecordSkill fired: $line" || echo "  NOTE: no RecordSkill log line yet"
 
 exit 0

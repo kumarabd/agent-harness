@@ -13,6 +13,16 @@
 -- Fixed UUIDs (not gen_random_uuid()) so lcm-retrieval.json's scripted
 -- tool-call arguments can reference them literally.
 
+-- Idempotency: the message/summary UUIDs below are fixed literals (so the
+-- scenario JSON can reference them), which means a prior run of this scenario
+-- left them behind under a different {{SESSION_KEY}}. Clear them first so a
+-- standalone re-run doesn't hit messages_pkey. (run_all.sh also runs
+-- cleanup_test_data.sh up front; this covers `run_scenario.sh <name>` alone.)
+DELETE FROM messages WHERE message_id IN (
+  'a0000000-1111-2222-3333-444444444444', 'a0000000-1111-2222-3333-444444444445');
+DELETE FROM context_summaries WHERE summary_id IN (
+  'b0000000-1111-2222-3333-444444444444', 'c0000000-1111-2222-3333-444444444444');
+
 INSERT INTO sessions (session_key, platform, channel_id, system_prompt)
 VALUES ('{{SESSION_KEY}}', 'test', 'test-channel', 'test')
 ON CONFLICT (session_key) DO NOTHING;

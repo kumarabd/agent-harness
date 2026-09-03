@@ -5,9 +5,11 @@
 > live-verified**). Design: **plan-and-execute orchestrator** — a Deliberate
 > task-run is a `PlanWorkflow`, not a ledger the model narrates inside one loop.
 >
-> **Open:** scenario rework (the scenario starter can't script a `PlanWorkflow`'s
-> checkpoint turns); deploy + live-verify; the gateway renders `plan_approval`
-> requests through the kind-agnostic user-input path (no bespoke UI).
+> **Open:** deploy + live-verify; the gateway renders `plan_approval` requests
+> through the kind-agnostic user-input path (no bespoke UI). Scenarios reworked
+> (the starter now scripts checkpoint turns via `checkpoint_responses` /
+> `plan_followup` — see `workflows/scenarios/README.md`), not yet run against a
+> deploy.
 >
 > Parent: [`../request-pipeline.md`](../request-pipeline.md),
 > [`../episode-lifecycle.md`](../episode-lifecycle.md) (why a task-run is the unit).

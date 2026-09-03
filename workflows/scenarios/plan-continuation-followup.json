@@ -1,0 +1,15 @@
+{
+  "_comment": "Second half — run against the SAME session key while plan-continuation-initial's cp2 is still blocked on slow_tool. plan_followup=true: the starter writes this response at <plan_id>:followup:1 and signals the coordinator, which forwards it into the running PlanWorkflow. At the next checkpoint boundary foldInFollowups runs a PlanHandling turn there; it just answers (no re-plan). The point of the pair: the whole thing stays ONE task-run — RecordSkill's prefix-swept trajectory covers the planning turn, both checkpoint turns, AND this follow-up turn, and fires once.",
+  "plan_followup": true,
+  "message": {
+    "role": "user",
+    "content": "While you're in there — make sure the evaluator caches a flag's value for the duration of a request so we're not hitting the config table per check."
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Good call. The evaluation hook resolves each flag once per request and memoises it on the request context, so repeated checks in the same request are free. No config-table round-trip after the first read.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 110, "output_tokens": 40 }
+    }
+  ]
+}

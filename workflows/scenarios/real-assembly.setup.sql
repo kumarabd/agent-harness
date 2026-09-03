@@ -15,6 +15,23 @@
 --
 -- {{SESSION_KEY}} is substituted by run_scenario.sh before this runs.
 
+-- Idempotency: the message/summary UUIDs below are fixed literals, so a prior
+-- run left them behind under a different {{SESSION_KEY}}. Clear them (and any
+-- tool_calls FK'd to them) first so a standalone re-run doesn't hit
+-- messages_pkey. (run_all.sh also runs cleanup_test_data.sh up front; this
+-- covers `run_scenario.sh <name>` alone.)
+DELETE FROM tool_calls WHERE message_id IN (
+  'd1000000-0000-0000-0000-000000000001', 'd1000000-0000-0000-0000-000000000007');
+DELETE FROM messages WHERE message_id IN (
+  'd1000000-0000-0000-0000-000000000000', 'd1000000-0000-0000-0000-000000000001',
+  'd1000000-0000-0000-0000-000000000002', 'd1000000-0000-0000-0000-000000000003',
+  'd1000000-0000-0000-0000-000000000004', 'd1000000-0000-0000-0000-000000000005',
+  'd1000000-0000-0000-0000-000000000006', 'd1000000-0000-0000-0000-000000000007',
+  'd1000000-0000-0000-0000-000000000008', 'd1000000-0000-0000-0000-000000000009',
+  'd1000000-0000-0000-0000-00000000000a', 'd1000000-0000-0000-0000-00000000000b',
+  'd1000000-0000-0000-0000-00000000000c', 'd1000000-0000-0000-0000-00000000000d');
+DELETE FROM context_summaries WHERE summary_id = 'e1000000-0000-0000-0000-000000000000';
+
 INSERT INTO sessions (session_key, platform, channel_id, system_prompt)
 VALUES ('{{SESSION_KEY}}', 'test', 'test-channel', 'You are a helpful engineering assistant. Answer from the conversation so far.')
 ON CONFLICT (session_key) DO NOTHING;

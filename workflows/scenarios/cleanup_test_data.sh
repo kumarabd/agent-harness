@@ -52,3 +52,10 @@ DELETE FROM skill_procedures
 DELETE FROM turns WHERE parent_id LIKE 'test:%' OR turn_id LIKE 'test:%';
 DELETE FROM sessions WHERE session_key LIKE 'test:%';
 SQL
+
+# PLAN.md files + shell_exec workspaces (Phase 3 slice B — the per-run ledger
+# is a file under $SESSION_ROOT/session/<session_key>/, not a table). Both the
+# PV mount (/sessions, once the deployment sets SESSION_ROOT) and the local-dev
+# default (/tmp/agent-harness-sessions) are swept — harmless if either is absent.
+kubectl exec -n "$NAMESPACE" deploy/abishekk-worker -- sh -c \
+  'rm -rf /sessions/session/test:* /tmp/agent-harness-sessions/session/test:* 2>/dev/null' || true

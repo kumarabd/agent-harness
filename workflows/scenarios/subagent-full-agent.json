@@ -1,5 +1,5 @@
 {
-  "_comment": "request-pipeline/08-planning.md, 'Subagents are full agents': the ParentType=='session' gate on steps 2+3 and RecordSkillOutcome was removed. A spawned subagent handed a clearly-complex task should now run ClassifyRequest + RoutingWorkflow itself and, on a moderate/complex task turn, get a skill_candidates row via RecordSkillOutcome — none of which happened for subagents before. The scripted plan_progress in the subagent also exercises turn_plan on a non-root turn_id.",
+  "_comment": "request-pipeline/08-planning.md, 'Subagents are full agents': a spawned subagent handed a clearly-complex task runs ClassifyRequest + RoutingWorkflow itself and, being Deliberate, opens its OWN task-run (turns.plan_id == its own turn_id, openedFresh in turn.go) — a single reason-act loop, no planning/checkpoint turns (that's a top-level PlanWorkflow only). At the subagent turn's end dispatchRecordSkill fires over its trajectory (close_reason turn_end). None of classify / routing / RecordSkill happened for subagents before the ParentType=='session' gate was removed.",
   "message": {
     "role": "user",
     "content": "Have a subagent run a security audit of the auth module while I take the API cleanup."
@@ -17,15 +17,12 @@
               {
                 "content": "Mapping the auth surface first.",
                 "tool_calls": [
-                  { "name": "search", "is_subagent": false, "arguments": { "query": "authentication module login session handling" } },
-                  { "name": "plan_progress", "is_subagent": false, "arguments": { "updates": [
-                    { "checkpoint_id": "audit-1", "intent": "map the auth surface and entry points", "status": "done" }
-                  ] } }
+                  { "name": "search", "is_subagent": false, "arguments": { "query": "authentication module login session handling" } }
                 ],
                 "usage": { "input_tokens": 110, "output_tokens": 30 }
               },
               {
-                "content": "Audit complete — 3 findings: 1 critical (no login rate limit), 2 medium.",
+                "content": "Audit complete — 3 findings: 1 critical (no login rate limit), 2 medium. Prioritized report attached.",
                 "tool_calls": [],
                 "usage": { "input_tokens": 120, "output_tokens": 40 }
               }

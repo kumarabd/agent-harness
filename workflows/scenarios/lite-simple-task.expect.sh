@@ -54,7 +54,7 @@ esac
 [ -z "$(plan_md "$ROOT_TURN_ID")" ] || fail "a PLAN.md exists for this turn — Lite must not seed a plan ledger"
 ok "no plan ledger"
 
-rec="$(pg "SELECT count(*) FROM skill_procedures WHERE source_ids @> '[\"$ROOT_TURN_ID\"]'::jsonb")"
+rec="$(pg "SELECT count(*) FROM skill_procedures WHERE source_ids @> jsonb_build_array('$ROOT_TURN_ID')")"
 [ "${rec:-0}" = "0" ] || fail "a skill_procedures row carries this turn in source_ids — Lite must not record"
 ok "no RL recording"
 

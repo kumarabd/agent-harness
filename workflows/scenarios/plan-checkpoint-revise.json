@@ -1,0 +1,59 @@
+{
+  "_comment": "request-pipeline/08-planning.md — a checkpoint turn re-plans the tail. The planning turn proposes 4 checkpoints [cp1..cp4]. cp1 completes. cp2 completes AND passes revised_tail with 2 new steps -> plan.apply_checkpoint_done drops the still-pending cp3/cp4 and appends the new ones (still cp3/cp4 by position). The PlanWorkflow keeps walking: the new cp3 and cp4 complete. Exercises revised_tail replacing only the pending tail (cp1/cp2 untouched), and PLAN.md ending complete with the REVISED steps.",
+  "message": {
+    "role": "user",
+    "content": "Add end-to-end request tracing across the gateway, the coordinator, and the tenant worker so we can follow one request through all three. Design it, wire it in, and verify a trace shows up."
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Plan drafted.",
+      "tool_calls": [
+        { "name": "propose_plan", "is_subagent": false, "arguments": { "checkpoints": [
+          { "intent": "Pick a tracing library and propagation format", "done_when": "the library and the header format are chosen" },
+          { "intent": "Instrument the gateway ingress", "done_when": "the gateway starts a span and injects the trace header" },
+          { "intent": "Instrument the coordinator", "done_when": "the coordinator continues the span" },
+          { "intent": "Instrument the tenant worker", "done_when": "worker activities continue the span" }
+        ] } }
+      ],
+      "usage": { "input_tokens": 150, "output_tokens": 70 }
+    }
+  ],
+  "checkpoint_responses": [
+    [
+      {
+        "content": "Chose OpenTelemetry with W3C traceparent propagation.",
+        "tool_calls": [ { "name": "checkpoint_done", "is_subagent": false, "arguments": { "checkpoint_id": "cp1", "status": "done" } } ],
+        "usage": { "input_tokens": 100, "output_tokens": 30 }
+      }
+    ],
+    [
+      {
+        "content": "Instrumented the gateway. While wiring it I found the coordinator and the worker both already run inside one Temporal workflow context, so a single shared interceptor covers both instead of two separate passes — revising the rest of the plan.",
+        "tool_calls": [
+          { "name": "checkpoint_done", "is_subagent": false, "arguments": {
+            "checkpoint_id": "cp2", "status": "done",
+            "note": "coordinator + worker share a Temporal context — one interceptor, not two",
+            "revised_tail": [
+              { "intent": "Add one Temporal interceptor that continues the span for both coordinator and worker activities", "done_when": "a workflow + its activities appear under the gateway's trace" },
+              { "intent": "Run a request end-to-end and confirm one trace spans all three services", "done_when": "a single trace id shows gateway + coordinator + worker spans" }
+            ]
+          } } ],
+        "usage": { "input_tokens": 120, "output_tokens": 60 }
+      }
+    ],
+    [
+      {
+        "content": "Added the Temporal interceptor; coordinator and worker spans now nest under the gateway span.",
+        "tool_calls": [ { "name": "checkpoint_done", "is_subagent": false, "arguments": { "checkpoint_id": "cp3", "status": "done" } } ],
+        "usage": { "input_tokens": 100, "output_tokens": 30 }
+      }
+    ],
+    [
+      {
+        "content": "Sent a request through: one trace id, spans for gateway ingress, the coordinator workflow, and three worker activities. Done.",
+        "tool_calls": [ { "name": "checkpoint_done", "is_subagent": false, "arguments": { "checkpoint_id": "cp4", "status": "done" } } ],
+        "usage": { "input_tokens": 100, "output_tokens": 30 }
+      }
+    ]
+  ]
+}

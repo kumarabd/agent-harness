@@ -93,6 +93,13 @@ spec:
             # tenant-specific about where on its own PV this lives.
             - name: TOOL_PERMISSION_LIST_FILE
               value: "/config/permission_list.json"
+            # Root of the session filesystem tree (activities/activities/plan.py's
+            # PLAN.md ledger, activities/activities/tools.py's shell_exec
+            # workspaces). Must match the tenant-data mountPath below — without
+            # this both default to /tmp/agent-harness-sessions (ephemeral,
+            # lost on pod restart, invisible to anything reading the PV).
+            - name: SESSION_ROOT
+              value: "/sessions"
           {{- end }}
           {{- if .Values.llm.enabled }}
             # Real ModelCall calls only (activities/activities/llm.py) —

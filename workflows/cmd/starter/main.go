@@ -54,6 +54,23 @@ type scenarioToolCall struct {
 type scenario struct {
 	Message                types.Message           `json:"message"`
 	ScriptedModelResponses []scenarioModelResponse `json:"scripted_model_responses"`
+	// CheckpointResponses — for a Deliberate (PlanWorkflow) scenario. entry i is
+	// the fixture sequence for the i+1'th checkpoint turn, whose turn_id is
+	// deterministically "<plan_id>:cp:<i+1>" (plan_workflow.go), where plan_id ==
+	// the planning turn's id (this scenario's turn:1). The planning turn's own
+	// response — normally a single `propose_plan` call — is still in
+	// ScriptedModelResponses. Requires the propose_plan to list exactly
+	// len(CheckpointResponses) checkpoints and not set needs_approval.
+	CheckpointResponses [][]scenarioModelResponse `json:"checkpoint_responses"`
+	// PlanFollowup — this scenario's message continues a task-run already in
+	// progress from an earlier chained run against the same session. The
+	// coordinator forwards it to the running PlanWorkflow, which folds it in at
+	// the next checkpoint boundary as a turn "<plan_id>:followup:<n>". The
+	// starter writes ScriptedModelResponses there (n from PlanFollowupN, default
+	// 1) instead of minting a new top-level turn. plan_id = the session's most
+	// recent non-null turns.plan_id.
+	PlanFollowup  bool `json:"plan_followup"`
+	PlanFollowupN int  `json:"plan_followup_n"`
 }
 
 func envOrDefault(key, fallback string) string {
@@ -109,6 +126,35 @@ func main() {
 	// fixture sequence, instead of always minting a new turn_id.
 	var turnID string
 	var startSeq int
+
+	// PlanFollowup: a chained scenario whose message continues a still-running
+	// PlanWorkflow. Target the fold-in turn "<plan_id>:followup:<n>" directly —
+	// the coordinator forwards NewMessage to the plan, which spins that turn up.
+	if sc.PlanFollowup {
+		n := sc.PlanFollowupN
+		if n == 0 {
+			n = 1
+		}
+		// The planning turn IS the plan_id (parent_type='session', its checkpoint
+		// turns hang off it as parent_type='plan'). Grab the latest such turn.
+		var planID string
+		if err := pool.QueryRow(ctx,
+			"SELECT s.turn_id FROM turns s "+
+				"WHERE s.parent_id = $1 AND s.parent_type = 'session' "+
+				"  AND EXISTS (SELECT 1 FROM turns c WHERE c.parent_id = s.turn_id AND c.parent_type = 'plan') "+
+				"ORDER BY s.started_at DESC LIMIT 1",
+			*sessionKey,
+		).Scan(&planID); err != nil {
+			log.Fatalf("plan_followup: no in-progress plan for session %q: %v", *sessionKey, err)
+		}
+		turnID = fmt.Sprintf("%s:followup:%d", planID, n)
+		if err := writeFixtures(ctx, pool, turnID, 0, sc.ScriptedModelResponses); err != nil {
+			log.Fatalf("failed to write plan-followup fixtures for %q: %v", turnID, err)
+		}
+		signalAndReport(ctx, *sessionKey, sc.Message, turnID)
+		return
+	}
+
 	var runningTurnID string
 	err = pool.QueryRow(ctx,
 		"SELECT turn_id FROM turns WHERE parent_id = $1 AND parent_type = 'session' AND status = 'running' "+
@@ -158,6 +204,24 @@ func main() {
 		log.Fatalf("failed to write test fixtures: %v", err)
 	}
 
+	// Deliberate scenario: pre-write each checkpoint turn's fixtures under its
+	// deterministic id "<plan_id>:cp:<n>". These turns don't exist yet — the
+	// PlanWorkflow creates them one per checkpoint after the planning turn's
+	// propose_plan seeds PLAN.md — but their ids are fixed, so the fixtures can
+	// be in place before any of it runs.
+	for i, cpResponses := range sc.CheckpointResponses {
+		cpTurnID := fmt.Sprintf("%s:cp:%d", turnID, i+1)
+		if err := writeFixtures(ctx, pool, cpTurnID, 0, cpResponses); err != nil {
+			log.Fatalf("failed to write checkpoint fixtures for %q: %v", cpTurnID, err)
+		}
+	}
+
+	signalAndReport(ctx, *sessionKey, sc.Message, turnID)
+}
+
+// signalAndReport does the one thing the gateway does after dedup:
+// SignalWithStart against the Session Coordinator (workflow ID = session key).
+func signalAndReport(ctx context.Context, sessionKey string, msg types.Message, expectTurnID string) {
 	c, err := client.Dial(client.Options{
 		HostPort:  envOrDefault("TEMPORAL_ADDRESS", client.DefaultHostPort),
 		Namespace: envOrDefault("TEMPORAL_NAMESPACE", client.DefaultNamespace),
@@ -171,28 +235,26 @@ func main() {
 	// uncommon case is a crash — both need the next SignalWithStart to
 	// succeed (02-architecture-temporal-execution.md §2, "Reuse and crash behavior").
 	opts := client.StartWorkflowOptions{
-		ID:                    *sessionKey,
+		ID:                    sessionKey,
 		TaskQueue:             envOrDefault("TEMPORAL_TASK_QUEUE", "agent-loop"),
 		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
 	}
 
-	payload := types.SignalPayload{Message: sc.Message}
-
 	we, err := c.SignalWithStartWorkflow(
 		ctx,
-		*sessionKey,
+		sessionKey,
 		wf.NewMessageSignalName,
-		payload,
+		types.SignalPayload{Message: msg},
 		opts,
 		wf.CoordinatorWorkflow,
-		wf.CoordinatorInput{SessionKey: *sessionKey},
+		wf.CoordinatorInput{SessionKey: sessionKey},
 	)
 	if err != nil {
 		log.Fatalf("SignalWithStart failed: %v", err)
 	}
 
 	log.Printf("signalled session %q — coordinator run ID %s (workflow ID %s), expecting turn_id %q",
-		*sessionKey, we.GetRunID(), we.GetID(), turnID)
+		sessionKey, we.GetRunID(), we.GetID(), expectTurnID)
 }
 
 // writeFixtures recursively writes scripted responses for turnID, starting at
