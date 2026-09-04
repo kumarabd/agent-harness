@@ -136,12 +136,13 @@ async def main() -> None:
     # record via activity.metric_meter(). Scraped directly (plain
     # prometheus.io/scrape pod annotations — no ServiceMonitor).
     # The SDK's own duration metrics (temporal_activity_execution_latency etc.)
-    # are milliseconds and keep the core default boundaries. Our three
-    # hand-rolled histograms record *seconds* (ModelCall/ToolCall/Classify
-    # measure a provider round-trip, where seconds is the natural unit) — the
-    # ms-oriented default boundaries would collapse every real value into the
-    # first bucket, so widen them by name here. Keep in sync with
-    # metrics.SECONDS_LATENCY_METRICS / LATENCY_BUCKETS_SECONDS.
+    # are milliseconds and keep the core default boundaries. Our hand-rolled
+    # histograms record *seconds* (a provider round-trip, prompt assembly, the
+    # RecordSkill phases, and — via observe_outcome — the MemoryRetrieve /
+    # ToolDiscover / SkillDiscover fan-out) — the ms-oriented default
+    # boundaries would collapse every real value into the first bucket, so
+    # widen them by name here. The list is metrics.SECONDS_LATENCY_METRICS
+    # (single source of truth — this just applies it).
     runtime = Runtime(
         telemetry=TelemetryConfig(
             metrics=PrometheusConfig(

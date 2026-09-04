@@ -1,41 +1,56 @@
 {
-  "_comment": "request-pipeline/08-planning.md, 'Subagents are full agents': a spawned subagent handed a clearly-complex task runs ClassifyRequest + RoutingWorkflow itself and, being Deliberate, opens its OWN task-run (turns.plan_id == its own turn_id, openedFresh in turn.go) — a single reason-act loop, no planning/checkpoint turns (that's a top-level PlanWorkflow only). At the subagent turn's end dispatchRecordSkill fires over its trajectory (close_reason turn_end). None of classify / routing / RecordSkill happened for subagents before the ParentType=='session' gate was removed.",
+  "_comment": "request-pipeline/08-planning.md, 'Subagents are full agents', under plan-and-execute. A clearly-Deliberate top-level task -> PlanWorkflow -> planning turn proposes ONE checkpoint. The checkpoint turn (<turn:1>:cp:1) spawns a subagent handed a clearly-complex sub-task. The subagent runs ClassifyRequest + RoutingWorkflow itself and, being Deliberate, opens its OWN single-turn task-run (turns.plan_id == its own turn_id <turn:1>:cp:1:sub:1, openedFresh in turn.go) — one reason-act loop, no nested planning/checkpoint turns. At the subagent turn's end dispatchRecordSkill fires over its trajectory. None of classify / routing / RecordSkill happened for subagents before the ParentType=='session' gate was removed.",
   "message": {
     "role": "user",
-    "content": "Have a subagent run a security audit of the auth module while I take the API cleanup."
+    "content": "Have a subagent run a full security audit of the auth module while the main line handles the API cleanup, then reconcile the two before we ship."
   },
   "scripted_model_responses": [
     {
-      "content": "Delegating the audit.",
+      "content": "Plan: delegate the audit, do the cleanup, reconcile.",
       "tool_calls": [
-        {
-          "name": "spawn_subagent",
-          "is_subagent": true,
-          "arguments": {
-            "prompt": "Do a thorough security audit of the authentication module: check for injection, broken authentication and session handling, secrets committed in code, and missing rate limiting on the login path. Produce a prioritized findings report with severity for each issue.",
-            "scripted_model_responses": [
-              {
-                "content": "Mapping the auth surface first.",
-                "tool_calls": [
-                  { "name": "search", "is_subagent": false, "arguments": { "query": "authentication module login session handling" } }
-                ],
-                "usage": { "input_tokens": 110, "output_tokens": 30 }
-              },
-              {
-                "content": "Audit complete — 3 findings: 1 critical (no login rate limit), 2 medium. Prioritized report attached.",
-                "tool_calls": [],
-                "usage": { "input_tokens": 120, "output_tokens": 40 }
-              }
-            ]
-          }
-        }
+        { "name": "propose_plan", "is_subagent": false, "arguments": { "checkpoints": [
+          { "intent": "Delegate the auth-module security audit to a subagent and fold its findings into the cleanup", "done_when": "the subagent has delivered a prioritized findings report and the critical items are captured" }
+        ] } }
       ],
-      "usage": { "input_tokens": 100, "output_tokens": 30 }
-    },
-    {
-      "content": "The subagent found a critical rate-limit gap on login. I'll fold that into the cleanup.",
-      "tool_calls": [],
-      "usage": { "input_tokens": 130, "output_tokens": 40 }
+      "usage": { "input_tokens": 130, "output_tokens": 50 }
     }
+  ],
+  "checkpoint_responses": [
+    [
+      {
+        "content": "Delegating the audit.",
+        "tool_calls": [
+          {
+            "name": "spawn_subagent",
+            "is_subagent": true,
+            "arguments": {
+              "prompt": "Do a thorough security audit of the authentication module: check for injection, broken authentication and session handling, secrets committed in code, and missing rate limiting on the login path. Produce a prioritized findings report with severity for each issue.",
+              "scripted_model_responses": [
+                {
+                  "content": "Mapping the auth surface first.",
+                  "tool_calls": [
+                    { "name": "search", "is_subagent": false, "arguments": { "query": "authentication module login session handling" } }
+                  ],
+                  "usage": { "input_tokens": 110, "output_tokens": 30 }
+                },
+                {
+                  "content": "Audit complete — 3 findings: 1 critical (no login rate limit), 2 medium. Prioritized report attached.",
+                  "tool_calls": [],
+                  "usage": { "input_tokens": 120, "output_tokens": 40 }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": { "input_tokens": 100, "output_tokens": 30 }
+      },
+      {
+        "content": "The subagent found a critical rate-limit gap on login; folded into the cleanup. Checkpoint done.",
+        "tool_calls": [
+          { "name": "checkpoint_done", "is_subagent": false, "arguments": { "checkpoint_id": "cp1", "status": "done", "note": "critical: no rate limiting on the login path" } }
+        ],
+        "usage": { "input_tokens": 130, "output_tokens": 40 }
+      }
+    ]
   ]
 }

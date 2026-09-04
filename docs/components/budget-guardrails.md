@@ -69,15 +69,25 @@ call, `max_tokens=1100`). Three gaps fixed:
 - **Semantic outcome was invisible.** The SDK metric shows an activity
   succeeded, not *what it decided*. Added one counter per pre-LLM activity via
   the `observe_outcome` decorator (`activities/metrics.py`):
-  `compose_skill_total` / `memory_retrieve_total` / `tool_discover_total` /
-  `skill_discover_total` (`outcome` = `ok|empty|error`), `open_episode_total`
-  (`outcome` = `opened|attached|superseded|none`), plus
-  `compose_skill_merge_total` (`result` = `merged|passthrough|no_provider|call_failed|unparsed`)
-  so a degraded compose is distinguishable from a real merge. `classify`'s
-  existing latency histogram now also carries the `intent`/`fallback`
-  attributes its counter already had, so classify latency can be sliced by
-  whether it fell back (a fallback both costs latency *and* forces the
-  Deliberate lane).
+  `memory_retrieve_total` / `tool_discover_total` / `skill_discover_total`
+  (`outcome` = `ok|empty|error`; `compose_skill_total` / `open_episode_total`
+  were dropped with ComposeSkill / the episodes table in the plan-and-execute
+  rework). `classify`'s existing latency histogram also carries the
+  `intent`/`fallback` attributes its counter already had, so classify latency
+  can be sliced by whether it fell back (a fallback both costs latency *and*
+  forces the Deliberate lane).
+- **The retrieval fan-out had no usable latency percentiles** (2026-09-03) —
+  `temporal_activity_execution_latency` keeps coarse ms-default buckets (`le`
+  50/100/500/…/60000), so `histogram_quantile` on `MemoryRetrieve` /
+  `ToolDiscover` / `SkillDiscover` is garbage and only the mean is trustworthy;
+  the bucket override can't be applied to that SDK metric without distorting
+  every other SDK duration. Fix: `observe_outcome` now *also* emits a paired
+  `<name>_latency_seconds{outcome}` histogram (`memory_retrieve_latency_seconds`,
+  `tool_discover_latency_seconds`, `skill_discover_latency_seconds`) with the
+  widened `LATENCY_BUCKETS_SECONDS` boundaries — real p50/p95/p99 for the three
+  activities whose serial cost is the turn's time-to-first-token. The name list
+  in `metrics.SECONDS_LATENCY_METRICS` derives these from `_OUTCOME_COUNTERS`,
+  so it's one source of truth for both the decorator and the bucket override.
 - **`prompt_assemble_latency_seconds`** (2026-09-02, second pass) — step 9's
   full context assembly (`prompt.assemble` → `lcm.assemble`), recorded around
   `build_conversation` in `model_call.py`. Only the real ModelCall path
@@ -88,6 +98,18 @@ call, `max_tokens=1100`). Three gaps fixed:
   collapsed `prompt.assemble`'s three `turn_retrieval` reads into one. The
   `real-assembly` scenario is the regression cover — it omits fixtures so its
   ModelCall runs the real assembly against a seeded multi-turn history.
+- **`record_skill_phase_latency_seconds{phase=...}`** (2026-09-03) — RecordSkill
+  is a ~3s activity (`temporal_activity_execution_latency{activity_type="RecordSkill"}`
+  p50 ~= 3s) but a detached ABANDON child (`turn.go`'s `dispatchRecordSkill` only
+  waits for the child to *start*), so it adds nothing to turn latency. This
+  histogram splits it by phase — `gather_reads`, `embed_task`, `reinforce`,
+  `match_or_insert`, `generalize`, `embed_trigger`, `store_write`, `total` — and
+  confirms the cost is almost entirely the `generalize` medium-tier model call
+  (Qwen3-235B, <=1100 output tokens) that fires on a no-match / divergence. Same
+  pass parallelized the independent I/O: the four plan-id-only reads (messages /
+  tool_calls / turn_retrieval / PLAN.md) plus `current_procedures` now run in one
+  `asyncio.gather` instead of serially on one connection, and the `ema_update`
+  reinforce loop is fanned out.
 
 ### Future Scope: Rule-Driven Controlled Stop
 Deliberately not addressed in this pass — parked, not designed:
@@ -100,4 +122,6 @@ Deliberately not addressed in this pass — parked, not designed:
 ### Notes Log
 - 2026-08-16: Introduced as a scaffold, split out as its own component (rather than folded into `components/context-slot.md`) at the user's explicit direction — the focus is producing real metrics first, then a rule-driven controlled stop on top of them, distinct enough from context curation to warrant its own design surface. Grounded in `turn.go`'s current hardcoded stop-condition constants and `temporal-workflow.md`'s existing resolved stop-condition logic, audited the same day — not yet designed.
 - 2026-09-02: Pipeline-phase visibility pass (see "Resolved" section above) — `activities/activities/metrics.py` (new: `observe_outcome` decorator + the seconds-histogram bucket-override list), `tenant_worker.py` (`histogram_bucket_overrides` on `PrometheusConfig`), `observe_outcome` applied to `ComposeSkill`/`MemoryRetrieve`/`SkillDiscover`/`ToolDiscover`/`OpenEpisode`, `compose_skill_merge_total` in `retrieval/compose.py`, `intent`/`fallback` attributes added to `classify_request_latency_seconds`. Latency itself is unchanged — this pass only makes where the ~9s pre-LLM cost goes measurable; the cuts (ComposeSkill retry/timeout, classify fallback root-cause, serial critical path) are the follow-up.
+- 2026-09-03: RecordSkill phase visibility + I/O parallelization — `record_skill_phase_latency_seconds{phase}` histogram (`activities/activities/skills/record.py`, added to `metrics.SECONDS_LATENCY_METRICS` so it gets the seconds buckets). Split the activity's top four plan-id-only reads + `current_procedures` into one `asyncio.gather` (was serial on one pooled connection), fanned out the `ema_update` reinforce loop, and moved `current_procedures` out of `_match_or_insert` (it no longer serializes behind the first embed). `generalize` (the ~2s medium-tier model call) left as-is — it is the real floor and is off the turn's critical path.
+- 2026-09-03: Retrieval fan-out latency histograms — `observe_outcome` (`activities/activities/metrics.py`) now emits a paired `<counter without _total>_latency_seconds{outcome}` histogram alongside its counter, so `MemoryRetrieve` / `ToolDiscover` / `SkillDiscover` get real seconds-bucket percentiles instead of relying on `temporal_activity_execution_latency`'s unusable coarse buckets. `SECONDS_LATENCY_METRICS` derives the three names from a new `_OUTCOME_COUNTERS` tuple — single source of truth for the decorator and `tenant_worker.py`'s bucket override. No behaviour change; `@observe_outcome` still transparent to Temporal registration (verified via `_Definition.from_callable`).
 - 2026-08-22: At the user's explicit direction, scoped this pass to metrics export only (visibility for an external observability system), deferring the rule-driven controlled-stop half entirely to "Future Scope." Resolved the export mechanism as Temporal's own built-in per-SDK metrics handlers (replay-safe, no new activities/Postgres writes, no `GetVersion` gate needed), the concrete metric set on both the Go workflow side and Python activity side, the required per-tenant `namespace` label (since `loop-worker` is shared across tenants), and plain Prometheus scrape annotations (no `ServiceMonitor`) on both charts' worker Deployments.

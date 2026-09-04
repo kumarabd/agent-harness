@@ -85,15 +85,15 @@ SCENARIOS=(
   exploration-summary-json
   exploration-summary-csv
   exploration-summary-text
-  subagent-spawn
-  spawn-subagent-nested-valid
-  spawn-subagent-nested-rejected
   lcm-retrieval
   lcm-grep-nested-fold
   anthropic-basic
   lite-simple-task
   plan-lifecycle
   plan-checkpoint-revise
+  subagent-spawn
+  spawn-subagent-nested-valid
+  spawn-subagent-nested-rejected
   subagent-full-agent
   real-assembly
 )

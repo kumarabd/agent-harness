@@ -1,51 +1,62 @@
 #!/usr/bin/env bash
-# Expectations for spawn-subagent-nested-valid.json — a subagent that
-# delegates further, WITH genuine delegated_scope/kept_work, should succeed
-# at every level: root -> subagent -> grandchild, all real child workflows,
-# all completed.
+# Expectations for spawn-subagent-nested-valid.json — the recursion-
+# termination guard's happy path, under plan-and-execute. A subagent that
+# delegates further WITH genuine delegated_scope/kept_work must succeed at
+# every level: checkpoint turn -> subagent -> grandchild, all real child
+# workflows, all completed.
+#
+# run_scenario.sh has already waited for the planning turn + every checkpoint
+# turn (a checkpoint turn stays 'running' until its whole subagent subtree
+# finishes, so by now the grandchild is terminal too).
 #
 # Called by run_scenario.sh as: expect.sh <session_key> <root_turn_id>
 set -euo pipefail
 
 SESSION_KEY="$1"
-ROOT_TURN_ID="$2"
-SUBAGENT_TURN_ID="${ROOT_TURN_ID}:sub:1"
-GRANDCHILD_TURN_ID="${SUBAGENT_TURN_ID}:sub:1"
+PLAN_ID="$2"
+CP_TURN_ID="${PLAN_ID}:cp:1"
+SUB_TURN_ID="${CP_TURN_ID}:sub:1"
+GRANDCHILD_TURN_ID="${SUB_TURN_ID}:sub:1"
 
-pg_query() {
+pg() {
   kubectl exec -i -n "$NAMESPACE" "$PG_POD" -- sh -c \
     "PGPASSWORD=\$(cat /opt/bitnami/postgresql/secrets/password) psql -U $PG_USER -d $PG_DB -tAc \"$1\""
 }
-
+plan_md() {
+  kubectl exec -n "$NAMESPACE" deploy/abishekk-worker -- \
+    cat "/sessions/session/$SESSION_KEY/plans/${1//:/_}/PLAN.md" 2>/dev/null || true
+}
 fail() { echo "  FAIL: $1"; exit 1; }
 ok() { echo "  ok: $1"; }
 
-root_status="$(pg_query "SELECT status FROM turns WHERE turn_id = '$ROOT_TURN_ID'")"
-[ "$root_status" = "completed" ] || fail "root turn status = '$root_status', expected 'completed'"
-ok "root turn completed"
+[ "$(pg "SELECT status FROM turns WHERE turn_id = '$PLAN_ID'")" = "completed" ] \
+  || fail "planning turn ($PLAN_ID) not completed — did the message classify Lite instead of Deliberate?"
+[ "$(pg "SELECT status FROM turns WHERE turn_id = '$CP_TURN_ID'")" = "completed" ] \
+  || fail "checkpoint turn ($CP_TURN_ID) not completed"
+ok "planning + checkpoint turn completed"
 
-sub_status="$(pg_query "SELECT status FROM turns WHERE turn_id = '$SUBAGENT_TURN_ID'")"
-[ "$sub_status" = "completed" ] || fail "subagent turn ($SUBAGENT_TURN_ID) status = '$sub_status', expected 'completed'"
+sub_status="$(pg "SELECT status FROM turns WHERE turn_id = '$SUB_TURN_ID'")"
+[ "$sub_status" = "completed" ] || fail "first-level subagent turn ($SUB_TURN_ID) status = '$sub_status', expected 'completed'"
 ok "first-level subagent turn completed"
 
-grandchild_status="$(pg_query "SELECT status FROM turns WHERE turn_id = '$GRANDCHILD_TURN_ID'")"
-[ "$grandchild_status" = "completed" ] || fail "grandchild turn ($GRANDCHILD_TURN_ID) status = '$grandchild_status', expected 'completed' — nested delegation with genuine delegated_scope/kept_work should have been dispatched as a real child workflow, not rejected"
+grandchild_status="$(pg "SELECT status FROM turns WHERE turn_id = '$GRANDCHILD_TURN_ID'")"
+[ "$grandchild_status" = "completed" ] || fail "grandchild turn ($GRANDCHILD_TURN_ID) status = '$grandchild_status', expected 'completed' — nested delegation with genuine delegated_scope/kept_work should be dispatched as a real child workflow, not rejected"
 ok "grandchild (nested subagent) turn completed — the guard correctly allowed genuine delegation"
 
-# The subagent's own spawn_subagent call (its tool_calls row, on the
-# subagent's turn) must have been minted as a real subagent dispatch, not
-# rejected — is_subagent=true and a subagent-shaped tool_call_id (the
-# grandchild's turn_id, not an :act: activity ID).
-spawn_row="$(pg_query "SELECT tool_call_id, is_subagent FROM tool_calls WHERE parent_id = '$SUBAGENT_TURN_ID' AND tool_name = 'spawn_subagent'")"
-echo "$spawn_row" | grep -q "$GRANDCHILD_TURN_ID|t" || fail "subagent's spawn_subagent tool_calls row not found or not marked is_subagent=true: '$spawn_row'"
-ok "subagent's nested spawn_subagent call minted as a real subagent dispatch (tool_call_id=$GRANDCHILD_TURN_ID, is_subagent=true)"
+# The subagent's own spawn_subagent call must have been minted as a real
+# subagent dispatch (is_subagent=true, tool_call_id == the grandchild turn_id),
+# not a rejected :act: activity.
+spawn_row="$(pg "SELECT tool_call_id || '|' || is_subagent FROM tool_calls WHERE parent_id = '$SUB_TURN_ID' AND tool_name = 'spawn_subagent'")"
+echo "$spawn_row" | grep -q "^${GRANDCHILD_TURN_ID}|t$" \
+  || fail "subagent's nested spawn_subagent row not a real subagent dispatch: '$spawn_row'"
+ok "subagent's nested spawn_subagent minted as a real subagent dispatch ($spawn_row)"
 
-# The grandchild's real content should be recoverable from tool_calls.result
-# by the time the whole tree is done (SubagentManifest / observation
-# fold-in already ran) — confirms the dispatch produced a real result, not
-# an empty/error placeholder.
-grandchild_result="$(pg_query "SELECT result::text FROM tool_calls WHERE tool_call_id = '$GRANDCHILD_TURN_ID'")"
-[ -n "$grandchild_result" ] && [ "$grandchild_result" != "" ] || fail "grandchild's own tool_calls.result is empty — expected a real manifest/result after completion"
+grandchild_result="$(pg "SELECT COALESCE(result::text,'') FROM tool_calls WHERE tool_call_id = '$GRANDCHILD_TURN_ID'")"
+[ -n "$grandchild_result" ] || fail "grandchild's tool_calls.result is empty — expected a real manifest/result after completion"
 ok "grandchild's tool_calls.result is populated (not empty)"
+
+PLAN="$(plan_md "$PLAN_ID")"
+echo "$PLAN" | grep -qE '^status: complete' || fail "PLAN.md status is not 'complete':\n$PLAN"
+ok "PLAN.md complete"
 
 exit 0

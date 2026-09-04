@@ -129,12 +129,20 @@ In `run_all.sh`:
   the still-pending tail with two new steps; the final PLAN.md keeps cp1/cp2
   (and cp2's note) untouched and carries the *revised* cp3/cp4, all done — not
   the originals, not 6 checkpoints.
-- **`subagent-full-agent`** — a Deliberate subagent opens its **own** task-run
-  (`turns.plan_id == its turn_id`, `openedFresh`), runs its own
-  `RoutingWorkflow`, and `dispatchRecordSkill` fires for it at turn end — a
-  single reason-act loop, no planning/checkpoint turns (those are top-level
-  only). None of classify / routing / record happened for subagents before the
-  `ParentType=='session'` gate came off.
+- **`subagent-spawn`**, **`spawn-subagent-nested-valid`**,
+  **`spawn-subagent-nested-rejected`**, **`subagent-full-agent`** — all four are
+  now plan scenarios: the top-level message is clearly Deliberate, so the spawn
+  happens inside the plan's **one checkpoint turn** (`<plan>:cp:1`), not a
+  planning turn (which is one-shot and would never dispatch it). The subagent
+  turn_id is therefore `<plan>:cp:1:sub:1`, a nested spawn's grandchild
+  `<plan>:cp:1:sub:1:sub:1`. `subagent-spawn` is the minimal spawn-plumbing
+  case (the regression the `caller_is_subagent` `NameError` once broke);
+  `spawn-subagent-nested-*` are the recursion-termination guard (below);
+  `subagent-full-agent` additionally asserts the spawned subagent, being
+  Deliberate, opens its **own** single-turn task-run (`turns.plan_id == its
+  turn_id`, `openedFresh`), runs its own `RoutingWorkflow`, and gets a
+  `dispatchRecordSkill` at turn end — no *nested* planning/checkpoint turns
+  (a Deliberate subagent is one reason-act loop, not a `PlanWorkflow`).
 - **`lite-simple-task`** — the Lite lane: a simple task → plain `TurnWorkflow`,
   `turns.plan_id` NULL, memory-only retrieval, no PLAN.md, no `RecordSkill`.
   Its `expect.sh` reads the classify log line and **skips** (not fails) if the
@@ -167,18 +175,20 @@ workflows/scenarios/run_scenario.sh plan-continuation-followup "$KEY"
 `superpowers-b/` remains the broader live eval (a real teaching conversation,
 no scripting).
 
-## Coverage added 2026-08-29
+## Coverage added 2026-08-29 (rewritten 2026-09-03 for plan-and-execute)
 
 `spawn-subagent-nested-valid.json` / `spawn-subagent-nested-rejected.json`
 — the recursion-termination guard (`components/temporal-workflow.md`,
 "Resolved: Recursion Termination Guard"): a subagent delegating to a
 further subagent with genuine `delegated_scope`/`kept_work` succeeds
-end-to-end (root → subagent → grandchild, all real child workflows); one
-without them is rejected at mint time (no child workflow ever starts,
-durably recorded as a real tool_calls error) and — the real bug this suite
-caught while being built — the subagent correctly loops back for a
-follow-up step to react to the rejection rather than silently ending its
-turn (the `has_tool_calls` fix, see the same Notes Log entry).
+end-to-end (`<plan>:cp:1` → `:sub:1` → `:sub:1:sub:1`, all real child
+workflows); one without them is rejected at mint time (no child workflow
+ever starts, durably recorded as a real tool_calls error) and — the real
+bug this suite caught while being built — the subagent correctly loops back
+for a follow-up step to react to the rejection rather than silently ending
+its turn (the `has_tool_calls` fix, see the same Notes Log entry). The spawn
+originates from the plan's one checkpoint turn — a top-level Deliberate
+message is a `PlanWorkflow`, and its planning turn is one-shot.
 
 `lcm-retrieval.json` (+ `.setup.sql`) — `lcm_grep`/`lcm_describe`/
 `lcm_expand` (`components/context-slot.md`'s Memory-Access Tools) against a
@@ -186,7 +196,8 @@ pre-seeded, already-folded two-level summary DAG, exercising the real
 `TOOL_REGISTRY`-dispatched handler code path end to end, including the
 `folded_into` chain resolution.
 
-`subagent-spawn.expect.sh` — added for the pre-existing scenario; this is
+`subagent-spawn.expect.sh` — the minimal spawn-plumbing case; this is
 exactly what the `caller_is_subagent` `NameError` (found and fixed the same
 day, alongside the guard above) would have caught immediately instead of
-silently shipping to a live deploy.
+silently shipping to a live deploy. Now a plan scenario (see the
+plan-and-execute section) — the spawn is in the one checkpoint turn.

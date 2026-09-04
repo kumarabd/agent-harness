@@ -1,40 +1,56 @@
 {
+  "_comment": "Basic subagent-spawn plumbing under plan-and-execute (request-pipeline/08-planning.md). The message is a clearly multi-step engineering task, so dispatch.go routes it to a PlanWorkflow. turn:1 is the PLANNING turn -> propose_plan with ONE checkpoint (no needs_approval). The single checkpoint turn (<turn:1>:cp:1) spawns a subagent via nested scripted_model_responses, folds its result back, then calls checkpoint_done. This is the exact fixture shape the caller_is_subagent NameError once broke (ANY spawn crashed ModelCall); it also proves a checkpoint turn can dispatch a real subagent child workflow (turn_id <turn:1>:cp:1:sub:1) and the plan still completes.",
   "message": {
     "role": "user",
-    "content": "delegate a subtask and then wrap up"
+    "content": "Delegate a dependency audit of the payments module to a subagent, then summarize what it found and note any follow-up work."
   },
   "scripted_model_responses": [
     {
-      "content": "I'll delegate this to a subagent.",
+      "content": "Plan: delegate the audit, then summarize.",
       "tool_calls": [
-        {
-          "name": "spawn_subagent",
-          "is_subagent": true,
-          "arguments": {
-            "prompt": "research the subtopic",
-            "scripted_model_responses": [
-              {
-                "content": "Researching...",
-                "tool_calls": [
-                  { "name": "search", "arguments": { "query": "subtopic" }, "is_subagent": false }
-                ],
-                "usage": { "input_tokens": 80, "output_tokens": 30 }
-              },
-              {
-                "content": "Subagent research complete.",
-                "tool_calls": [],
-                "usage": { "input_tokens": 90, "output_tokens": 20 }
-              }
-            ]
-          }
-        }
+        { "name": "propose_plan", "is_subagent": false, "arguments": { "checkpoints": [
+          { "intent": "Delegate the dependency audit to a subagent and capture its findings", "done_when": "the subagent has reported back and the findings plus any follow-up work are recorded" }
+        ] } }
       ],
-      "usage": { "input_tokens": 100, "output_tokens": 40 }
-    },
-    {
-      "content": "Wrapping up now that the subagent is done.",
-      "tool_calls": [],
-      "usage": { "input_tokens": 120, "output_tokens": 30 }
+      "usage": { "input_tokens": 130, "output_tokens": 50 }
     }
+  ],
+  "checkpoint_responses": [
+    [
+      {
+        "content": "Delegating the dependency audit to a subagent.",
+        "tool_calls": [
+          {
+            "name": "spawn_subagent",
+            "is_subagent": true,
+            "arguments": {
+              "prompt": "Audit the payments module's third-party dependencies for known CVEs and unpinned versions.",
+              "scripted_model_responses": [
+                {
+                  "content": "Scanning the dependency manifest.",
+                  "tool_calls": [
+                    { "name": "search", "is_subagent": false, "arguments": { "query": "payments module dependency manifest versions" } }
+                  ],
+                  "usage": { "input_tokens": 80, "output_tokens": 30 }
+                },
+                {
+                  "content": "Audit complete: one unpinned transitive dependency, no known CVEs.",
+                  "tool_calls": [],
+                  "usage": { "input_tokens": 90, "output_tokens": 20 }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": { "input_tokens": 110, "output_tokens": 40 }
+      },
+      {
+        "content": "Subagent reported back: one unpinned transitive dependency to pin as follow-up. Audit checkpoint done.",
+        "tool_calls": [
+          { "name": "checkpoint_done", "is_subagent": false, "arguments": { "checkpoint_id": "cp1", "status": "done", "note": "follow-up: pin the unpinned transitive dependency" } }
+        ],
+        "usage": { "input_tokens": 100, "output_tokens": 30 }
+      }
+    ]
   ]
 }

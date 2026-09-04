@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 # Expectations for subagent-full-agent.json — request-pipeline/08-planning.md,
-# "Subagents are full agents".
+# "Subagents are full agents", under plan-and-execute.
 #
-# The subagent turn ({root}:sub:1) runs the pre-LLM pipeline itself:
-#   - its own RoutingWorkflow child ({subagent}:routing) executes
-#   - being Deliberate it opens its own task-run: turns.plan_id == its turn_id
+# The subagent is spawned from the one checkpoint turn (<plan>:cp:1), so its
+# turn_id is <plan>:cp:1:sub:1. It runs the pre-LLM pipeline itself:
+#   - its own RoutingWorkflow child (<sub>:routing) executes
+#   - being Deliberate it opens its own single-turn task-run: plan_id == its
+#     turn_id (openedFresh, turn.go) — NOT a nested PlanWorkflow
 #   - dispatchRecordSkill fires for it -> a skill_procedures row in source_ids
 #     (this NEVER happened for subagents before the gate removal)
+#
+# run_scenario.sh has already waited for the planning turn + every checkpoint
+# turn (a checkpoint turn stays 'running' until its subagent subtree finishes).
 #
 # Called by run_scenario.sh as: expect.sh <session_key> <root_turn_id>
 set -euo pipefail
 
 SESSION_KEY="$1"
-ROOT_TURN_ID="$2"
-SUB_TURN_ID="${ROOT_TURN_ID}:sub:1"
+PLAN_ID="$2"
+CP_TURN_ID="${PLAN_ID}:cp:1"
+SUB_TURN_ID="${CP_TURN_ID}:sub:1"
 
 pg() {
   kubectl exec -i -n "$NAMESPACE" "$PG_POD" -- sh -c \
@@ -31,16 +37,23 @@ poll_for() { # <sql count> <min> <label> <tries>
   fail "$label — got '${v:-<none>}', expected >= $min after ${tries}s"
 }
 
-root_status="$(pg "SELECT status FROM turns WHERE turn_id = '$ROOT_TURN_ID'")"
-[ "$root_status" = "completed" ] || fail "root turn status = '$root_status', expected 'completed'"
+[ "$(pg "SELECT status FROM turns WHERE turn_id = '$PLAN_ID'")" = "completed" ] \
+  || fail "planning turn ($PLAN_ID) not completed — did the message classify Lite instead of Deliberate?"
+[ "$(pg "SELECT status FROM turns WHERE turn_id = '$CP_TURN_ID'")" = "completed" ] \
+  || fail "checkpoint turn ($CP_TURN_ID) not completed"
 sub_status="$(pg "SELECT status FROM turns WHERE turn_id = '$SUB_TURN_ID'")"
 [ "$sub_status" = "completed" ] || fail "subagent turn ($SUB_TURN_ID) status = '$sub_status', expected 'completed'"
-ok "root and subagent turns both completed"
+ok "planning + checkpoint + subagent turns all completed"
 
-# --- the subagent opened its own task-run (Deliberate) ---
+# --- the subagent opened its own task-run (Deliberate, openedFresh) ---
 sub_plan="$(pg "SELECT COALESCE(plan_id,'') FROM turns WHERE turn_id = '$SUB_TURN_ID'")"
 [ "$sub_plan" = "$SUB_TURN_ID" ] || fail "subagent turns.plan_id = '$sub_plan', expected its own turn_id (openedFresh) — did it classify Lite?"
 ok "subagent opened its own task-run (turns.plan_id == turn_id)"
+
+# --- it is a single reason-act loop, not a nested PlanWorkflow ---
+nested_cp="$(pg "SELECT count(*) FROM turns WHERE parent_id = '$SUB_TURN_ID' AND parent_type = 'plan'")"
+[ "${nested_cp:-0}" = "0" ] || fail "subagent spawned $nested_cp nested checkpoint turn(s) — a Deliberate subagent is a single-turn task-run, not a PlanWorkflow"
+ok "subagent ran a single reason-act loop (no nested checkpoint turns)"
 
 # --- steps 2+3 ran for the subagent: its RoutingWorkflow child executed ---
 if command -v temporal >/dev/null 2>&1; then

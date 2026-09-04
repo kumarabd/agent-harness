@@ -1,46 +1,62 @@
 {
+  "_comment": "Recursion-termination guard, rejection path (components/temporal-workflow.md, 'Resolved: Recursion Termination Guard'), under plan-and-execute. A clearly-Deliberate research task -> PlanWorkflow -> planning turn proposes ONE checkpoint. The checkpoint turn (<turn:1>:cp:1) spawns a subagent; that subagent tries to hand its ENTIRE task to a further subagent with no delegated_scope/kept_work -> rejected at mint time (no <turn:1>:cp:1:sub:1:sub:1 child workflow ever starts, durably recorded as a tool_calls error). The has_tool_calls fix: the subagent must loop back for a follow-up reasoning step to react to the rejection rather than silently ending its turn.",
   "message": {
     "role": "user",
-    "content": "Please research this topic thoroughly and delegate as needed."
+    "content": "Research our options for the new caching layer end to end: have a subagent do the literature review while it keeps the synthesis for itself, then give me a recommendation."
   },
   "scripted_model_responses": [
     {
-      "content": "I'll delegate this to a subagent.",
+      "content": "Plan: delegate the research, keep the recommendation.",
       "tool_calls": [
-        {
-          "name": "spawn_subagent",
-          "is_subagent": true,
-          "arguments": {
-            "prompt": "Handle the outer research task.",
-            "scripted_model_responses": [
-              {
-                "content": "I'll hand this whole thing off to a further subagent.",
-                "tool_calls": [
-                  {
-                    "name": "spawn_subagent",
-                    "is_subagent": true,
-                    "arguments": {
-                      "prompt": "Do the entire research task for me."
-                    }
-                  }
-                ],
-                "usage": { "input_tokens": 90, "output_tokens": 35 }
-              },
-              {
-                "content": "Understood — that delegation was rejected since I wasn't keeping any work for myself. Performing the task directly instead.",
-                "tool_calls": [],
-                "usage": { "input_tokens": 110, "output_tokens": 30 }
-              }
-            ]
-          }
-        }
+        { "name": "propose_plan", "is_subagent": false, "arguments": { "checkpoints": [
+          { "intent": "Delegate the caching-layer research to a subagent and turn its output into a recommendation", "done_when": "the subagent has reported back and a recommendation is written" }
+        ] } }
       ],
-      "usage": { "input_tokens": 100, "output_tokens": 40 }
-    },
-    {
-      "content": "Delegation chain complete, work is done.",
-      "tool_calls": [],
-      "usage": { "input_tokens": 120, "output_tokens": 30 }
+      "usage": { "input_tokens": 130, "output_tokens": 50 }
     }
+  ],
+  "checkpoint_responses": [
+    [
+      {
+        "content": "Delegating the research to a subagent.",
+        "tool_calls": [
+          {
+            "name": "spawn_subagent",
+            "is_subagent": true,
+            "arguments": {
+              "prompt": "Handle the outer caching-layer research task.",
+              "scripted_model_responses": [
+                {
+                  "content": "I'll hand this whole thing off to a further subagent.",
+                  "tool_calls": [
+                    {
+                      "name": "spawn_subagent",
+                      "is_subagent": true,
+                      "arguments": {
+                        "prompt": "Do the entire caching-layer research task for me."
+                      }
+                    }
+                  ],
+                  "usage": { "input_tokens": 90, "output_tokens": 35 }
+                },
+                {
+                  "content": "Understood — that delegation was rejected since I wasn't keeping any work for myself. Performing the task directly instead.",
+                  "tool_calls": [],
+                  "usage": { "input_tokens": 110, "output_tokens": 30 }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": { "input_tokens": 110, "output_tokens": 40 }
+      },
+      {
+        "content": "Subagent completed the research directly after its nested delegation was rejected. Checkpoint done.",
+        "tool_calls": [
+          { "name": "checkpoint_done", "is_subagent": false, "arguments": { "checkpoint_id": "cp1", "status": "done" } }
+        ],
+        "usage": { "input_tokens": 100, "output_tokens": 30 }
+      }
+    ]
   ]
 }
