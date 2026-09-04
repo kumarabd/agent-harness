@@ -1039,7 +1039,7 @@ loop:
 	// TurnWorkflow reaching here (ParentType "session") is Lite and records
 	// nothing.
 	if planID != "" && input.ParentType == "turn" {
-		dispatchRecordSkill(ctx, planID, taskRep, "turn_end")
+		dispatchRecordSkill(ctx, planID, taskRep, stopReason, "turn_end")
 	}
 
 	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "interrupted_during_delivery", interruptedPayload != nil)
@@ -1051,7 +1051,19 @@ loop:
 // workflow; ALLOW_DUPLICATE so a later path can re-attempt. Intent/complexity/
 // closeReason are passed in — there is no `episodes` row to read them from
 // (decision B).
-func dispatchRecordSkill(ctx workflow.Context, planID string, task types.TaskRepresentation, closeReason string) {
+//
+// stopReason and closeReason are genuinely different things record.py reads
+// separately: stopReason is a single TurnWorkflow's own loop-exit reason
+// ("no_tool_calls" | "max_iterations" | ...), which record.py's clean-stop
+// check needs verbatim; closeReason is the coarser reason the task-run as a
+// whole ended ("plan_complete" | "superseded" | "turn_end" | ""). A bare
+// subagent turn (turn.go's call site) has both. A PlanWorkflow's root close
+// (plan_workflow.go's call site) swept a whole tree of turns, so no single
+// loop-exit reason applies — it passes "", and record.py never reaches its
+// stopReason check for any closeReason a PlanWorkflow sends (short-circuits
+// on "plan_complete", falls to the failure branch otherwise), so the empty
+// value is inert there, not a fallback being relied on.
+func dispatchRecordSkill(ctx workflow.Context, planID string, task types.TaskRepresentation, stopReason string, closeReason string) {
 	rcwo := workflow.ChildWorkflowOptions{
 		WorkflowID:            planID + ":record-skill",
 		ParentClosePolicy:     enumspb.PARENT_CLOSE_POLICY_ABANDON,
@@ -1060,7 +1072,7 @@ func dispatchRecordSkill(ctx workflow.Context, planID string, task types.TaskRep
 	rcctx := workflow.WithChildOptions(ctx, rcwo)
 	rf := workflow.ExecuteChildWorkflow(rcctx, RecordSkillWorkflow, types.RecordSkillInput{
 		PlanID:      planID,
-		StopReason:  closeReason,
+		StopReason:  stopReason,
 		Intent:      task.Intent,
 		Complexity:  task.Complexity,
 		CloseReason: closeReason,

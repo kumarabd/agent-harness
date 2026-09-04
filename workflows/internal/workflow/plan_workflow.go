@@ -429,7 +429,7 @@ func finishPlan(ctx workflow.Context, input types.PlanWorkflowInput, task types.
 		return // nested — the parent owns close-out
 	}
 	// Root: the task-run *is* this tree — nothing else to close (decision B).
-	dispatchRecordSkill(ctx, input.PlanID, task, closeReason)
+	dispatchRecordSkill(ctx, input.PlanID, task, "", closeReason)
 	if err := workflow.SignalExternalWorkflow(ctx, input.SessionKey, "", PlanDoneSignalName, input.PlanID).Get(ctx, nil); err != nil {
 		logger.Warn("failed to signal coordinator PlanDone", "plan_id", input.PlanID, "error", err)
 	}
