@@ -185,7 +185,7 @@ func compressionState(contextTokens, contextWindow int) string {
 // synthetic error message insert fails its FK against turns(turn_id) and the
 // Persist/Deliver calls become harmless no-ops — there's nothing more
 // meaningful to do when the turn never existed in the first place.
-func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, parentType string, cause error, interrupts *deliveryInterruptSource) (types.TurnResult, error) {
+func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, parentType string, cause error, interrupts *deliveryInterruptSource, planID string) (types.TurnResult, error) {
 	logger := workflow.GetLogger(ctx)
 	logger.Error("turn failed", "turn_id", turnID, "error", cause)
 
@@ -197,7 +197,7 @@ func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, par
 		Message: types.Message{Role: "assistant", Content: "Something went wrong processing this turn."},
 	}
 	_ = workflow.ExecuteActivity(actx, "InsertMessage", errInsert).Get(actx, nil)
-	_ = workflow.ExecuteActivity(actx, "Persist", turnID, "failed").Get(actx, nil)
+	_ = workflow.ExecuteActivity(actx, "Persist", turnID, "failed", planID).Get(actx, nil)
 	if parentType == "session" {
 		_ = workflow.ExecuteActivity(actx, "Deliver", turnID).Get(actx, nil)
 		if payload := deliverConnectionBased(ctx, interrupts, sessionKey, connectionID, turnID); payload != nil {
@@ -564,7 +564,7 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 			PlanID:      input.PlanID,
 		}
 		if err := workflow.ExecuteActivity(actx, "InsertMessage", insertInput).Get(actx, nil); err != nil {
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, nil)
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, nil, "")
 		}
 	}
 
@@ -627,7 +627,7 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 		}
 		cactx := workflow.WithActivityOptions(ctx, cao)
 		if err := workflow.ExecuteActivity(cactx, "ClassifyRequest", types.ClassifyRequestInput{TurnID: input.TurnID}).Get(cactx, &taskRep); err != nil {
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, "")
 		}
 	}
 	logger.Info("request classified", "turn_id", input.TurnID, "parent_type", input.ParentType, "intent", taskRep.Intent, "complexity", taskRep.Complexity, "confidence", taskRep.Confidence, "planning", input.PlanningMode)
@@ -663,7 +663,7 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 			seedPlanID = planID
 		}
 		if _, err := startRouting(ctx, seedPlanID, input.TurnID, parentTurnID, taskRep, &pendingMessages); err != nil {
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, planID)
 		}
 	}
 
@@ -735,7 +735,7 @@ loop:
 		}
 		if mcErr != nil {
 			cancel()
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, mcErr, interrupts)
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, mcErr, interrupts, planID)
 		}
 		contextSeq++
 		hintModality, hintTier = mcOut.NextHintModality, mcOut.NextHintTier
@@ -956,7 +956,7 @@ loop:
 			iactx := workflow.WithActivityOptions(ctx, iao)
 			insertInput := types.InsertMessageInput{TurnID: input.TurnID, Message: next.Message}
 			if err := workflow.ExecuteActivity(iactx, "InsertMessage", insertInput).Get(iactx, nil); err != nil {
-				return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+				return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, planID)
 			}
 
 			// A mid-turn follow-up lands in the conversation (InsertMessage
@@ -1002,7 +1002,13 @@ loop:
 	{
 		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 		actx := workflow.WithActivityOptions(ctx, ao)
-		_ = workflow.ExecuteActivity(actx, "Persist", input.TurnID, "completed").Get(actx, nil)
+		// planID: "" for a Lite turn or a checkpoint/planning turn (InsertMessage
+		// already wrote the right value at turn start); the subagent's own
+		// fresh task-run id for openedFresh (only known after task-run
+		// resolution above, too late for that earlier write — Persist's
+		// plan_id arg is a no-op unless it's non-empty, so passing it
+		// unconditionally here is safe for every other case).
+		_ = workflow.ExecuteActivity(actx, "Persist", input.TurnID, "completed", planID).Get(actx, nil)
 	}
 	// docs/components/memory-slot.md's "Resolved: Write-Path Construction"
 	// correction (2026-08-29): WriteMemory no longer dispatches here, once

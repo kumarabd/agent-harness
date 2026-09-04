@@ -46,8 +46,12 @@ ok "grandchild (nested subagent) turn completed — the guard correctly allowed 
 # The subagent's own spawn_subagent call must have been minted as a real
 # subagent dispatch (is_subagent=true, tool_call_id == the grandchild turn_id),
 # not a rejected :act: activity.
+# Postgres's `||` implicitly casts a boolean operand to the full word
+# ("true"/"false"), not the "t"/"f" a bare `SELECT is_subagent` renders as
+# (verified directly against this cluster) — matches spawn-subagent-nested-
+# rejected.expect.sh's own `\|false\|error$`, this just wrongly expected "t".
 spawn_row="$(pg "SELECT tool_call_id || '|' || is_subagent FROM tool_calls WHERE parent_id = '$SUB_TURN_ID' AND tool_name = 'spawn_subagent'")"
-echo "$spawn_row" | grep -q "^${GRANDCHILD_TURN_ID}|t$" \
+echo "$spawn_row" | grep -q "^${GRANDCHILD_TURN_ID}|true$" \
   || fail "subagent's nested spawn_subagent row not a real subagent dispatch: '$spawn_row'"
 ok "subagent's nested spawn_subagent minted as a real subagent dispatch ($spawn_row)"
 
