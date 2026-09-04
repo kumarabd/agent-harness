@@ -1,8 +1,21 @@
 {
-  "_comment": "Forces the real (non-fixture) ModelCall path, like real-assembly.json, but to exercise per-task tool resolution (docs/components/tool-registry.md, 'Resolved: Three-Layer Tool Taxonomy & Per-Task Resolution') instead of prompt assembly. resolved-tool-dispatch.setup.sql pre-seeds a turn_retrieval 'tool' row as if ToolDiscover had found a real 'demo/echo' mcp-hub tool; capabilities.mint_resolved turns it into a directly-callable 'echo' function schema (tools_schema_for) alongside the always-present shell_exec/search_tools -- call_tool is no longer in the schema at all. A real model explicitly told to use 'echo' should call it BY NAME. expect.sh checks the resulting tool_calls row has resolved_server='demo'/resolved_tool='echo', proving the whole pipeline (seed -> mint_resolved -> schema_for -> real model call -> ModelCall's mint-time resolution -> ToolCall's internal call_tool proxy) ran end to end.",
+  "_comment": "Fully fixture-scripted (no real LLM call, no setup.sql) -- exercises the MID-TURN half of per-task tool resolution (docs/components/tool-registry.md, 'Resolved: Three-Layer Tool Taxonomy & Per-Task Resolution'). A scripted response's tool_calls still dispatch for REAL (fixtures only script the model's own text/tool_calls, never the handler), so search_tools' real handler runs and tools._persist_discovered should write whatever it found into turn_retrieval under THIS turn's own id -- the same table ToolDiscover's pre-turn scan writes to, and the same one prompt.assemble/tools_schema_for re-read fresh on the turn's next ModelCall. That's what lets the model invoke a mid-turn discovery by name on its next step now that call_tool is no longer in its schema at all. Pre-seeding this via setup.sql was tried and reverted: turns.status only allows running/completed/cancelled/failed (no neutral 'not started yet' value), and cmd/starter treats any pre-existing status='running' row as an ALREADY-ACTIVE turn, routing the scenario's message as a follow-up instead of a fresh turn start -- so seeding happens for real, mid-turn, via the tool call itself instead.",
   "message": {
     "role": "user",
-    "content": "You have a tool called 'echo' available to you right now. Call it immediately with text set to 'hello-from-resolved-tool-scenario' -- do not search for it, do not ask which server it's on, just call it by name -- then tell me what it echoed back."
+    "content": "Find me a tool that can search or list things."
   },
-  "scripted_model_responses": []
+  "scripted_model_responses": [
+    {
+      "content": "Let me look for something that fits.",
+      "tool_calls": [
+        { "name": "search_tools", "is_subagent": false, "arguments": { "query": "search or list files and information", "top_k": 5 } }
+      ],
+      "usage": { "input_tokens": 40, "output_tokens": 15 }
+    },
+    {
+      "content": "Found a few options that could help with that.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 60, "output_tokens": 15 }
+    }
+  ]
 }

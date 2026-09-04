@@ -105,15 +105,27 @@ _SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"
 # tier hinting depends on it), and platform_prompts.go's own
 # voiceSystemPromptText copies this exact sentence verbatim, so it has to
 # keep matching byte-for-byte.
+# 2026-09-04 revision (tool-registry.md, "Resolved: Three-Layer Tool
+# Taxonomy & Per-Task Resolution") — call_tool left the model-facing schema
+# (a resolved tool is offered under its own name, callable directly), and the
+# prior wording ("search_tools/call_tool to discover and invoke") went stale
+# alongside it: a real run against this exact instruction produced a model
+# stuck calling lcm_grep a dozen times with empty content and no answer,
+# hunting for a call_tool it could never validly select from its own tool
+# list. Rewritten to match what's actually offered: shell_exec + whatever
+# tools are already directly callable this turn, plus search_tools for
+# anything not already offered — found results become callable by name on
+# the NEXT step, not this one.
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful, general-purpose personal assistant with real tools — not limited to "
-    "coding tasks. You have direct shell access (shell_exec) for local/system tasks, and "
-    "search_tools/call_tool to discover and invoke whatever broader real capabilities this "
-    "deployment has registered — third-party APIs and services beyond the shell, specific to "
-    "this environment. Use memory_search (and memory_expand for full detail) to recall relevant "
-    "context from past conversations when it's genuinely useful, not on every turn. After using "
-    "a tool, summarize the result in plain text for the user rather than leaving it as raw "
-    "output. "
+    "coding tasks. You have direct shell access (shell_exec) for local/system tasks. Any other "
+    "capability already relevant to this task is offered directly, callable by its own name — "
+    "call it like any other tool, there is no extra step. If you need something not already "
+    "offered, call search_tools to look for it; a match becomes directly callable by name on "
+    "your NEXT step, not this one, so don't expect to invoke it in the same response that found "
+    "it. Use memory_search (and memory_expand for full detail) to recall relevant context from "
+    "past conversations when it's genuinely useful, not on every turn. After using a tool, "
+    "summarize the result in plain text for the user rather than leaving it as raw output. "
     f"Every response, also call {_NEXT_STEP_HINT_TOOL_NAME} alongside anything "
     "else you call, declaring what the next step needs."
 )
@@ -255,15 +267,20 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "search_tools",
-            # Description mirrors mcp-hub's own real search_tools tool
-            # description, plus a note about the shell-hub fan-out (this
-            # project's own addition, not mcp-hub's).
+            # Rewritten 2026-09-04 alongside DEFAULT_SYSTEM_PROMPT — call_tool
+            # is no longer a tool the model can select at all (tool-registry.md,
+            # "Resolved: Three-Layer Tool Taxonomy & Per-Task Resolution");
+            # telling it to "use call_tool" here left it with no valid way to
+            # act on its own search results. A match this call surfaces is
+            # bound (tools._persist_discovered) and offered directly, by its
+            # own name, starting the turn's NEXT step.
             "description": (
                 "Semantically search the tools available across all registered MCP "
-                "backends, plus locally-available shell/CLI capabilities. Returns "
-                "candidates with a server, tool name, description, and input schema. "
-                "Use call_tool to invoke an mcp-hub result (server != \"shell\"), or "
-                "shell_exec directly to invoke a shell result (server == \"shell\")."
+                "backends, plus locally-available shell/CLI capabilities, for something not "
+                "already offered to you directly. Returns candidates with a server, tool name, "
+                "description, and input schema — for your own awareness of what exists. A match "
+                "becomes directly callable by its own tool name (or shell_exec, for a shell "
+                "result) starting your NEXT step, not this one."
             ),
             "parameters": {
                 "type": "object",

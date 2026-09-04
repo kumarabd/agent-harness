@@ -17,17 +17,24 @@ verification from scratch every time.
 > are exactly what the newer scenarios verify.
 >
 > The reason-act model calls are still fixture-scripted in every scenario
-> **except `real-assembly` and `resolved-tool-dispatch`**, which deliberately
-> omit fixtures so their one ModelCall runs for real. `real-assembly` exercises
-> step 9 (`prompt.assemble` → `lcm.assemble`) against a seeded multi-turn
-> history — the assembly path every real turn takes and every other scenario
-> short-circuits; it's the only place `prompt_assemble_latency_seconds` comes
-> from. `resolved-tool-dispatch` (docs/components/tool-registry.md, "Resolved:
-> Three-Layer Tool Taxonomy & Per-Task Resolution") exercises per-task tool
-> resolution against a seeded `turn_retrieval` row, checking a real model calls
-> the resolved tool **by name** (not `search_tools`/`call_tool`) and that
-> `ModelCall` mints the right `resolved_server`/`resolved_tool` for `ToolCall`
-> to route on. Two extra real fast-tier calls total.
+> **except `real-assembly`**, which deliberately omits fixtures so its one
+> ModelCall runs step 9 (`prompt.assemble` → `lcm.assemble`) for real
+> against a seeded multi-turn history — the assembly path every real turn
+> takes and every other scenario short-circuits. One extra real fast-tier
+> call; it's the only place `prompt_assemble_latency_seconds` comes from.
+>
+> `resolved-tool-dispatch` (docs/components/tool-registry.md, "Resolved:
+> Three-Layer Tool Taxonomy & Per-Task Resolution") stays fully
+> fixture-scripted — a scripted response's `tool_calls` still dispatch for
+> real, so it scripts a `search_tools` call and checks the real handler's
+> `_persist_discovered` wrote what it found into `turn_retrieval` under the
+> turn's own id, the mechanism that lets a mid-turn discovery be called by
+> name on the turn's next step now that `call_tool` isn't in the schema at
+> all. (Pre-seeding a resolved row via `setup.sql` instead — to test a model
+> calling it by name — was tried and reverted: `turns.status` has no neutral
+> "not started yet" value, so a pre-existing `status='running'` row makes
+> `cmd/starter` treat the scenario's message as a follow-up to an
+> already-active turn instead of starting one.)
 
 ## Running it
 

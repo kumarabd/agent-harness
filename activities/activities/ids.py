@@ -67,6 +67,15 @@ def user_scope_of(session_key: str) -> str:
     return session_key
 
 
+#  docs/components/request-pipeline/08-planning.md's plan-and-execute segments
+# — none of them get their own filesystem nesting (a checkpoint, a mid-plan
+# follow-up, a re-plan, and an approval round all still work in their plan's
+# own directory); only ":sub:" descends into a new one. Each takes a bare
+# numeric value the same shape as ":sub:{n}", so they're skipped the same way
+# a "sub" segment is consumed, just without emitting a path component.
+_NON_FS_MARKERS = frozenset({"cp", "followup", "replan", "approval"})
+
+
 def session_fs_path(turn_id: str) -> str:
     """Maps a turn_id to its working directory on the session filesystem PV,
     per docs/components/session-filesystem.md's path convention:
@@ -75,7 +84,13 @@ def session_fs_path(turn_id: str) -> str:
     scheme was designed hierarchically precisely so this is a pure string
     transform: "sess-1:turn:1" -> "/session/sess-1/"; "sess-1:turn:1:sub:1"
     -> "/session/sess-1/sub/1/"; "sess-1:turn:1:sub:1:sub:2" ->
-    "/session/sess-1/sub/1/sub/2/".
+    "/session/sess-1/sub/1/sub/2/". A plan-and-execute segment (":cp:", the
+    checkpoint's own nested-plan marker if it were ever passed here, etc.) is
+    skipped without adding a path component — a subagent spawned FROM a
+    checkpoint, e.g. "sess-1:turn:1:cp:2:sub:1", still resolves to
+    "/session/sess-1/sub/1/", the same directory a subagent spawned directly
+    from the root turn would get; the checkpoint it came from isn't a
+    filesystem boundary.
 
     Only ever called with an actual turn_id (a tool_calls row's parent_id,
     which is always a turn or subagent-turn ID, never an ":act:" activity
@@ -89,7 +104,8 @@ def session_fs_path(turn_id: str) -> str:
     path = f"/session/{session_key}/"
     for i in range(0, len(sub_parts), 2):
         marker, n = sub_parts[i], sub_parts[i + 1]
-        if marker != "sub":
+        if marker == "sub":
+            path += f"sub/{n}/"
+        elif marker not in _NON_FS_MARKERS:
             raise ValueError(f"unexpected turn_id segment {marker!r} in {turn_id!r}")
-        path += f"sub/{n}/"
     return path
