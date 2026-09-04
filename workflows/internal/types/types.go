@@ -309,13 +309,16 @@ type ToolCallRef struct {
 	// IsSubagent in this first pass — deliberately not designed for that
 	// combination yet.
 	RequiresApproval bool `json:"requires_approval"`
-	// The resolved {server, tool} identity behind this call — "shell" +
-	// the reduced command-name token for shell_exec, or the real
-	// {server,tool} pair for call_tool. Crosses the reference-passing
-	// boundary the same way ToolName already does (dispatch/routing
-	// metadata, not the call's actual arguments — components/multi-tenancy.md's
-	// "tool name... is workflow-visible by design, not an accepted leak").
-	// Only populated when RequiresApproval is true; empty otherwise.
+	// The resolved {server, tool} identity behind this call — "shell" + the
+	// reduced command-name token for shell_exec, the real {server,tool} pair
+	// for call_tool, or (docs/components/tool-registry.md, "Resolved:
+	// Three-Layer Tool Taxonomy & Per-Task Resolution") the ToolDiscover
+	// Capability's own {server,tool} for a per-task resolved call — set
+	// whenever ModelCall knows the identity, not only when RequiresApproval
+	// is true. Crosses the reference-passing boundary the same way ToolName
+	// already does (dispatch/routing metadata, not the call's actual
+	// arguments — components/multi-tenancy.md's "tool name... is
+	// workflow-visible by design, not an accepted leak").
 	Server string `json:"server,omitempty"`
 	Tool   string `json:"tool,omitempty"`
 }

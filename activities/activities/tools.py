@@ -459,8 +459,66 @@ async def search_tools(arguments: dict, ctx: ToolContext) -> dict:
     model-facing wrapper around discover_tools: one combined list so
     discovery is central from the model's perspective in one tool call. A
     deployment with no mcp-hub or no shell-hub catalog still works, just
-    with fewer discoverable tools."""
-    return {"results": await discover_tools(arguments.get("query", ""), arguments.get("top_k", 5))}
+    with fewer discoverable tools.
+
+    Also persists what it found (docs/components/tool-registry.md, "Resolved:
+    Three-Layer Tool Taxonomy & Per-Task Resolution") — the model no longer
+    has `call_tool` to invoke a fresh discovery with, so binding these into
+    `turn_retrieval` is what makes this call's results directly callable by
+    name on the turn's NEXT step (every `ModelCall` re-reads `turn_retrieval`
+    fresh via `prompt.assemble`, so no separate wiring is needed for that
+    part). Without this, hiding `call_tool` would leave a genuine mid-turn
+    discovery unreachable — not a degrade-gracefully case, a real gap."""
+    results = await discover_tools(arguments.get("query", ""), arguments.get("top_k", 5))
+    await _persist_discovered(ctx, results)
+    return {"results": results}
+
+
+async def _persist_discovered(ctx: ToolContext, results: list[dict]) -> None:
+    """Stage a mid-turn `search_tools` call's results the same way
+    `ToolDiscover` (`retrieval/tools.py`) stages its pre-turn scan, appended
+    after whatever's already there (`MAX(seq)+1`) — never overwriting
+    ToolDiscover's own rows, which use the same 0-based seq range.
+    Best-effort: a persist failure loses the binding for later steps, never
+    the results this response already carries.
+
+    Local import of `retrieval.staging` — avoids a load-order cycle with
+    `retrieval/tools.py` (which imports `discover_tools` from this module):
+    a function-local import runs at CALL time, by which point the whole
+    worker process has finished every module's own import phase, so this
+    module is always fully loaded by then regardless of import order at
+    startup."""
+    if not results:
+        return
+    try:
+        from .retrieval.staging import RetrievalRow, write_rows
+
+        turn_id = ids.turn_id_of_tool_call(ctx.tool_call_id)
+        start = await ctx.pool.fetchval(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM turn_retrieval WHERE owner_id = $1 AND kind = 'tool'",
+            turn_id,
+        )
+        seen: set[tuple[str, str]] = set()
+        rows: list[RetrievalRow] = []
+        seq = start
+        for result in results:
+            server = str(result.get("server", "")).strip()
+            tool = str(result.get("tool", "")).strip()
+            if not tool or (server, tool) in seen:
+                continue
+            seen.add((server, tool))
+            description = str(result.get("description", "")).strip()
+            content = f"{server}/{tool}" if server else tool
+            if description:
+                content += f" — {description[:300]}"
+            rows.append(RetrievalRow(
+                kind="tool", seq=seq, content=content,
+                metadata={"server": server, "tool": tool, "input_schema": result.get("input_schema")},
+            ))
+            seq += 1
+        await write_rows(ctx.pool, turn_id, rows)
+    except Exception:  # noqa: BLE001 - never fail the search itself over persisting its binding
+        logger.warning("search_tools: failed to persist discovered rows for mid-turn binding", exc_info=True)
 
 
 async def call_tool(arguments: dict, ctx: ToolContext) -> dict:
@@ -541,94 +599,51 @@ _DEMO_TOOL_SPEC = ToolSpec(
     start_to_close_timeout_seconds=30.0,
 )
 
-TOOL_REGISTRY: dict[str, ToolSpec] = {
-    "shell_exec": ToolSpec(
-        handler=shell_exec,
-        heartbeat_interval_seconds=3.0,
-        heartbeat_timeout_seconds=10.0,
-        start_to_close_timeout_seconds=300.0,
-    ),
-    # Tier B, matching shell_exec — a merge of many files is filesystem-
-    # touching, chunkable work on the same PV, holds a session-directory
-    # lease the same way, and needs the same heartbeat cadence for real
-    # cancellation delivery mid-merge.
-    "merge_subagent_output": ToolSpec(
-        handler=merge_subagent_output,
-        heartbeat_interval_seconds=3.0,
-        heartbeat_timeout_seconds=10.0,
-        start_to_close_timeout_seconds=300.0,
-    ),
-    "search": _DEMO_TOOL_SPEC,
-    "slow_tool": _DEMO_TOOL_SPEC,
-    "noop_tool": _DEMO_TOOL_SPEC,
-    "memory_search": ToolSpec(
-        handler=memory_search,
-        heartbeat_interval_seconds=5.0,
-        heartbeat_timeout_seconds=15.0,
-        start_to_close_timeout_seconds=30.0,
-    ),
-    "memory_expand": ToolSpec(
-        handler=memory_expand,
-        heartbeat_interval_seconds=5.0,
-        heartbeat_timeout_seconds=15.0,
-        start_to_close_timeout_seconds=30.0,
-    ),
-    "search_tools": ToolSpec(
-        handler=search_tools,
-        heartbeat_interval_seconds=5.0,
-        heartbeat_timeout_seconds=15.0,
-        start_to_close_timeout_seconds=30.0,
-    ),
-    "call_tool": ToolSpec(
-        handler=call_tool,
-        heartbeat_interval_seconds=5.0,
-        heartbeat_timeout_seconds=15.0,
-        start_to_close_timeout_seconds=30.0,
-    ),
-    # lcm_grep/lcm_describe/lcm_expand (docs/components/context-slot.md's
-    # Memory-Access Tools) — same no-cancellable-subprocess shape as
-    # memory_search/memory_expand above (quick request/response, no lease),
-    # but a local Postgres read against this tenant's own database, not a
-    # network call to agent-brain — start_to_close is tightened to 15s
-    # (vs. those tools' 30s) to reflect that real difference in expected
-    # latency, not copied blindly from the network-tier tools next to it.
-    "lcm_grep": ToolSpec(
-        handler=lcm_grep,
-        heartbeat_interval_seconds=5.0,
-        heartbeat_timeout_seconds=15.0,
-        start_to_close_timeout_seconds=15.0,
-    ),
-    "lcm_describe": ToolSpec(
-        handler=lcm_describe,
-        heartbeat_interval_seconds=5.0,
-        heartbeat_timeout_seconds=15.0,
-        start_to_close_timeout_seconds=15.0,
-    ),
-    "lcm_expand": ToolSpec(
-        handler=lcm_expand,
-        heartbeat_interval_seconds=5.0,
-        heartbeat_timeout_seconds=15.0,
-        start_to_close_timeout_seconds=15.0,
-    ),
+# docs/components/proactivity.md — intention tools. Imported here (after the
+# handlers above are defined) to keep the dependency one-directional:
+# tools_intention.py must not import this module.
+from . import tools_intention as _ti  # noqa: E402
+from . import capabilities as _cap  # noqa: E402
+
+# handler_ref (in capabilities.CAPABILITIES) -> the actual callable. This is the
+# only hand-maintained tool list left, and it carries nothing but the wiring —
+# the schema lives in llm.py, the turn-kind / peel / timing metadata in
+# capabilities.py (docs/components/tool-registry.md, "Implementation shape").
+_HANDLERS: dict[str, Any] = {
+    "shell_exec": shell_exec,
+    "merge_subagent_output": merge_subagent_output,
+    "memory_search": memory_search,
+    "memory_expand": memory_expand,
+    "search_tools": search_tools,
+    "call_tool": call_tool,
+    "lcm_grep": lcm_grep,
+    "lcm_describe": lcm_describe,
+    "lcm_expand": lcm_expand,
+    "create_intention": _ti.create_intention,
+    "manage_intention": _ti.manage_intention,
 }
 
-# docs/components/proactivity.md — intention tools. Registered after TOOL_REGISTRY
-# is defined to keep the import one-directional (tools_intention.py must not
-# import this module). Quick Temporal-client calls, no lease/subprocess — same
-# timeout tier as memory_search.
-from . import tools_intention as _ti  # noqa: E402
-
-for _name, _handler in {
-    "create_intention": _ti.create_intention,
-    "list_intentions": _ti.list_intentions,
-    "inspect_intention": _ti.inspect_intention,
-    "revise_intention": _ti.revise_intention,
-    "snooze_intention": _ti.snooze_intention,
-    "cancel_intention": _ti.cancel_intention,
-}.items():
-    TOOL_REGISTRY[_name] = ToolSpec(
-        handler=_handler,
-        heartbeat_interval_seconds=5.0,
-        heartbeat_timeout_seconds=15.0,
-        start_to_close_timeout_seconds=30.0,
+# Every capability with a real activity handler, built from the single
+# declarative table. `t.timing` carries the heartbeat/timeout tuning that used
+# to be inline here (HEAVY for shell_exec/merge, LOCAL for lcm_*, NETWORK for
+# the agent-brain / mcp-hub / Temporal-client round-trips).
+TOOL_REGISTRY: dict[str, ToolSpec] = {
+    c.name: ToolSpec(
+        handler=_HANDLERS[c.handler_ref],
+        heartbeat_interval_seconds=c.timing.heartbeat_interval_seconds,
+        heartbeat_timeout_seconds=c.timing.heartbeat_timeout_seconds,
+        start_to_close_timeout_seconds=c.timing.start_to_close_timeout_seconds,
     )
+    for c in _cap.CAPABILITIES
+    if c.handler_ref
+}
+
+# Fixture-only demo stubs (docs/components/activities-outbound-delivery.md) —
+# not model-facing, so not in the capability table; still needed by scenario
+# fixtures that script tool calls.
+TOOL_REGISTRY.update({"search": _DEMO_TOOL_SPEC, "slow_tool": _DEMO_TOOL_SPEC, "noop_tool": _DEMO_TOOL_SPEC})
+
+assert set(_HANDLERS) == set(_cap.HANDLER_REFS), (
+    "tools._HANDLERS and capabilities.CAPABILITIES handler_refs have drifted: "
+    f"{set(_HANDLERS) ^ set(_cap.HANDLER_REFS)}"
+)

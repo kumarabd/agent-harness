@@ -1,0 +1,8 @@
+{
+  "_comment": "Forces the real (non-fixture) ModelCall path, like real-assembly.json, but to exercise per-task tool resolution (docs/components/tool-registry.md, 'Resolved: Three-Layer Tool Taxonomy & Per-Task Resolution') instead of prompt assembly. resolved-tool-dispatch.setup.sql pre-seeds a turn_retrieval 'tool' row as if ToolDiscover had found a real 'demo/echo' mcp-hub tool; capabilities.mint_resolved turns it into a directly-callable 'echo' function schema (tools_schema_for) alongside the always-present shell_exec/search_tools -- call_tool is no longer in the schema at all. A real model explicitly told to use 'echo' should call it BY NAME. expect.sh checks the resulting tool_calls row has resolved_server='demo'/resolved_tool='echo', proving the whole pipeline (seed -> mint_resolved -> schema_for -> real model call -> ModelCall's mint-time resolution -> ToolCall's internal call_tool proxy) ran end to end.",
+  "message": {
+    "role": "user",
+    "content": "You have a tool called 'echo' available to you right now. Call it immediately with text set to 'hello-from-resolved-tool-scenario' -- do not search for it, do not ask which server it's on, just call it by name -- then tell me what it echoed back."
+  },
+  "scripted_model_responses": []
+}

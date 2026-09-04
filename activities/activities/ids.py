@@ -22,6 +22,21 @@ def subagent_turn_id(turn_id: str, n: int) -> str:
     return f"{turn_id}:sub:{n}"
 
 
+def turn_id_of_tool_call(tool_call_id: str) -> str:
+    """The inverse of `activity_id` — the turn_id (top-level or
+    subagent-nested) that minted this tool_call_id. ":act:" only ever
+    appears once, terminating the id (no turn_id itself contains it, at any
+    nesting depth), so splitting on the last occurrence recovers the exact
+    owner. Used by `tools.search_tools`'s mid-turn `turn_retrieval` binding
+    (docs/components/tool-registry.md, "Resolved: Three-Layer Tool Taxonomy
+    & Per-Task Resolution") — a tool handler only has its own ToolContext,
+    not the turn_id directly."""
+    turn_id, sep, _ = tool_call_id.rpartition(":act:")
+    if not sep:
+        raise ValueError(f"not a tool_call_id (missing ':act:'): {tool_call_id!r}")
+    return turn_id
+
+
 def session_key_of(turn_id: str) -> str:
     """The session_key prefix of any turn_id (top-level or subagent) — the
     same split session_fs_path uses, exposed separately since callers

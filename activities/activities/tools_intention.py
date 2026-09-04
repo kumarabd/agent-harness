@@ -1,7 +1,14 @@
 """Intention tools — docs/components/proactivity.md, "The agent's tools".
 
-Six handlers the agent calls from inside any turn to garden its own standing
-intentions. Each is a thin wrapper over the Temporal client (`ctx.temporal_client`,
+**Two model-facing tools** (docs/components/tool-registry.md, "Resolved:
+Three-Layer Tool Taxonomy" — intention tools 6 -> 2): `create_intention` (its
+own schema — the one genuinely complex operation) and `manage_intention`
+(`action` in {list, inspect, revise, snooze, cancel} — CRUD on one object, not
+five distinct intents). `manage_intention` is a thin dispatcher over the five
+functions below, which stay as the real implementations and the internal
+vocabulary this module reasons in.
+
+Each is a thin wrapper over the Temporal client (`ctx.temporal_client`,
 threaded in by ToolCallActivity): an intention *is* an `IntentionWorkflow`
 execution, so create = start_workflow, revise/snooze = signal, cancel = cancel,
 list/inspect = list_workflows + the `status` query. There is no intentions table.
@@ -303,3 +310,23 @@ async def cancel_intention(arguments: dict, ctx: "ToolContext") -> dict:
     except Exception as exc:  # noqa: BLE001
         return {"intention_id": intention_id, "cancelled": False, "note": str(exc)}
     return {"intention_id": intention_id, "cancelled": True}
+
+
+_MANAGE_ACTIONS = {
+    "list": list_intentions,
+    "inspect": inspect_intention,
+    "revise": revise_intention,
+    "snooze": snooze_intention,
+    "cancel": cancel_intention,
+}
+
+
+async def manage_intention(arguments: dict, ctx: "ToolContext") -> dict:
+    """The one model-facing tool for every op except create — dispatches on
+    `arguments["action"]` to the real implementation above. No fallback: an
+    unknown/missing action is a real error, not a silent no-op."""
+    action = arguments.get("action")
+    handler = _MANAGE_ACTIONS.get(action)
+    if handler is None:
+        raise ValueError(f"manage_intention: unknown action {action!r}, expected one of {sorted(_MANAGE_ACTIONS)}")
+    return await handler(arguments, ctx)

@@ -96,6 +96,7 @@ SCENARIOS=(
   spawn-subagent-nested-rejected
   subagent-full-agent
   real-assembly
+  resolved-tool-dispatch
 )
 
 PASSED=()

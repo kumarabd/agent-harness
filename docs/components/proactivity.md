@@ -15,6 +15,9 @@
 > - **1b-ii** — 6 agent tools (`create` / `list` / `inspect` / `revise` /
 >   `snooze` / `cancel_intention`) → handlers in `tools_intention.py` over
 >   `ctx.temporal_client` (threaded into `ToolCallActivity`). No new activities.
+>   **Consolidated to 2 model-facing tools 2026-09-04** (`create_intention` +
+>   `manage_intention(action, …)`) — see "The agent's tools" below; the 5
+>   handlers stay as `manage_intention`'s internal implementations.
 > - **1b-iii** — real `CheckCondition` (mcp-hub probe → fast-tier predicate
 >   judge).
 > - **recurring** — `kind=schedule` (+ `cron` UTC / `every_seconds`) → a Temporal
@@ -185,12 +188,16 @@ turns, so each deciding turn sees in `lcm` what the last one just said.
 
 ### The agent's tools
 
-`create_intention` / `list_intentions` / `revise_intention` / `snooze_intention` /
-`cancel_intention` / `inspect_intention` — called from inside any turn, backed by
-the activities above (`list` / `inspect` are `ListWorkflowExecutions` /
-`query_workflow`). The agent's currently-armed intentions render into its prompt
-as a small block (like the plan), so it reasons about its commitments and prunes
-stale ones.
+**Two model-facing tools** (`tool-registry.md`, "Resolved: Three-Layer Tool
+Taxonomy" — 6 → 2, 2026-09-04): `create_intention` (its own schema — the one
+genuinely complex operation) and `manage_intention(action, intention_id, …)`
+with `action` in `{list, inspect, revise, snooze, cancel}` — CRUD on one
+construct, not five distinct intents. Both call into `tools_intention.py`,
+which keeps the five operations as separate internal functions (`list`/`inspect`
+are `ListWorkflowExecutions` / `query_workflow`); `manage_intention` is a thin
+dispatcher over them. The agent's currently-armed intentions render into its
+prompt as a small block (like the plan), so it reasons about its commitments
+and prunes stale ones.
 
 ### No per-user holder
 

@@ -107,6 +107,14 @@ class ModelCallActivity:
                 context_tokens = 0
                 context_window = 0
                 next_hint_modality, next_hint_tier = model_registry.default_hint()
+                # Fixture path never runs build_conversation, so there's no
+                # per-task resolved set to speak of — a scripted response can
+                # still script a call to any TOOL_REGISTRY-backed name
+                # (shell_exec, search_tools, ...), it just can't exercise a
+                # resolved (ToolDiscover) dispatch. Empty, not omitted: the
+                # tool_calls minting loop below is shared with the real path
+                # and unconditionally looks this up per call.
+                resolved_by_name: dict = {}
             else:
                 # docs/components/model-registry.md, "Resolved: Selection
                 # Mechanism" + "Resolved: Escalate-on-Retry" — the previous
@@ -161,9 +169,15 @@ class ModelCallActivity:
                 # near-zero ModelCall and this cost stayed invisible. Bucketed
                 # in seconds (metrics.SECONDS_LATENCY_METRICS).
                 assemble_started = time.monotonic()
-                conversation, context_tokens = await llm.build_conversation(
-                    conn, input.turn_id, input.plan_id, system_prompt, context_window
+                # `resolved` (docs/components/tool-registry.md, "Resolved:
+                # Three-Layer Tool Taxonomy & Per-Task Resolution") is always
+                # [] when planning_mode — that turn gets a reference catalog
+                # in-prompt instead of callable schemas (prompt.assemble).
+                conversation, context_tokens, resolved = await llm.build_conversation(
+                    conn, input.turn_id, input.plan_id, system_prompt, context_window,
+                    planning=input.planning_mode,
                 )
+                resolved_by_name = {c.name: c for c in resolved}
                 activity.metric_meter().create_histogram_float(
                     "prompt_assemble_latency_seconds", unit="s"
                 ).record(time.monotonic() - assemble_started)
@@ -186,6 +200,7 @@ class ModelCallActivity:
                     planning=input.planning_mode,
                     plan_handling=input.plan_handling,
                     checkpoint=is_checkpoint,
+                    resolved=resolved,
                 )
 
                 # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
@@ -391,23 +406,44 @@ class ModelCallActivity:
                         else ids.activity_id(input.turn_id, n)
                     )
 
+                    # A per-task resolved (ToolDiscover) call is offered to the
+                    # model under its OWN name (e.g. "weather_lookup"), so
+                    # TOOL_REGISTRY has no handler for tool_name. resolved_server/
+                    # resolved_tool (migration 026) carry the {server, tool}
+                    # identity ToolCall (tool_call.py) needs to route it through
+                    # the internal call_tool proxy instead — set ONLY here, never
+                    # for shell_exec/call_tool themselves (that would double-wrap
+                    # call_tool's own explicit arguments). Gating reuses the same
+                    # identity when it's known; falls back to _resolve_gating's
+                    # shell_exec/call_tool cases otherwise.
+                    resolved_cap = None if is_subagent else resolved_by_name.get(tool_name)
+                    if resolved_cap is not None:
+                        resolved_server, resolved_tool = resolved_cap.resolved_target
+                        gate_server, gate_tool = resolved_server, resolved_tool
+                        approval_needed = permissions.requires_approval(gate_server, gate_tool)
+                    else:
+                        resolved_server = resolved_tool = None
+                        approval_needed, gate_server, gate_tool = (
+                            _resolve_gating(tool_name, arguments) if not is_subagent else (False, "", "")
+                        )
+
                     # status left at its 'pending' default — ToolCall (or the
                     # subagent child workflow's own completion) is what
                     # transitions it to ok/error/cancelled. See the schema
                     # migration's note on why 'pending' exists.
                     await conn.execute(
                         "INSERT INTO tool_calls "
-                        "(tool_call_id, parent_id, message_id, tool_name, arguments, is_subagent) "
-                        "VALUES ($1, $2, $3, $4, $5, $6)",
+                        "(tool_call_id, parent_id, message_id, tool_name, arguments, is_subagent, "
+                        "resolved_server, resolved_tool) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                         tool_call_id,
                         input.turn_id,
                         message_id,
                         tool_name,
                         json.dumps(arguments),
                         is_subagent,
-                    )
-                    approval_needed, gated_server, gated_tool = (
-                        _resolve_gating(tool_name, arguments) if not is_subagent else (False, "", "")
+                        resolved_server,
+                        resolved_tool,
                     )
                     refs.append(
                         ToolCallRef(
@@ -415,8 +451,8 @@ class ModelCallActivity:
                             tool_name=tool_name,
                             is_subagent=is_subagent,
                             requires_approval=approval_needed,
-                            server=gated_server,
-                            tool=gated_tool,
+                            server=gate_server,
+                            tool=gate_tool,
                         )
                     )
 
@@ -543,13 +579,22 @@ def _resolve_gating(tool_name: str, arguments: dict) -> tuple[bool, str, str]:
     ever seeing the call's actual arguments (crosses the reference-passing
     boundary as routing metadata, same category as tool_name itself).
 
+    Only the shell_exec / call_tool cases live here — a **resolved** (per-task
+    ToolDiscover) call's identity is already known statically (the `Capability`
+    ToolDiscover produced for it this turn carries `resolved_target`), so the
+    caller (the tool_calls minting loop) resolves those directly and only
+    falls back to this function when the name isn't a resolved one.
+
       - shell_exec: server is always "shell" (matching shell_hub.search()'s
         own result shape); tool is deliberately just the first
         whitespace-delimited token of the command string — a known, accepted
         simplification, not real shell parsing (won't catch a compound
         command or one invoked via `sh -c "..."`).
       - call_tool: server/tool are already explicit in its own arguments —
-        this is the one case with an exact, unambiguous identity.
+        this is the one case with an exact, unambiguous identity. (The model
+        itself no longer calls call_tool directly since the 2026-09-04
+        per-task-resolution revision, but a stray call still resolves
+        correctly rather than silently ungated.)
       - anything else (memory_search, search_tools, declare_next_step_hint,
         ...): never gateable, these aren't side-effecting.
     """

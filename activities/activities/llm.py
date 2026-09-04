@@ -24,16 +24,16 @@ that call's result, matched by tool_call_id (tool_calls.tool_call_id is
 reused verbatim as OpenAI's tool_call_id — any string works, no second ID
 scheme needed).
 
-TOOLS_SCHEMA now also includes `memory_search`/`memory_expand`
-(docs/components/memory-slot.md) and `search_tools`/`call_tool`
-(docs/components/tool-registry.md) alongside `shell_exec` — real,
-model-offerable tools. tools.TOOL_REGISTRY's `search`/`slow_tool`/
-`noop_tool` entries are still fixture-only stubs (docs/components/
-activities-outbound-delivery.md's demo tools) and must never be offered to
-a real model. Not read dynamically off TOOL_REGISTRY, which has no
-LLM-schema metadata yet — a generic schema-registry abstraction for exactly
-five tools would be premature; add future real tools here by hand alongside
-their TOOL_REGISTRY entry in tools.py.
+This module owns the raw JSON **schema dicts** (`TOOLS_SCHEMA` + the plan
+meta-tool schemas + the nested spawn_subagent variant) — pure data. Which turn
+kinds see each, whether it's peeled, its layer and its native-activity timing
+all live in `capabilities.py` (docs/components/tool-registry.md, "Resolved:
+Three-Layer Tool Taxonomy & Per-Task Resolution"). `tools_schema_for` is now a
+thin adapter into `capabilities.schema_for`; `tools.TOOL_REGISTRY` derives its
+handler+timing wiring from `capabilities.CAPABILITIES`. Adding a model-facing
+tool = one schema dict here + one `Capability` row + one `_HANDLERS` entry in
+`tools.py`. `tools.TOOL_REGISTRY`'s `search`/`slow_tool`/`noop_tool` remain
+fixture-only stubs and must never be offered to a real model.
 
 **Prompt assembly** — request pipeline step 9
 (docs/components/request-pipeline/09-prompt-assembly.md), `prompt.py` — owns
@@ -369,68 +369,31 @@ TOOLS_SCHEMA = [
             },
         },
     },
+    # docs/components/tool-registry.md, "Resolved: Three-Layer Tool Taxonomy"
+    # — the 5 CRUD operations on an armed intention (everything but create)
+    # collapsed into one dispatcher tool. These are operations on one
+    # construct, not 5 distinct intents, unlike e.g. memory_search vs.
+    # lcm_grep (different substrates, deliberately left separate).
     {
         "type": "function",
         "function": {
-            "name": "list_intentions",
-            "description": "List the intentions you currently have armed for this session, with their state and fire count.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "inspect_intention",
-            "description": "Show one armed intention's current objective, kind, state and fire count.",
-            "parameters": {
-                "type": "object",
-                "properties": {"intention_id": {"type": "string"}},
-                "required": ["intention_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "revise_intention",
-            "description": "Change an armed intention's objective, context, fire time, or poll interval.",
+            "name": "manage_intention",
+            "description": (
+                "List, inspect, revise, snooze, or cancel your armed intentions. "
+                "list needs nothing else. inspect/revise/snooze/cancel need intention_id."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "intention_id": {"type": "string"},
-                    "objective": {"type": "string"},
-                    "why": {"type": "string"},
-                    "fire_at": {"type": "string", "description": "ISO-8601."},
-                    "poll_every_seconds": {"type": "number"},
+                    "action": {"type": "string", "enum": ["list", "inspect", "revise", "snooze", "cancel"]},
+                    "intention_id": {"type": "string", "description": "Required for every action except list."},
+                    "objective": {"type": "string", "description": "revise: the new objective."},
+                    "why": {"type": "string", "description": "revise: the new one-line context."},
+                    "fire_at": {"type": "string", "description": "revise: new ISO-8601 fire time."},
+                    "poll_every_seconds": {"type": "number", "description": "revise: new poll interval."},
+                    "by_seconds": {"type": "number", "description": "snooze: push the next fire out by this many seconds."},
                 },
-                "required": ["intention_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "snooze_intention",
-            "description": "Push an armed intention's next fire out by a number of seconds.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "intention_id": {"type": "string"},
-                    "by_seconds": {"type": "number"},
-                },
-                "required": ["intention_id", "by_seconds"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "cancel_intention",
-            "description": "Drop an armed intention — it will never fire again.",
-            "parameters": {
-                "type": "object",
-                "properties": {"intention_id": {"type": "string"}},
-                "required": ["intention_id"],
+                "required": ["action"],
             },
         },
     },
@@ -535,12 +498,10 @@ TOOLS_SCHEMA = [
 ]
 
 # docs/components/context-slot.md's Memory-Access Tools — lcm_expand is
-# subagent-only at the schema level: excluded from the list entirely for a
-# main-agent (top-level) turn rather than listed and rejected at runtime if
-# called anyway, per the explicit design decision behind this. lcm_grep/
-# lcm_describe carry no such restriction — same "unrestricted" treatment as
-# memory_search/memory_expand above.
-_SUBAGENT_ONLY_TOOL_NAMES = {"lcm_expand"}
+# subagent-only at the schema level (excluded from a main-agent turn's schema
+# entirely, not listed-and-rejected). That rule now lives as data:
+# `capabilities.CAPABILITIES` gives lcm_expand `turn_kinds={SUBAGENT}` while
+# lcm_grep / lcm_describe carry the full non-planning set.
 
 # docs/components/temporal-workflow.md's recursion-termination guard — the
 # variant of spawn_subagent offered to a subagent (as opposed to the root
@@ -670,46 +631,35 @@ _PROPOSE_PLAN_SCHEMA = {
 }
 
 
+# name -> schema dict, over every model-facing schema this module defines
+# (the base list plus the two plan meta-tools). `capabilities.schema_for`
+# reads this back; the nested spawn_subagent variant is passed separately.
+_SCHEMA_BY_NAME: dict[str, dict] = {
+    t["function"]["name"]: t
+    for t in [*TOOLS_SCHEMA, _PROPOSE_PLAN_SCHEMA, _CHECKPOINT_DONE_SCHEMA]
+}
+
+
 def tools_schema_for(
     is_subagent: bool,
     planning: bool = False,
     plan_handling: bool = False,
     checkpoint: bool = False,
+    resolved: "list | tuple" = (),
 ) -> list[dict]:
-    """model_call.py's one call site for what used to be the flat
-    TOOLS_SCHEMA constant — every ModelCall now goes through this so the
-    lcm_expand exclusion, the spawn_subagent variant substitution, and the
-    plan-turn schemas are enforced uniformly on both the streaming and
-    non-streaming call paths, not duplicated at each site.
+    """`model_call.py`'s one call site for the model-facing tool schema.
 
-    Base TOOLS_SCHEMA carries NEITHER plan meta-tool — they're added here only
-    for the turn kind that should see them, so a stray call can't reach a turn
-    that has no PLAN.md to apply it to:
-
-    - `planning` (08-planning.md): the planning turn does no work — only
-      propose_plan + the next-step hint tool.
-    - `plan_handling`: a mid-plan follow-up turn — the full normal toolset (it
-      answers the user and may need tools) PLUS propose_plan, to reshape the
-      pending tail.
-    - `checkpoint`: a checkpoint turn — the full toolset PLUS checkpoint_done.
+    The turn-kind rules — lcm_expand being subagent-only, the spawn_subagent
+    nested-variant swap, which turns see propose_plan / checkpoint_done — now
+    live as data in `capabilities.CAPABILITIES` (tool-registry.md, "Resolved:
+    Three-Layer Tool Taxonomy"). This is a thin adapter from the historical
+    boolean flags to `capabilities.schema_for`. `resolved` is the per-turn
+    list of `Capability` objects `ToolDiscover` produced (empty until Phase 3).
     """
-    if planning:
-        return [
-            _PROPOSE_PLAN_SCHEMA,
-            *[t for t in TOOLS_SCHEMA if t["function"]["name"] == _NEXT_STEP_HINT_TOOL_NAME],
-        ]
-    if is_subagent:
-        base = [
-            _SPAWN_SUBAGENT_NESTED_SCHEMA if tool["function"]["name"] == _SPAWN_SUBAGENT_TOOL_NAME else tool
-            for tool in TOOLS_SCHEMA
-        ]
-    else:
-        base = [tool for tool in TOOLS_SCHEMA if tool["function"]["name"] not in _SUBAGENT_ONLY_TOOL_NAMES]
-    if plan_handling:
-        return [*base, _PROPOSE_PLAN_SCHEMA]
-    if checkpoint:
-        return [*base, _CHECKPOINT_DONE_SCHEMA]
-    return base
+    from . import capabilities
+
+    kind = capabilities.turn_kind_of(is_subagent, planning, plan_handling, checkpoint)
+    return capabilities.schema_for(kind, resolved)
 
 
 @dataclass
@@ -727,8 +677,8 @@ class RealModelResult:
 
 
 async def build_conversation(
-    conn, turn_id: str, plan_id: str, system_prompt: str, context_window: int = 0
-) -> tuple[list[dict], int]:
+    conn, turn_id: str, plan_id: str, system_prompt: str, context_window: int = 0, *, planning: bool = False,
+) -> tuple[list[dict], int, list]:
     """Thin call-through to `prompt.assemble` — request pipeline step 9
     (docs/components/request-pipeline/09-prompt-assembly.md) owns the section
     model, ordering, and budget arbitration; this stays the stable call site
@@ -736,8 +686,14 @@ async def build_conversation(
     keys the enrichment sections; empty for a conversational fast-path turn.
     `context_window` (0 if unknown, e.g. the fixture path) bounds how much of it
     enrichment may consume before `prompt.assemble` starts shedding sections.
+
+    Returns `(conversation, context_tokens, resolved_tools)` — `resolved_tools`
+    (docs/components/tool-registry.md, "Resolved: Three-Layer Tool Taxonomy &
+    Per-Task Resolution") is the per-task set of directly-callable `Capability`
+    objects `model_call.py` hands to `tools_schema_for`; always empty when
+    `planning=True` (that turn gets a reference catalog in-prompt instead).
     """
-    return await prompt.assemble(conn, turn_id, plan_id, system_prompt, context_window)
+    return await prompt.assemble(conn, turn_id, plan_id, system_prompt, context_window, planning=planning)
 
 
 # call_model / call_model_streaming moved to

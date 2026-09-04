@@ -18,10 +18,11 @@ module's.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 
-from . import ids, lcm, plan
+from . import capabilities, ids, lcm, plan
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +30,13 @@ _SKILLS_HEADER = (
     "Procedures from past successful runs that may fit this task — follow one "
     "where it fits, adapt or ignore it where the situation differs:\n"
 )
+# Planning-turn only since the 2026-09-04 per-task-resolution revision
+# (tool-registry.md, "Resolved: Three-Layer Tool Taxonomy") — a reasoning /
+# checkpoint turn gets these same rows as directly-callable schemas instead
+# (capabilities.mint_resolved), so this text section no longer renders for it.
 _CAPABILITIES_HEADER = (
-    "These environment tools look relevant to your task — use call_tool to invoke one:\n"
+    "Capabilities available for this task — reference only; the checkpoint "
+    "turn that executes each step calls them by name directly:\n"
 )
 _MEMORY_HEADER = (
     "The following is background from prior sessions and long-term memory, "
@@ -60,11 +66,18 @@ class _Section:
 
 
 async def assemble(
-    conn, turn_id: str, plan_id: str, system_prompt: str, context_window: int = 0
-) -> tuple[list[dict], int]:
-    """Returns (conversation, context_tokens) — context_tokens is threaded back
-    through ModelCallOutput to the workflow for the compression-gate check (see
-    lcm.assemble's own docstring for why it can't be accumulated workflow-side).
+    conn, turn_id: str, plan_id: str, system_prompt: str, context_window: int = 0, *, planning: bool = False,
+) -> tuple[list[dict], int, list[capabilities.Capability]]:
+    """Returns (conversation, context_tokens, resolved_tools).
+
+    `context_tokens` is threaded back through ModelCallOutput to the workflow
+    for the compression-gate check (see lcm.assemble's own docstring for why
+    it can't be accumulated workflow-side). `resolved_tools` is `ToolDiscover`'s
+    staged rows turned into directly-callable `Capability` objects
+    (tool-registry.md, "Resolved: Three-Layer Tool Taxonomy & Per-Task
+    Resolution") — empty on the **planning turn**, which invokes nothing and
+    instead gets those same rows rendered as the "capabilities" text section
+    below (a reference catalog, not a callable schema).
 
     The live conversation is keyed on the session (via turn_id). Memory +
     discovered tools are staged PER TURN (owner_id = turn_id); retrieved skills
@@ -77,10 +90,11 @@ async def assemble(
     sections: list[_Section] = []
     owner = plan_id or turn_id
     staged = await _staged_texts(conn, turn_id, owner)
+    resolved_tools = capabilities.mint_resolved(staged["tool_rows"]) if not planning else []
     for name, text in (
         ("skills", staged["skills"]),
         ("plan", await _plan_text(owner)),
-        ("capabilities", staged["capabilities"]),
+        ("capabilities", staged["capabilities"] if planning else None),
         ("memory", staged["memory"]),
     ):
         if text:
@@ -117,17 +131,21 @@ async def assemble(
             context_tokens,
             budget if budget is not None else "none",
         )
-    return conversation, context_tokens
+    return conversation, context_tokens, resolved_tools
 
 
-async def _staged_texts(conn, turn_id: str, plan_id: str) -> dict[str, str | None]:
+async def _staged_texts(conn, turn_id: str, plan_id: str) -> dict[str, object]:
     """Discovered tools (step 7) + long-term memory (step 4) for THIS turn
     (owner_id = turn_id), and retrieved skills (step 5) for the plan (owner_id =
-    plan_id) — one query over turn_retrieval, split by kind. Each renders to its
-    section text, or None when nothing was staged."""
+    plan_id) — one query over turn_retrieval, split by kind. Each `str | None`
+    field renders to its section text, or None when nothing was staged;
+    `tool_rows` is the raw `(content, metadata)` pairs `capabilities.mint_resolved`
+    needs (metadata carries {server, tool, input_schema}, written as jsonb —
+    asyncpg hands it back as text, decoded here same as staging.py's own read)."""
     by_kind: dict[str, list[str]] = {}
+    tool_rows: list[tuple[str, dict]] = []
     for r in await conn.fetch(
-        "SELECT kind, content FROM turn_retrieval "
+        "SELECT kind, content, metadata FROM turn_retrieval "
         "WHERE (owner_id = $1 AND kind IN ('tool', 'memory')) "
         "   OR (owner_id = $2 AND kind = 'skill') "
         "ORDER BY kind, seq",
@@ -135,11 +153,14 @@ async def _staged_texts(conn, turn_id: str, plan_id: str) -> dict[str, str | Non
         plan_id,
     ):
         by_kind.setdefault(r["kind"], []).append(r["content"])
+        if r["kind"] == "tool":
+            tool_rows.append((r["content"], json.loads(r["metadata"]) if r["metadata"] else {}))
 
     skills = by_kind.get("skill", [])
     tools = by_kind.get("tool", [])
     memory = by_kind.get("memory", [])
     return {
+        "tool_rows": tool_rows,
         # skill rows are full rendered procedures — separate with a rule, not a bullet
         "skills": (_SKILLS_HEADER + "\n\n---\n\n".join(skills)) if skills else None,
         "capabilities": (_CAPABILITIES_HEADER + "\n".join(f"- {c}" for c in tools)) if tools else None,

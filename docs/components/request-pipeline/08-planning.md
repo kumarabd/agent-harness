@@ -94,8 +94,14 @@ per `complex` checkpoint (nested).
 A child `TurnWorkflow` in `PlanningMode`: `ModelCall` swaps in
 `PLANNING_SYSTEM_PROMPT` and offers only `propose_plan` + the next-step hint
 tool. Its context is the retrieved skills (full rendered procedures, staged by
-`SkillDiscover` under the plan_id), memory, discovered tools, and the `lcm`
-conversation. It calls `propose_plan` and the turn ends (`stop_reason=planned`).
+`SkillDiscover` under the plan_id), memory, a **capability catalog** (the
+`ToolDiscover` rows rendered as a one-line reference list — `09-prompt-assembly.md`,
+the "capabilities" section, which since 2026-09-04 survives only for this turn
+kind), and the `lcm` conversation. It calls `propose_plan` and the turn ends
+(`stop_reason=planned`). Before this the planning turn saw only a hint block it
+couldn't interrogate; the catalog lets it draft against what's actually
+reachable. Checkpoint turns instead get those tools bound as **callable**
+schemas (`tool-registry.md`, "Resolved: Three-Layer Tool Taxonomy").
 
 **Skills are input to a draft, never executed verbatim** — a matched procedure
 shapes the plan; it does not become the execution. That is the core mitigation

@@ -1,11 +1,18 @@
 """ToolCall activity.
 
-Dispatches to a real tool implementation via tools.TOOL_REGISTRY (currently
-just shell_exec — docs/components/activities-outbound-delivery.md's Tier
-A/B/C heartbeat policy, applied for real here rather than simulated). An
-unrecognized tool_name, or any exception a handler raises, produces a real
-`status='error'` result — this stub previously had no error path at all,
-only success and cancellation.
+Dispatches to a real tool implementation via tools.TOOL_REGISTRY
+(docs/components/activities-outbound-delivery.md's Tier A/B/C heartbeat
+policy, applied for real here rather than simulated). An unrecognized
+tool_name, or any exception a handler raises, produces a real `status='error'`
+result — this stub previously had no error path at all, only success and
+cancellation.
+
+A per-task **resolved** tool (docs/components/tool-registry.md, "Resolved:
+Three-Layer Tool Taxonomy & Per-Task Resolution") is offered to the model
+under its own name, not `call_tool` — TOOL_REGISTRY has no handler for it. The
+`resolved_server`/`resolved_tool` columns ModelCall set at mint time (migration
+026) route that case through the internal `call_tool` proxy instead of a
+TOOL_REGISTRY lookup, using `call_tool`'s own timing profile.
 
 Reshaped 2026-08-14 for the reference-passing contract
 (docs/components/temporal-workflow.md): input/output are IDs only. This
@@ -43,7 +50,7 @@ from temporalio import activity
 from temporalio.exceptions import CancelledError
 
 from . import ids, llm_client, model_registry
-from .tools import TOOL_REGISTRY, ToolContext, resolve_session_dir
+from .tools import TOOL_REGISTRY, ToolContext, call_tool, resolve_session_dir
 from .types import ToolCallInput, ToolCallOutput
 
 logger = logging.getLogger(__name__)
@@ -72,7 +79,8 @@ class ToolCallActivity:
         # takes would exhaust the pool (max_size=10) with just a handful of
         # concurrent tool calls.
         row = await self._pool.fetchrow(
-            "SELECT tool_name, arguments, parent_id FROM tool_calls WHERE tool_call_id = $1",
+            "SELECT tool_name, arguments, parent_id, resolved_server, resolved_tool "
+            "FROM tool_calls WHERE tool_call_id = $1",
             input.tool_call_id,
         )
         if row is None:
@@ -81,10 +89,27 @@ class ToolCallActivity:
         arguments: dict = json.loads(row["arguments"])
         turn_id: str = row["parent_id"]
 
-        spec = TOOL_REGISTRY.get(tool_name)
-        if spec is None:
-            logger.warning("ToolCall: unknown tool %r for %s", tool_name, input.tool_call_id)
-            return await self._finish_error(input.tool_call_id, f"unknown tool: {tool_name}")
+        # docs/components/tool-registry.md, "Resolved: Three-Layer Tool
+        # Taxonomy & Per-Task Resolution" — a per-task resolved (ToolDiscover)
+        # call is offered to the model under its own name (e.g.
+        # "weather_lookup"), so TOOL_REGISTRY has no handler for it; migration
+        # 026's resolved_server/resolved_tool (set only for that case, never
+        # for shell_exec/call_tool themselves) says to route it through the
+        # internal call_tool proxy instead — same timing profile as call_tool
+        # (a network round-trip to mcp-hub either way), different handler.
+        resolved_server: str | None = row["resolved_server"]
+        resolved_tool: str | None = row["resolved_tool"]
+        if resolved_server:
+            spec = TOOL_REGISTRY["call_tool"]
+            handler = call_tool
+            handler_arguments = {"server": resolved_server, "tool": resolved_tool, "arguments": arguments}
+        else:
+            spec = TOOL_REGISTRY.get(tool_name)
+            if spec is None:
+                logger.warning("ToolCall: unknown tool %r for %s", tool_name, input.tool_call_id)
+                return await self._finish_error(input.tool_call_id, f"unknown tool: {tool_name}")
+            handler = spec.handler
+            handler_arguments = arguments
 
         fs_path = ids.session_fs_path(turn_id)
         # Resolve the default-tier config once here so per-tool
@@ -121,9 +146,15 @@ class ToolCallActivity:
             temporal_client=self._temporal_client,
         )
 
-        logger.info("ToolCall start: %s(%r)", tool_name, arguments)
+        if resolved_server:
+            logger.info("ToolCall start: %s -> call_tool(%s/%s, %r)", tool_name, resolved_server, resolved_tool, arguments)
+        else:
+            logger.info("ToolCall start: %s(%r)", tool_name, arguments)
         # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
-        # labeled by tool_name/status, emitted on every exit path below.
+        # labeled by tool_name/status (the model's own chosen name even for a
+        # resolved dispatch — that's what's meaningful in the metric, not the
+        # internal call_tool proxy it happens to route through), emitted on
+        # every exit path below.
         meter = activity.metric_meter().with_additional_attributes({"tool_name": tool_name})
         started = time.monotonic()
 
@@ -133,7 +164,7 @@ class ToolCallActivity:
             meter.create_histogram_float("tool_call_latency_seconds", unit="s").record(duration)
 
         try:
-            result = await spec.handler(arguments, ctx)
+            result = await handler(handler_arguments, ctx)
         except (asyncio.CancelledError, CancelledError):
             logger.info("ToolCall cancelled: %s", tool_name)
             record("cancelled")

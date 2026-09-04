@@ -8,6 +8,20 @@
 > capabilities-hint block. The model binds tools at execution time from that
 > block (there is no skill-composition step to pre-bind them).
 >
+> **REVISION (2026-09-04 — DESIGNED, not built; `tool-registry.md` "Resolved:
+> Three-Layer Tool Taxonomy & Per-Task Resolution").** The staged `input_schema`
+> stops being thrown away. For a reasoning / checkpoint turn, `tools_schema_for`
+> reads the `kind='tool'` rows and adds the top few as **directly-callable
+> function schemas** next to the always-present `shell_exec` + `search_tools`;
+> the model calls the resolved tool by name and the workflow dispatches it
+> through the internal `call_tool` proxy (which leaves the model schema). The
+> `09-prompt-assembly.md` "capabilities" hint block is **removed for these
+> turns** — it existed only to save a `search_tools` round-trip the model no
+> longer needs. The planning turn instead gets the same rows rendered as a
+> **reference catalog in context** (it plans, it doesn't invoke). Mid-turn
+> `search_tools` results bind into the schema for the rest of that turn; there
+> is no proactive per-iteration re-discovery.
+>
 > Parent: [`../request-pipeline.md`](../request-pipeline.md).
 > Orchestrated by [`03-routing.md`](03-routing.md)'s `RoutingWorkflow`.
 > Backend: [`../tool-registry.md`](../tool-registry.md) (`discover_tools`).
@@ -41,37 +55,49 @@ always-on tools (`shell_exec`, `call_tool`, `search_tools`) regardless.
   backend is simply absent — "not connected" falls out for free.
 - **Output:** one `turn_retrieval` row per deduped `(server, tool)` —
   `kind='tool'`, `seq` = rank, `content` = `"{server}/{tool} — {description}"`,
-  `score` if present, `metadata = {server, tool, input_schema}` (the composer /
-  planner need the schema to bind and construct calls).
+  `score` if present, `metadata = {server, tool, input_schema}`.
+  `tools_schema_for` binds callable schemas from `metadata`; the planning-turn
+  catalog renders from `content`.
 - **Status:** `ok` (≥ 1 row) | `empty` (empty query, or both backends
   unconfigured, or no results) | `error` (genuine call failure — **raised**, no
   in-activity retry; `RoutingWorkflow`'s `RetryPolicy` handles it) | `timed_out`.
 
-### Advisory, not restrictive
+### Additive, not restrictive
 
-Tool discovery output **pre-warms** the planner and the skill composer — it does
-not restrict the model. The reason-act loop still offers the full always-on tool
-set, and the model can call `search_tools` itself mid-turn to discover more. A
-discovery miss therefore costs a slightly less-informed plan, never a blocked
-capability.
+Tool discovery **pre-resolves** a relevant subset — it never narrows what the
+model can reach. The turn's schema is always `shell_exec` + `search_tools` +
+the resolved set, and the model can call `search_tools` itself mid-turn for
+anything discovery missed. A discovery miss therefore costs the model one
+`search_tools` call (the same cost as today's `search_tools` → `call_tool`
+two-step), never a blocked capability. Narrowing to *only* the discovered set
+was rejected for exactly this reason.
 
-### Consumers
+### Consumers (per the 2026-09-04 revision)
 
-- **Prompt assembly (step 9)** — the only consumer. Keeps the full tool schema
-  and surfaces the discovered subset as a plain hint block (the "capabilities"
-  section, `09-prompt-assembly.md`) rather than narrowing what the model can
-  call. Narrowing was rejected — it risks hiding a tool the model would have
-  known to ask for. The planning turn and each checkpoint turn read the block
-  and pick / bind tools themselves.
+- **`tools_schema_for` (in `llm.py`, called by `ModelCall`)** — for a
+  reasoning / checkpoint / plan-handling turn, reads the `kind='tool'` rows
+  (`owner_id = turn_id`) and appends the top few as callable function schemas,
+  building the per-turn `name → {server, tool}` map the workflow uses to
+  dispatch a resolved-tool call through the internal `call_tool` proxy.
+- **Prompt assembly (step 9)** — for the **planning turn only**, still renders
+  the rows, now as a reference **capability catalog** in context (the planning
+  turn reasons about the plan, it does not invoke). For every other turn kind
+  the old "capabilities" hint block is gone.
 
 ### Relationship to `tool-registry.md`
 
-No change to the two-tier architecture, mcp-hub adoption, or shell-hub. The one
-code change is a refactor: `search_tools`'s body moved into a ctx-free
+No change to the two-tier architecture, mcp-hub adoption, or shell-hub. The
+original code change was a refactor: `search_tools`'s body moved into a ctx-free
 `discover_tools(query, top_k)`; the model-facing `search_tools` tool is now a
 one-line wrapper (`{"results": await discover_tools(...)}`), unchanged in
 behavior. Both it and this phase call the same primitive. The model-initiated
 path stays.
+
+The 2026-09-04 revision adds one thing on top: `tool-registry.md`'s "Resolved:
+Three-Layer Tool Taxonomy" makes this phase's output *callable* (via
+`tools_schema_for`) rather than a prompt hint, and internalises `call_tool`.
+The execution path is unchanged — a resolved-tool call still runs through the
+one generic mcp-hub-tier activity carrying `{server, tool, arguments}`.
 
 ### Notes Log
 

@@ -10,6 +10,14 @@
 > the planning turn drafts the plan from the retrieved procedures directly.
 > Steps 1, 10, 11 live under other components.
 >
+> **REVISION (2026-09-04 — DESIGNED, not built).** `tool-registry.md`'s
+> "Resolved: Three-Layer Tool Taxonomy & Per-Task Resolution" changes what step
+> 7 produces: `ToolDiscover`'s rows become **callable function schemas** bound
+> by `tools_schema_for` for reasoning/checkpoint turns (the step-9 "capabilities"
+> hint block is dropped for those; it stays only for the planning turn, as a
+> reference catalog). `call_tool` leaves the model schema. Steps 2–6, 8 and the
+> pipeline shape are unchanged.
+>
 > This file is the index and the cross-cutting contract. Phase docs:
 > - [`02-request-understanding.md`](request-pipeline/02-request-understanding.md)
 > - [`03-routing.md`](request-pipeline/03-routing.md) — the router + `RoutingWorkflow`

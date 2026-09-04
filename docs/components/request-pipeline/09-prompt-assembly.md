@@ -13,6 +13,14 @@
 > `kind='skill'` rows keyed `owner_id = plan_id` ([`05`](05-skill-discovery.md)),
 > plus PLAN.md ([`08`](08-planning.md)). Delegates the summary DAG + verbatim
 > window to `context-slot.md`'s `lcm.assemble`.
+>
+> **REVISION (2026-09-04 — DESIGNED, not built; `tool-registry.md` "Resolved:
+> Three-Layer Tool Taxonomy & Per-Task Resolution").** The **capabilities**
+> section is no longer a prompt section for reasoning / checkpoint turns —
+> `ToolDiscover`'s rows are bound as callable schemas by `tools_schema_for`
+> instead. It survives **only for the planning turn**, rendered as a reference
+> capability catalog (that turn invokes nothing). So on every non-planning turn
+> the shed list is just `("memory",)`, and section 4 below is planning-only.
 
 ### Role
 
@@ -44,8 +52,8 @@ DAG + verbatim window.
 | 1 | System prompt | `DEFAULT_SYSTEM_PROMPT` / session override / `PLANNING_SYSTEM_PROMPT` | never |
 | 2 | Skills | `turn_retrieval` `kind='skill'` (`owner_id = plan_id`) — the full rendered procedures `SkillDiscover` staged | never |
 | 3 | Plan | PLAN.md `render_block` — the checkpoint this turn runs + surrounding plan | never |
-| 4 | Capabilities | `turn_retrieval` `kind='tool'` (`owner_id = turn_id`) | yes — shed 1st |
-| 5 | Long-term memory | `turn_retrieval` `kind='memory'` (`owner_id = turn_id`) | yes — shed 2nd |
+| 4 | Capabilities catalog (**planning turn only** since 2026-09-04) | `turn_retrieval` `kind='tool'` (`owner_id = turn_id`) | yes — shed 1st |
+| 5 | Long-term memory | `turn_retrieval` `kind='memory'` (`owner_id = turn_id`) | yes — shed 2nd (1st on non-planning turns) |
 | 6 | Summary DAG | `lcm.assemble` | (context-slot.md's own concern) |
 | 7 | Verbatim window | `lcm.assemble` | (the compression gate's job) |
 
@@ -57,22 +65,23 @@ a `ModelCall*returns*, not an assembly-time budget).
 
 Any section with nothing to say is simply absent — no empty blocks.
 
-### The capabilities section
+### The capabilities section (planning turn only, since 2026-09-04)
 
-`ToolDiscover`'s `kind='tool'` rows render as a plain **hint**, not a schema
-change:
+Originally, `ToolDiscover`'s `kind='tool'` rows rendered as a plain hint on
+every task turn, and the "inject into the live schema" alternative was
+deferred. The 2026-09-04 revision (`tool-registry.md`) takes that alternative:
+for reasoning / checkpoint turns the rows are now bound as **callable function
+schemas** by `tools_schema_for`, so there is nothing for this section to add —
+it is dropped for those turns.
+
+It stays for the **planning turn**, which invokes nothing but needs to know
+what's reachable to draft a good plan. Rendered as a reference catalog:
 
 ```
-These environment tools look relevant to your task — use call_tool to invoke one:
+Capabilities available for this task (call them by name once execution begins):
 - github/create_pr — open a pull request
 - maps/geocode — resolve an address to coordinates
 ```
-
-The model's actual callable tool set (`llm.tools_schema_for`) is unchanged —
-this just saves an obvious `search_tools` round-trip for tools discovery already
-found relevant. Injecting discovered tools into the live schema itself (so the
-model could call them without `call_tool`) was considered and rejected as a
-separate, bigger change.
 
 ### Budget arbitration
 
@@ -80,6 +89,8 @@ separate, bigger change.
 budget = context_window * ENRICHMENT_BUDGET_FRACTION     # 0.25, placeholder
 enrichment_total = sum(section.tokens for section in [skills, plan, capabilities, memory] if present)
 
+# "capabilities" is only ever present on a planning turn (2026-09-04);
+# on every other turn the shed list is effectively just ("memory",)
 for name in ("capabilities", "memory"):     # shed order — least task-critical first
     if enrichment_total <= budget: break
     drop `name` if present; enrichment_total -= its tokens
@@ -115,7 +126,7 @@ ModelCall
        ├─ lcm.assemble(conn, session_key, system_prompt)      → conversation, base_tokens
        ├─ _staged_texts: one turn_retrieval query (memory/tool by turn_id, skill by plan_id)
        │  + plan.read(plan_id) → render_block
-       ├─ shed under budget pressure (capabilities, then memory)
+       ├─ shed under budget pressure (capabilities [planning turn only], then memory)
        └─ conversation.insert(1, …) in reverse section order  → conversation, context_tokens
 ```
 
@@ -153,6 +164,12 @@ only, by construction.
   like every other threshold in this project.
 - **Row-level memory trimming at assembly time** — deferred, see "Why
   whole-section shedding" above.
-- **Capabilities section content cap** — `ToolDiscover` already caps at
-  `top_k=10`; whether the rendered hint block needs its own cap independent of
-  the whole-section shed is unmeasured.
+- **Capabilities → callable-schema binding (2026-09-04, DESIGNED)** — how many
+  of `ToolDiscover`'s `top_k=10` rows `tools_schema_for` should actually bind as
+  callable schemas (the "top few"), and how aggressively to trim each
+  `input_schema`, is unmeasured — some MCP schemas are large enough that binding
+  all ten would cost more than the old hint block. Start conservative (3–5,
+  name + one-line + required params) and widen on evidence.
+- **Planning-turn catalog cap** — the planning turn's reference catalog renders
+  from `content` (one line each), so it's cheap; whether it needs a cap
+  independent of the whole-section shed is unmeasured.
