@@ -113,7 +113,7 @@ func PlanWorkflow(ctx workflow.Context, input types.PlanWorkflowInput) error {
 	// --- 2. approval gate (root only) ------------------------------------
 	closeReason := "plan_complete"
 	if isRoot {
-		proceed, gateReason := runApprovalGate(ctx, input, task, initiatedBy, planRes.NeedsApproval)
+		proceed, gateReason := runApprovalGate(ctx, input, task, initiatedBy, planRes.NeedsApproval, pending, &abandoned, wakeCh)
 		if !proceed {
 			logger.Info("plan not approved — wrapping up", "plan_id", input.PlanID, "reason", gateReason)
 			finishPlan(ctx, input, task, 0, gateReason)
@@ -345,11 +345,38 @@ func deliverPlanForApproval(ctx workflow.Context, input types.PlanWorkflowInput,
 
 // runApprovalGate returns (proceed, closeReason). It's a no-op unless the
 // planning turn's propose_plan set needs_approval. proceed=false means the user
-// rejected the plan (or ignored the request until it expired) — the caller
-// wraps up without executing anything. A free-text answer re-runs the planning
-// turn with the user's feedback and re-gates, up to planApprovalRevisionCap
-// rounds, after which it proceeds with whatever draft stands.
-func runApprovalGate(ctx workflow.Context, input types.PlanWorkflowInput, task types.TaskRepresentation, initiatedBy string, needsApproval bool) (bool, string) {
+// rejected the plan (or ignored the request until it expired, or the whole
+// task-run was abandoned) — the caller wraps up without executing anything.
+// A free-text answer re-runs the planning turn with the user's feedback and
+// re-gates, up to planApprovalRevisionCap rounds, after which it proceeds
+// with whatever draft stands.
+//
+// Real, live bug found 2026-09-06: a message sent while this gate is open
+// went nowhere at all — not silence-then-cancel as the old code's own
+// comment claimed, genuine total silence. The approval wait used a plain
+// blocking `.Get()` on the UserInputRequestWorkflow child, with no
+// connection at all to PlanWorkflow's own pending/wakeCh follow-up
+// machinery — Discord only routes a BUTTON click back as a UserInputResponse
+// signal (discord_user_input.go's own documented design), so free text typed
+// while this gate is waiting arrives via the ordinary NewMessage signal,
+// lands in *pending, and nothing was ever reading *pending here. Confirmed
+// live: a user resent their original request twice while a stale approval
+// sat open and got zero reaction either time. Fixed by racing the child
+// against wakeCh (same interruptible-wait shape runNestedPlan already uses
+// for the execution loop) and treating an interrupting message as revision
+// feedback — the same path a free-text approval RESPONSE already takes —
+// rather than dropping it: whatever the user sends while a plan is pending
+// approval is about that plan, not something to discard.
+func runApprovalGate(
+	ctx workflow.Context,
+	input types.PlanWorkflowInput,
+	task types.TaskRepresentation,
+	initiatedBy string,
+	needsApproval bool,
+	pending *[]types.SignalPayload,
+	abandoned *bool,
+	wakeCh workflow.Channel,
+) (bool, string) {
 	if !needsApproval {
 		return true, ""
 	}
@@ -364,6 +391,7 @@ func runApprovalGate(ctx workflow.Context, input types.PlanWorkflowInput, task t
 		deliverPlanForApproval(ctx, input, round)
 
 		reqID := fmt.Sprintf("%s:approval:%d", input.PlanID, round)
+		childCtx, cancelChild := workflow.WithCancel(ctx)
 		cwo := workflow.ChildWorkflowOptions{
 			WorkflowID:        reqID,
 			ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
@@ -377,45 +405,88 @@ func runApprovalGate(ctx workflow.Context, input types.PlanWorkflowInput, task t
 			AllowFreeText: true, // free text = a revision instruction
 			Context:       map[string]any{"plan_id": input.PlanID, "round": round},
 		}
-		var out types.UserInputRequestWorkflowOutput
-		err := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(ctx, cwo), UserInputRequestWorkflow, types.UserInputRequestWorkflowInput{
+		fut := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(childCtx, cwo), UserInputRequestWorkflow, types.UserInputRequestWorkflowInput{
 			Request:      req,
 			SessionKey:   input.SessionKey,
 			ConnectionID: input.ConnectionID,
-		}).Get(ctx, &out)
-		if err != nil {
-			// An unrelated message interrupted the wait (cancelled the child
-			// workflow) — "don't execute", same fail-closed stance permission
-			// gating takes on a cancelled approval, but distinct from an
-			// explicit reject: the interrupting message already IS the
-			// user's next word, so no cancellation notice or follow-up
-			// intention here — that would talk over what they just sent.
-			logger.Info("plan approval request cancelled", "plan_id", input.PlanID, "error", err)
-			return false, "cancelled"
+		})
+
+		var out types.UserInputRequestWorkflowOutput
+		var err error
+		done, interrupted, superseded := false, false, false
+		for !done {
+			sel := workflow.NewSelector(ctx)
+			sel.AddFuture(fut, func(f workflow.Future) {
+				err = f.Get(ctx, &out)
+				done = true
+			})
+			sel.AddReceive(wakeCh, func(c workflow.ReceiveChannel, _ bool) {
+				var v bool
+				c.Receive(ctx, &v)
+			})
+			sel.Select(ctx)
+			if done {
+				break
+			}
+			if *abandoned {
+				superseded = true
+				break
+			}
+			if len(*pending) > 0 {
+				interrupted = true
+				break
+			}
+		}
+		cancelChild()
+		if superseded || interrupted {
+			_ = fut.Get(ctx, nil) // let the cancellation settle
 		}
 
-		decision := ""
-		if out.Response.SelectedOptionID != nil {
-			decision = *out.Response.SelectedOptionID
-		}
-		feedback := ""
-		if out.Response.FreeText != nil {
-			feedback = *out.Response.FreeText
-		}
-
+		var feedback string
 		switch {
-		case decision == "approve":
-			return true, ""
-		case decision == "reject" && feedback == "":
-			return false, "rejected"
-		case feedback == "":
-			// No selection and no text — the request expired. Fail closed.
-			logger.Info("plan approval expired with no response", "plan_id", input.PlanID)
-			return false, "expired"
+		case superseded:
+			return false, "superseded"
+		case interrupted:
+			// Same combination shape foldInFollowups uses for the execution
+			// loop's own pending drain.
+			msgs := *pending
+			*pending = nil
+			for i, m := range msgs {
+				if i > 0 {
+					feedback += "\n\n"
+				}
+				feedback += m.Message.Content
+			}
+			logger.Info("plan approval interrupted by a follow-up message — treating it as revision feedback", "plan_id", input.PlanID, "round", round)
+		case err != nil:
+			// The child workflow failed for some other reason (not our own
+			// cancellation above) — fail closed, same stance permission
+			// gating takes on a broken approval wait.
+			logger.Info("plan approval request failed", "plan_id", input.PlanID, "error", err)
+			return false, "cancelled"
+		default:
+			decision := ""
+			if out.Response.SelectedOptionID != nil {
+				decision = *out.Response.SelectedOptionID
+			}
+			if out.Response.FreeText != nil {
+				feedback = *out.Response.FreeText
+			}
+			switch {
+			case decision == "approve":
+				return true, ""
+			case decision == "reject" && feedback == "":
+				return false, "rejected"
+			case feedback == "":
+				// No selection and no text — the request expired. Fail closed.
+				logger.Info("plan approval expired with no response", "plan_id", input.PlanID)
+				return false, "expired"
+			}
 		}
 
-		// A revision instruction (with or without an explicit option). Re-plan
-		// with the feedback, then re-gate — unless we've hit the cap.
+		// A revision instruction — either free text on the approval response,
+		// or a follow-up message that interrupted the wait. Re-plan with it,
+		// then re-gate — unless we've hit the cap.
 		if round >= planApprovalRevisionCap {
 			logger.Info("plan revision cap reached — proceeding with current draft", "plan_id", input.PlanID)
 			return true, ""
