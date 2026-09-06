@@ -189,10 +189,25 @@ class ModelCallActivity:
                 # the recursion-termination guard) already answers that.
                 # A checkpoint turn: under a plan, not planning / handling, not a
                 # subagent — it's the one turn kind that should see checkpoint_done.
+                #
+                # Real bug found 2026-09-06: plan_workflow.go's plan-presentation
+                # turn (runPlanPresentationTurn) sets plan_id (so prompt.assemble
+                # splices in the current PLAN.md) but is NOT executing a
+                # checkpoint — before this fix it still satisfied every other
+                # condition here and got misclassified as TurnKind.CHECKPOINT,
+                # wrongly offered checkpoint_done, and — since may_plan is False
+                # for a non-planning/non-plan_handling turn — a stray
+                # checkpoint_done call from it would have been applied straight
+                # against the real plan ledger below. offer_delivery_tools is
+                # only ever set on a turn built specifically to deliver
+                # something (this presentation turn, turn.go's delivery-recovery
+                # round), never a real checkpoint execution, so it's the correct
+                # signal to exclude on here rather than adding a new flag.
                 is_checkpoint = bool(
                     input.plan_id
                     and not input.planning_mode
                     and not input.plan_handling
+                    and not input.offer_delivery_tools
                     and not caller_is_subagent
                 )
                 tools_schema = llm.tools_schema_for(
