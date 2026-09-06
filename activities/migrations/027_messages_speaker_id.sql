@@ -1,0 +1,14 @@
+-- docs/components/memory-slot.md, "Resolved: Per-Message Speaker Identity"
+-- (subject/participant model v2, 2026-09-05). role: user no longer means "the
+-- one tenant owner" — Discord/Discord-voice sessions already mix multiple
+-- real human speakers under one session_key, and that per-message identity
+-- (gateway/core.MessageEvent.User, already captured at the platform adapter)
+-- was being silently discarded at Ingest(). This column carries it through so
+-- it survives into messages, instead of being lost the moment the signal
+-- payload was built.
+--
+-- Nullable: assistant/tool-role messages, and any system-synthesized user
+-- message (proactive wake fold-in, subagent kickoff, plan seed/revision
+-- text), have no real sender and leave this NULL. NULL falls back to `role`
+-- wherever this is rendered (see write_memory.py).
+ALTER TABLE messages ADD COLUMN speaker_id TEXT;

@@ -31,6 +31,13 @@ type Usage struct {
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content,omitempty"`
+	// SpeakerID — docs/components/memory-slot.md "Resolved: Per-Message
+	// Speaker Identity". The platform-native sender id of whoever actually
+	// authored this message (gateway/core.MessageEvent.User), threaded
+	// through untouched from Ingest(). Empty for any message this process
+	// synthesizes itself (proactive wake fold-in, subagent kickoff content,
+	// plan seed/revision text) — those have no real human sender.
+	SpeakerID string `json:"speaker_id,omitempty"`
 }
 
 // TurnInput starts a Turn Workflow — top-level or, recursively, a subagent.

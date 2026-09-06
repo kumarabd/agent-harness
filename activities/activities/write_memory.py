@@ -72,6 +72,18 @@ class WriteMemoryActivity:
 
     @activity.defn(name="WriteMemory")
     async def __call__(self, session_key: str) -> None:
+        # Session-level platform tag (docs/components/memory-slot.md, "Resolved:
+        # Per-Message Speaker Identity") — a session is inherently single-platform, so
+        # this is one top-level field on the memory_write call, not repeated per
+        # transcript line. Lets agent-brain's mining pipeline pair a bare speaker_id (no
+        # platform prefix in the "role (speaker_id): content" line convention below) with
+        # the right entity_identities row. Same query shape as model_call.py's own
+        # session lookup.
+        session_row = await self._pool.fetchrow(
+            "SELECT platform FROM sessions WHERE session_key = $1", session_key
+        )
+        platform = session_row["platform"] if session_row else None
+
         # Every currently-active summary — already the cheapest, most-
         # current representation of whatever it covers. created_at ASC
         # tracks chronological position among active nodes even after
@@ -97,7 +109,7 @@ class WriteMemoryActivity:
 
         message_rows = await self._pool.fetch(
             """
-            SELECT m.message_id, m.role, m.content, m.seq, t.turn_id, t.turn_seq
+            SELECT m.message_id, m.role, m.content, m.speaker_id, m.seq, t.turn_id, t.turn_seq
             FROM turns t
             JOIN messages m ON m.parent_id = t.turn_id
             WHERE t.parent_id = $1 AND t.parent_type = 'session'
@@ -107,8 +119,18 @@ class WriteMemoryActivity:
         )
         uncovered_rows = [row for row in message_rows if row["message_id"] not in covered_ids]
 
+        # speaker_id is only ever set on a real human message (see
+        # insert_message.py) — enrichment on top of role, never a
+        # substitute for it. role alone is always accurate (it's NOT NULL);
+        # speaker_id is shown additionally when known, not in its place.
+        def _attributed_line(row):
+            label = row["role"]
+            if row["speaker_id"]:
+                label = f"{label} ({row['speaker_id']})"
+            return f"{label}: {row['content']}"
+
         lines = [f"[summary] {row['content']}" for row in summary_rows if row["content"]]
-        lines += [f"{row['role']}: {row['content']}" for row in uncovered_rows if row["content"]]
+        lines += [_attributed_line(row) for row in uncovered_rows if row["content"]]
         content = "\n".join(lines)
         if not content:
             logger.info("WriteMemory[%s]: nothing to write (no active summaries, no uncovered message content)", session_key)
@@ -127,15 +149,16 @@ class WriteMemoryActivity:
         # to compute it.
         content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
+        payload = {
+            "event_id": f"{session_key}:memory-write:{content_hash}",
+            "type": "conversation_turn",
+            "trigger": {"type": "input", "turn_id": turn_id, "content": content},
+        }
+        if platform:
+            payload["platform"] = platform
+
         try:
-            await agent_brain.call_tool(
-                "memory_write",
-                {
-                    "event_id": f"{session_key}:memory-write:{content_hash}",
-                    "type": "conversation_turn",
-                    "trigger": {"type": "input", "turn_id": turn_id, "content": content},
-                },
-            )
+            await agent_brain.call_tool("memory_write", payload)
         except agent_brain.AgentBrainNotConfiguredError:
             logger.info("WriteMemory[%s]: agent-brain not configured, skipping", session_key)
             return

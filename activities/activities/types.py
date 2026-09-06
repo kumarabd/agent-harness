@@ -31,6 +31,7 @@ class Usage:
 class Message:
     role: str = ""
     content: str = ""
+    speaker_id: str = ""
 
 
 @dataclass

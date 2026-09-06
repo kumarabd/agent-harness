@@ -124,7 +124,10 @@ DEFAULT_SYSTEM_PROMPT = (
     "offered, call search_tools to look for it; a match becomes directly callable by name on "
     "your NEXT step, not this one, so don't expect to invoke it in the same response that found "
     "it. Use memory_search (and memory_expand for full detail) to recall relevant context from "
-    "past conversations when it's genuinely useful, not on every turn. After using a tool, "
+    "past conversations when it's genuinely useful, not on every turn. If memory_search doesn't "
+    "surface something you need to know about a person or entity in the conversation, don't "
+    "guess — ask the user directly if it's blocking what you're doing right now, or call "
+    "create_intention to follow up later if it isn't. After using a tool, "
     "summarize the result in plain text for the user rather than leaving it as raw output. "
     f"Every response, also call {_NEXT_STEP_HINT_TOOL_NAME} alongside anything "
     "else you call, declaring what the next step needs."
@@ -365,7 +368,7 @@ TOOLS_SCHEMA = [
                         "enum": ["time", "deadline", "condition", "state", "event", "inactivity", "schedule"],
                         "description": "time/deadline = fire once at fire_at; condition/state/event = poll a probe until it holds; inactivity = fire if the user goes quiet for idle_for_seconds; schedule = recurring, needs cron or every_seconds.",
                     },
-                    "fire_at": {"type": "string", "description": "ISO-8601 timestamp (kind=time/deadline)."},
+                    "fire_at": {"type": "string", "description": "ISO-8601 timestamp (kind=time/deadline). Compute this relative to the actual current date — check it first (e.g. via shell_exec); never assume or recall a date from memory."},
                     "idle_for_seconds": {"type": "number", "description": "Seconds of user silence before firing (kind=inactivity)."},
                     "cron": {"type": "string", "description": "Cron expression, UTC (kind=schedule) — e.g. \"0 9 * * MON-FRI\"."},
                     "every_seconds": {"type": "number", "description": "Fixed interval in seconds (kind=schedule), alternative to cron."},
