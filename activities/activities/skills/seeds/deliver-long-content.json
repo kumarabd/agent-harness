@@ -1,0 +1,15 @@
+{
+  "id": "deliver-long-content",
+  "title": "Deliver a reply that won't fit in one platform message",
+  "trigger_text": "delivering a response or plan to the user whose content is too long for one message on the current platform",
+  "scope": "global",
+  "preconditions": ["deliver_reply or deliver_attachment is available", "the content to send exceeds what fits in a single platform message"],
+  "body": [
+    { "step_id": "judge", "instruction": "Decide the shape of the content: prose (an explanation, a narrative answer) vs. structured (a plan, a checklist, code, a table)", "tool_ref": "", "slots": [] },
+    { "step_id": "split-prose", "instruction": "For prose, split at natural boundaries — paragraphs or sections — and send each piece with its own deliver_reply call. Never cut mid-sentence or mid-word.", "tool_ref": "deliver_reply", "slots": [] },
+    { "step_id": "attach-structured", "instruction": "For structured content that would lose its shape split across messages (a plan, a checklist, code), send it whole via deliver_attachment with a short, descriptive filename instead of splitting it.", "tool_ref": "deliver_attachment", "slots": [] },
+    { "step_id": "recover", "instruction": "If a deliver_reply or deliver_attachment call fails with content_too_long, that piece is still too big — split it further (prose) or switch to deliver_attachment (structured), don't retry the same call unchanged.", "tool_ref": "", "slots": [] }
+  ],
+  "done_criteria": ["all of the content has actually reached the user, across however many messages or an attachment it took"],
+  "notes": ["Prefer the fewest messages that stay readable — don't split more finely than the natural boundaries call for.", "A failed delivery call is a signal to change strategy, not to retry identically."]
+}

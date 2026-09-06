@@ -36,9 +36,10 @@ retrieval activities' inputs. This is the same category as
 `ModelCallOutput.NextHintTier` (a decision derived from model output) and
 `ToolCallRef.Server` / `Tool` (a token extracted from the command string,
 explicitly blessed as "dispatch/routing metadata, not the call's actual
-arguments"). The **bulk retrieved content** — memory item text, the composed
-skill, tool schemas — is what goes through the `turn_retrieval` staging table in
-later steps; a ~20-word query does not need to.
+arguments"). The **bulk retrieved content** — memory item text, rendered skill
+procedures, tool schemas — is staged to `turn_retrieval` and injected into the
+turn's conversation by `prompt.assemble` at `ModelCall` time; a ~20-word query
+does not need to cross the workflow as content.
 
 No `task_representations` table. (One was drafted twice and cut twice — first
 when there were no consumers, then when the consumers turned out to only need
@@ -46,10 +47,12 @@ the query as activity input, not a Postgres read.)
 
 ### Design decisions
 
-- **Top-level turns only.** A subagent's task is defined by its parent's spawn —
-  `turn.go` guards on `ParentType == "session"`.
-- **Load-bearing, no fallback.** Every lane / episode / retrieval decision
-  reads this representation, so there is no neutral/degraded stand-in.
+- **Runs for subagents too** ("Subagents are full agents",
+  [`08-planning.md`](08-planning.md)) — the spawn prompt is the subagent's seed
+  user message, exactly what `ClassifyRequest` reads, and a subagent handed a
+  complex sub-task deserves its own skill discovery. A turn started by a
+  `PlanWorkflow` skips it (the classification is passed in).
+- **Load-bearing, no fallback.**
   Unconfigured `fast` tier, provider error, failed call, or output that
   violates the contract all raise `ClassificationError` — Temporal retries the
   bounded ladder, and an exhausted retry fails the turn in `turn.go`

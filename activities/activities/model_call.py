@@ -107,6 +107,14 @@ class ModelCallActivity:
                 context_tokens = 0
                 context_window = 0
                 next_hint_modality, next_hint_tier = model_registry.default_hint()
+                # Fixture path never runs build_conversation, so there's no
+                # per-task resolved set to speak of — a scripted response can
+                # still script a call to any TOOL_REGISTRY-backed name
+                # (shell_exec, search_tools, ...), it just can't exercise a
+                # resolved (ToolDiscover) dispatch. Empty, not omitted: the
+                # tool_calls minting loop below is shared with the real path
+                # and unconditionally looks this up per call.
+                resolved_by_name: dict = {}
             else:
                 # docs/components/model-registry.md, "Resolved: Selection
                 # Mechanism" + "Resolved: Escalate-on-Retry" — the previous
@@ -144,7 +152,15 @@ class ModelCallActivity:
                     "SELECT system_prompt, platform FROM sessions WHERE session_key = $1",
                     ids.session_key_of(input.turn_id),
                 )
-                system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
+                # docs/components/request-pipeline/08-planning.md — a planning
+                # turn under a PlanWorkflow drafts the checkpoint plan and does
+                # nothing else, so it gets its own system prompt (and, below, a
+                # propose_plan-only tool schema) regardless of the session's
+                # configured prompt.
+                if input.planning_mode:
+                    system_prompt = llm.PLANNING_SYSTEM_PROMPT
+                else:
+                    system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
                 platform = session_row["platform"] if session_row else None
                 # prompt_assemble_latency_seconds — step 9 (docs/components/
                 # request-pipeline/09-prompt-assembly.md). Only the real path
@@ -153,9 +169,15 @@ class ModelCallActivity:
                 # near-zero ModelCall and this cost stayed invisible. Bucketed
                 # in seconds (metrics.SECONDS_LATENCY_METRICS).
                 assemble_started = time.monotonic()
-                conversation, context_tokens = await llm.build_conversation(
-                    conn, input.turn_id, input.episode_id, system_prompt, context_window
+                # `resolved` (docs/components/tool-registry.md, "Resolved:
+                # Three-Layer Tool Taxonomy & Per-Task Resolution") is always
+                # [] when planning_mode — that turn gets a reference catalog
+                # in-prompt instead of callable schemas (prompt.assemble).
+                conversation, context_tokens, resolved = await llm.build_conversation(
+                    conn, input.turn_id, input.plan_id, system_prompt, context_window,
+                    planning=input.planning_mode,
                 )
+                resolved_by_name = {c.name: c for c in resolved}
                 activity.metric_meter().create_histogram_float(
                     "prompt_assemble_latency_seconds", unit="s"
                 ).record(time.monotonic() - assemble_started)
@@ -165,7 +187,22 @@ class ModelCallActivity:
                 # to know which kind of turn this is; caller_is_subagent
                 # (computed once, above, shared with the fixture path and
                 # the recursion-termination guard) already answers that.
-                tools_schema = llm.tools_schema_for(caller_is_subagent)
+                # A checkpoint turn: under a plan, not planning / handling, not a
+                # subagent — it's the one turn kind that should see checkpoint_done.
+                is_checkpoint = bool(
+                    input.plan_id
+                    and not input.planning_mode
+                    and not input.plan_handling
+                    and not caller_is_subagent
+                )
+                tools_schema = llm.tools_schema_for(
+                    caller_is_subagent,
+                    planning=input.planning_mode,
+                    plan_handling=input.plan_handling,
+                    checkpoint=is_checkpoint,
+                    resolved=resolved,
+                    offer_delivery_tools=input.offer_delivery_tools,
+                )
 
                 # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
                 # real provider round-trip time only; the fixture path above isn't
@@ -211,36 +248,70 @@ class ModelCallActivity:
                 content, raw_tool_calls, usage = real.content, real.raw_tool_calls, real.usage
                 next_hint_modality, next_hint_tier = real.next_hint_modality, real.next_hint_tier
 
-            # docs/components/request-pipeline/08-planning.md — peel the
-            # plan_progress meta-tool out of the response the same way the
-            # providers already strip declare_next_step_hint: it carries no work
-            # of its own, never becomes a tool_calls row, and doesn't count
-            # toward has_tool_calls. A plan_progress-only response therefore ends
-            # the turn ("no_tool_calls") after recording the progress — the
-            # model marking a final checkpoint done and stopping. Applied in its
-            # own transaction, before the message/tool_calls write below, so a
+            # docs/components/request-pipeline/08-planning.md (Phase 3C,
+            # plan-and-execute) — peel the plan meta-tools out of the response
+            # the same way the providers already strip declare_next_step_hint:
+            # they carry no work of their own, never become tool_calls rows, and
+            # don't count toward has_tool_calls. Applied in their own
+            # transaction, before the message/tool_calls write below, so a
             # plan-bookkeeping failure can't poison that write.
-            plan_updates, raw_tool_calls = plan.split_progress_calls(raw_tool_calls)
-            if plan_updates and input.episode_id:
-                try:
-                    async with conn.transaction():
-                        applied = await plan.apply_progress(conn, input.episode_id, plan_updates)
-                    logger.info(
-                        "ModelCall[%s:%d]: applied %d/%d plan update(s)",
-                        input.turn_id, input.context_seq, applied, len(plan_updates),
-                    )
-                except Exception:  # noqa: BLE001 - best-effort; never fail the call over plan bookkeeping
-                    logger.warning(
-                        "ModelCall[%s:%d]: plan_progress apply failed", input.turn_id, input.context_seq, exc_info=True
-                    )
+            #
+            # Both meta-tools are peeled whenever a plan is in play, regardless
+            # of turn mode — so a stray call never falls through to become a
+            # real tool_calls row that turn.go would try to dispatch. What's
+            # *applied* is mode-gated:
+            #   - planning turn (planning_mode) or mid-plan follow-up
+            #     (plan_handling): apply `propose_plan` → seed PLAN.md (seed()
+            #     merges, so a re-plan keeps completed checkpoints). A
+            #     propose_plan-only planning response ends the turn
+            #     ("no_tool_calls") and PlanWorkflow walks the ledger. On the
+            #     planning turn, propose_plan's `needs_approval` rides back out
+            #     on ModelCallOutput → TurnResult → PlanWorkflow's approval gate.
+            #   - checkpoint turn (neither flag): apply `checkpoint_done` → mark
+            #     that checkpoint (and optionally replace the pending tail).
+            plan_meta_n = 0
+            needs_approval_out = False
+            if input.plan_id:
+                proposal, raw_tool_calls = plan.split_propose_plan(raw_tool_calls)
+                done_calls, raw_tool_calls = plan.split_checkpoint_done(raw_tool_calls)
+                may_plan = input.planning_mode or input.plan_handling
+                if proposal and may_plan:
+                    plan_meta_n += len(proposal["checkpoints"])
+                    needs_approval_out = proposal["needs_approval"] and input.planning_mode
+                    try:
+                        async with conn.transaction():
+                            seeded = await plan.seed(input.plan_id, proposal["checkpoints"])
+                        logger.info(
+                            "ModelCall[%s:%d]: seeded plan with %d checkpoint(s) (needs_approval=%s)",
+                            input.turn_id, input.context_seq, seeded, needs_approval_out,
+                        )
+                    except Exception:  # noqa: BLE001 - best-effort plan bookkeeping
+                        logger.warning(
+                            "ModelCall[%s:%d]: propose_plan seed failed",
+                            input.turn_id, input.context_seq, exc_info=True,
+                        )
+                if done_calls and not may_plan:
+                    plan_meta_n += len(done_calls)
+                    try:
+                        async with conn.transaction():
+                            applied = await plan.apply_checkpoint_done(input.plan_id, done_calls)
+                        logger.info(
+                            "ModelCall[%s:%d]: applied %d/%d checkpoint_done call(s)",
+                            input.turn_id, input.context_seq, applied, len(done_calls),
+                        )
+                    except Exception:  # noqa: BLE001 - best-effort plan bookkeeping
+                        logger.warning(
+                            "ModelCall[%s:%d]: checkpoint_done apply failed",
+                            input.turn_id, input.context_seq, exc_info=True,
+                        )
 
             logger.info(
-                "ModelCall[%s:%d] -> %r (tool_calls=%d, plan_updates=%d)",
+                "ModelCall[%s:%d] -> %r (tool_calls=%d, plan_meta=%d)",
                 input.turn_id,
                 input.context_seq,
                 content[:60],
                 len(raw_tool_calls),
-                len(plan_updates),
+                plan_meta_n,
             )
 
             async with conn.transaction():
@@ -336,23 +407,44 @@ class ModelCallActivity:
                         else ids.activity_id(input.turn_id, n)
                     )
 
+                    # A per-task resolved (ToolDiscover) call is offered to the
+                    # model under its OWN name (e.g. "weather_lookup"), so
+                    # TOOL_REGISTRY has no handler for tool_name. resolved_server/
+                    # resolved_tool (migration 026) carry the {server, tool}
+                    # identity ToolCall (tool_call.py) needs to route it through
+                    # the internal call_tool proxy instead — set ONLY here, never
+                    # for shell_exec/call_tool themselves (that would double-wrap
+                    # call_tool's own explicit arguments). Gating reuses the same
+                    # identity when it's known; falls back to _resolve_gating's
+                    # shell_exec/call_tool cases otherwise.
+                    resolved_cap = None if is_subagent else resolved_by_name.get(tool_name)
+                    if resolved_cap is not None:
+                        resolved_server, resolved_tool = resolved_cap.resolved_target
+                        gate_server, gate_tool = resolved_server, resolved_tool
+                        approval_needed = permissions.requires_approval(gate_server, gate_tool)
+                    else:
+                        resolved_server = resolved_tool = None
+                        approval_needed, gate_server, gate_tool = (
+                            _resolve_gating(tool_name, arguments) if not is_subagent else (False, "", "")
+                        )
+
                     # status left at its 'pending' default — ToolCall (or the
                     # subagent child workflow's own completion) is what
                     # transitions it to ok/error/cancelled. See the schema
                     # migration's note on why 'pending' exists.
                     await conn.execute(
                         "INSERT INTO tool_calls "
-                        "(tool_call_id, parent_id, message_id, tool_name, arguments, is_subagent) "
-                        "VALUES ($1, $2, $3, $4, $5, $6)",
+                        "(tool_call_id, parent_id, message_id, tool_name, arguments, is_subagent, "
+                        "resolved_server, resolved_tool) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                         tool_call_id,
                         input.turn_id,
                         message_id,
                         tool_name,
                         json.dumps(arguments),
                         is_subagent,
-                    )
-                    approval_needed, gated_server, gated_tool = (
-                        _resolve_gating(tool_name, arguments) if not is_subagent else (False, "", "")
+                        resolved_server,
+                        resolved_tool,
                     )
                     refs.append(
                         ToolCallRef(
@@ -360,8 +452,8 @@ class ModelCallActivity:
                             tool_name=tool_name,
                             is_subagent=is_subagent,
                             requires_approval=approval_needed,
-                            server=gated_server,
-                            tool=gated_tool,
+                            server=gate_server,
+                            tool=gate_tool,
                         )
                     )
 
@@ -388,6 +480,7 @@ class ModelCallActivity:
                 context_window=context_window,
                 next_hint_modality=next_hint_modality,
                 next_hint_tier=next_hint_tier,
+                needs_approval=needs_approval_out,
             )
 
     async def _call_model_streaming_with_delivery(self, turn_id: str, conversation: list[dict], provider, model: str, max_tokens: int, tools_schema: list[dict]):
@@ -487,13 +580,22 @@ def _resolve_gating(tool_name: str, arguments: dict) -> tuple[bool, str, str]:
     ever seeing the call's actual arguments (crosses the reference-passing
     boundary as routing metadata, same category as tool_name itself).
 
+    Only the shell_exec / call_tool cases live here — a **resolved** (per-task
+    ToolDiscover) call's identity is already known statically (the `Capability`
+    ToolDiscover produced for it this turn carries `resolved_target`), so the
+    caller (the tool_calls minting loop) resolves those directly and only
+    falls back to this function when the name isn't a resolved one.
+
       - shell_exec: server is always "shell" (matching shell_hub.search()'s
         own result shape); tool is deliberately just the first
         whitespace-delimited token of the command string — a known, accepted
         simplification, not real shell parsing (won't catch a compound
         command or one invoked via `sh -c "..."`).
       - call_tool: server/tool are already explicit in its own arguments —
-        this is the one case with an exact, unambiguous identity.
+        this is the one case with an exact, unambiguous identity. (The model
+        itself no longer calls call_tool directly since the 2026-09-04
+        per-task-resolution revision, but a stray call still resolves
+        correctly rather than silently ungated.)
       - anything else (memory_search, search_tools, declare_next_step_hint,
         ...): never gateable, these aren't side-effecting.
     """

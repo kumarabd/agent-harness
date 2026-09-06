@@ -1,354 +1,205 @@
 # Request Pipeline — Step 8: Planning
 
-> **SUPERSEDED IN PART by [`../episode-lifecycle.md`](../episode-lifecycle.md)
-> (2026-09-01):** the plan ledger is now **episode-scoped**, not turn-scoped.
-> `turn_plan` keys on `episode_id` (the anchor turn_id — migration `018`
-> renamed the column), is seeded ONCE when the episode opens, and persists
-> across every turn of the episode; `plan_progress` advances that one ledger.
-> `RecordSkillOutcome` fires once when the episode closes, not per turn. The
-> "Reconciliation trigger" below now has two callers — a mid-turn follow-up
-> and a between-turn continuation — both re-keyed on `episode_id`. Everything
-> else in this doc (the living-ledger decision, `plan_progress` mechanics,
-> subagents-as-full-agents, degradation posture) stands as written; mentally
-> substitute "episode" for "turn" wherever the ledger's lifetime is discussed.
+> STATUS: BUILT 2026-09-03 on branch `proactivity-substrate` (`go build ./...` +
+> `go test ./internal/...` green, `activities/` compiles; **NOT deployed, NOT
+> live-verified**). Design: **plan-and-execute orchestrator** — a Deliberate
+> task-run is a `PlanWorkflow`, not a ledger the model narrates inside one loop.
 >
-> STATUS: DESIGN (2026-08-31). Resolves the "step 8 not designed" open question
-> in [`../request-pipeline.md`](../request-pipeline.md).
-> **Built:** (1) the subagent gate fix — steps 2 + 3 (`ClassifyRequest`,
-> `RoutingWorkflow`) and `RecordSkillOutcome` run for `ParentType == "turn"`
-> too; `MemoryRetrieve` inherits the parent's staged `kind='memory'` rows when
-> given a `parent_turn_id`. (2) the plan ledger — `turn_plan` table (migration
-> `017`), `activities/activities/plan.py`, the `plan_progress` meta-tool
-> (`llm.TOOLS_SCHEMA`, peeled out and applied by `ModelCall` — no separate
-> activity, same shape as `declare_next_step_hint`), `ComposeSkill` seeds it,
-> `build_conversation` renders the progress block, `RecordSkillOutcome` folds
-> the final state into the synthesis trajectory. (3) the reconciliation trigger
-> — a mid-turn follow-up dispatches a detached `RoutingWorkflow` in
-> `Mode="reconcile"` (memory + skills only, re-keyed on the correction,
-> replacing the stale bundle; `ComposeSkill` regenerates the composed block but
-> not `turn_plan`). **Deferred:** the failure-run half of the reconciliation
-> trigger; DAG/parallelism.
+> **Open:** deploy + live-verify; the gateway renders `plan_approval` requests
+> through the kind-agnostic user-input path (no bespoke UI). Scenarios reworked
+> (the starter now scripts checkpoint turns via `checkpoint_responses` /
+> `plan_followup` — see `workflows/scenarios/README.md`), not yet run against a
+> deploy.
 >
-> Parent: [`../request-pipeline.md`](../request-pipeline.md).
-> Depends on: [`06-skill-composition.md`](06-skill-composition.md) /
-> [`../skill-subsystem.md`](../skill-subsystem.md) (the plan comes from
-> compose), [`03-routing.md`](03-routing.md) (subagent retrieval).
-> Feeds: [`../skill-subsystem.md`](../skill-subsystem.md) "Recording" (the
-> final ledger state is structured signal for synthesis).
+> Parent: [`../request-pipeline.md`](../request-pipeline.md),
+> [`../episode-lifecycle.md`](../episode-lifecycle.md) (why a task-run is the unit).
+> Feeds: [`../proactivity.md`](../proactivity.md) — a `PlanWorkflow` blocked
+> between checkpoints is what a scheduled wake advances.
 
-### Role
+## The model
 
-Give the reason-act loop a **visible, progressing, self-correcting plan** to
-execute against — so the harness (and later, synthesis) can tell what the agent
-intended, where it is, and when it has diverged — **without** paying for a
-separate upfront planning model call on every complex turn.
+The **Lite lane** is unchanged: one reason-act `TurnWorkflow`, no plan.
 
-### The decision: a living ledger, not an upfront planner
-
-Two shapes were considered and rejected:
-
-- **A standalone `Plan` activity** — one expert-tier call after routing that
-  turns (task + composed skill + memory + tools) into an ordered step list.
-  Rejected: it adds 2–10s + tokens to the head of every moderate/complex turn,
-  and for any task with a matching composed skill it mostly re-formats work
-  steps 5–6 already did.
-- **Recursive decompose-to-leaves** — classify → if complex, decompose into
-  subtasks → recurse until subtasks are "simple", execute only at the leaves.
-  Rejected: every level decomposes on **assumptions** (no tool has run, no file
-  read, no state checked), so the first executing subtask routinely invalidates
-  its siblings and the parent must detect that from a lossy summary and re-plan.
-  This is the classic plan-and-execute failure mode. Models also over-adhere to
-  a written plan even when reality diverges ("plan inertia").
-
-What's built instead: **the plan is a checkpoint ledger the executor
-maintains.** It is created cheaply (from compose, no extra call), carried in the
-loop's context, advanced as work completes, and revised when execution
-diverges. Decomposition into subagents happens **lazily, driven by execution** —
-the model spawns a subagent when it *hits* a self-contained detail-heavy slab,
-with real context the upfront planner never had.
-
-### Plan representation — a sequential checkpoint list
+The **Deliberate lane** is a `PlanWorkflow` (workflow id `<plan_id>:plan`, where
+`plan_id` is the planning turn's id). `dispatch.go` starts it instead of a plain
+`TurnWorkflow` when `ClassifyRequest` + `ResolveOpenPlan` say "fresh Deliberate
+task-run".
 
 ```
-Plan = ordered [ Checkpoint ]
-
-Checkpoint = {
-  id:            str,          # stable within the turn
-  intent:        str,          # one line — what this step accomplishes
-  done_when:     str,          # the observable condition that closes it
-  status:        "pending" | "active" | "done" | "revised" | "skipped",
-  note:          str | null,   # why revised/skipped, or a correction folded in
-}
+PlanWorkflow(plan_id, task):
+  1. PLANNING TURN   child TurnWorkflow id=plan_id, PlanningMode
+       reads task + retrieved skills + memory + discovered tools + lcm
+       ends by calling propose_plan({checkpoints:[{intent, done_when, complex?}], needs_approval})
+       → ModelCall peels it, plan.seed writes PLAN.md; needs_approval rides out on TurnResult
+  2. APPROVAL GATE   (root plan only)
+       needs_approval false → proceed
+       true → UserInputRequestWorkflow(kind="plan_approval"): approve · revise (re-plan, ≤3×) · reject
+  3. EXECUTION LOOP   each non-terminal checkpoint, in order:
+       a. pending user follow-up?  → foldInFollowups: a PlanHandling turn answers + may re-seed the plan
+       b. NextCheckpoint → seed text
+       c. checkpoint is `complex`?  → nested PlanWorkflow  (3C-iii, opaque)
+          else                      → flat checkpoint TurnWorkflow → calls checkpoint_done({status, note?, revised_tail?})
+  4. CLOSE   dispatch RecordSkill (async, ABANDON) over the whole tree; signal the coordinator PlanDone
 ```
 
-**Sequential, no dependency graph.** A checkpoint is done, active, or not
-started; the loop walks them in order. (A DAG — `depends_on` edges, concurrent
-independent branches — was considered and deferred: the value is parallelism,
-and we're keeping subagent execution synchronous for now. See "Deferred".)
+## PLAN.md — the store
 
-### Where the plan comes from
+One file per plan at `$SESSION_ROOT/session/<session-key>/plans/<plan_id
+':'→'_'>/PLAN.md` on the tenant PV. **It is the store, not a mirror** — there is
+no `turn_plan` table (dropped, migration `023`). Greppable and editable by
+`shell_exec` and by any delegated Claude Code on the same task; human-readable,
+so the user reads and edits the exact artifact they approve.
 
-**From compose (step 6), gated on it.** When `SkillDiscover` found candidates
-and `ComposeSkill` ran, compose emits the checkpoint list alongside the composed
-prose — it already has the merged procedure's ordered steps, the bound tool
-refs, and the filled slots; turning that into `{intent, done_when}` checkpoints
-is a formatting step in the same model call, not a new one. The merge call now
-returns `{"procedure": "<prose>", "checkpoints": [{intent, done_when}]}`;
-`plan.seed` writes the rows as `cp1..cpN`. When the merge tier is unconfigured
-or the call fails, checkpoints degrade to the top procedure's own `body` step
-instructions (`done_when` blank).
+```markdown
+# Plan
+status: executing            # executing | complete
 
-**No skill → no plan.** If routing fast-pathed, or `SkillDiscover` came back
-empty, there is no checkpoint ledger and the loop runs exactly as it does today.
-Step 8 is strictly additive and never load-bearing — same posture as every other
-pipeline phase.
-
-### The loop tracks position
-
-Prompt assembly (step 9, `09-prompt-assembly.md`) reads the current ledger
-every `ModelCall` and splices a compact progress block after the composed-skill
-block:
-
-```
-Plan progress — follow it where it fits, revise it where the task diverges:
-  [x] 1. Locate the failing test and its last green commit
-  [>] 2. Reproduce the failure locally
-  [ ] 3. Bisect to the offending change
-  [ ] 4. Fix and confirm green
+- cp1 [x] Locate the failing test
+- cp2 [ ] Reproduce the failure
+      done_when: the failure reproduces locally
+- cp3 [ ] Bisect to the offending change
+      complex: true
 ```
 
-`[>]` marks the first checkpoint not `done`/`skipped` — `plan.render_block`
-owns "which is active", the model never reports it.
+Marks: `[x]` done · `[-]` skipped · `[~]` revised · `[ ]` pending. `render_block`
+marks the first non-terminal checkpoint `[>]` at render time only. `plan.py` I/O
+functions take a `plan_id` and touch the PV directly — every caller is a
+tenant-worker activity with the volume mounted.
 
-The model reports advancement via the `plan_progress` meta-tool included
-alongside its response: `{"updates": [{checkpoint_id, status, note?, intent?}]}`,
-`status ∈ {done, skipped, revised}`. It is handled exactly like
-`declare_next_step_hint` — **`ModelCall` peels it out of the tool stream**
-(`plan.split_progress_calls`) before minting `tool_calls` rows, applies the
-updates to `turn_plan` in their own transaction (`plan.apply_progress`), and it
-never counts toward `has_tool_calls`. No separate activity, no `turn.go`
-change, no `ModelCallOutput` field — the update is read back by
-`build_conversation` on the next call. A `plan_progress`-only response ends the
-turn (`no_tool_calls`) after recording the progress — the model marking a final
-checkpoint done and stopping. Missing/garbled calls degrade to "no advancement".
+**Re-seed merge is by intent, not position.** When `plan.seed` runs over an
+existing ledger (a mid-execution `PlanHandling` turn re-proposing the whole
+plan), a checkpoint whose intent matches one already there carries its
+status/note over; a new step is `pending`. cp ids are just fresh position
+labels — so a re-plan that inserts or reorders steps before a completed one
+doesn't misattribute the mark. (`checkpoint_done`'s `revised_tail` path is
+separate: it only ever replaces the still-pending tail after the current
+checkpoint.)
 
-**Why a tool call, not parsed prose:** same reasoning as
-`declare_next_step_hint` (model-registry.md, "Resolved: Selection Mechanism") —
-it rides the existing API round-trip, it's structured, and the model has no
-other reliable channel to signal "checkpoint 2 is done, moving to 3".
+## PlanWorkflow
 
-### Mutation — corrections and failures revise the ledger
+Runs on the loop-worker (pure orchestration, no tenant credentials — the PV I/O
+is in the activities and the child turns). One per Deliberate task-run, plus one
+per `complex` checkpoint (nested).
 
-- **A checkpoint's `done_when` is met** → the model reports `status: done`; the
-  next non-terminal checkpoint renders as `[>]`.
-- **The model adds a step** (`plan_progress` update with an unknown
-  `checkpoint_id` + an `intent`) → appended at `MAX(checkpoint)+1`. (Insert-at-
-  position with renumbering was considered and dropped for v1 — appending is
-  enough to record that a step was needed.)
-- **A user correction mid-turn** ("no, we deploy via the Makefile") → the model
-  reports the affected checkpoint `revised` with the correction in `note`; the
-  reconciliation trigger (below) also fires.
-- **A failure run** (repeated tool errors on one checkpoint) → the model reports
-  it `revised`, and the reconciliation trigger fires.
+| | |
+|---|---|
+| **spawns** | child `TurnWorkflow`s (`initiated_by='plan'`): the planning turn, then one per checkpoint / follow-up / re-plan; child `PlanWorkflow`s for `complex` checkpoints |
+| **signals in** | `NewMessage` (user follow-up, folded in at the next checkpoint boundary; forwarded into the active checkpoint turn if one is running), `abandon` (a new task superseded this one — wrap up at the next boundary) |
+| **signals out** | `PlanDone` to `CoordinatorWorkflow` (root only); a nested plan's completion reaches its parent via the child-workflow future |
+| **on completion** | `dispatchRecordSkill` (ABANDON) over the whole tree, then `PlanDone` |
+| **outlives the coordinator** | ABANDON child — a coordinator idle-exit doesn't tear it down; a later message recreates the coordinator, which finds the running `<plan_id>:plan` via `ResolveOpenPlan` and resumes forwarding to it |
 
-The ledger is the turn's evolving record of intent-vs-reality, not a fixed
-script.
+## The planning turn
 
-### Feeds synthesis
+A child `TurnWorkflow` in `PlanningMode`: `ModelCall` swaps in
+`PLANNING_SYSTEM_PROMPT` and offers only `propose_plan` + the next-step hint
+tool. Its context is the retrieved skills (full rendered procedures, staged by
+`SkillDiscover` under the plan_id), memory, a **capability catalog** (the
+`ToolDiscover` rows rendered as a one-line reference list — `09-prompt-assembly.md`,
+the "capabilities" section, which since 2026-09-04 survives only for this turn
+kind), and the `lcm` conversation. It calls `propose_plan` and the turn ends
+(`stop_reason=planned`). Before this the planning turn saw only a hint block it
+couldn't interrogate; the catalog lets it draft against what's actually
+reachable. Checkpoint turns instead get those tools bound as **callable**
+schemas (`tool-registry.md`, "Resolved: Three-Layer Tool Taxonomy").
 
-At turn end, `RecordSkillOutcome` reads the final `turn_plan` and **prepends
-`plan.render_final()` to the trajectory transcript** (`PLAN (final state):` +
-each checkpoint's ordinal, intent, terminal status, and note). The ledger is a
-**cleaner signal than the raw transcript** for "what procedure did this
-successful run actually follow" — the checkpoints, in final order, with
-`revised`/`skipped`/added steps marked, *is* the effective procedure.
-`generalize.py` still runs (the ledger has intents, not full step bodies), but
-it now works from a structured skeleton + the transcript rather than
-reconstructing structure from prose alone. This is how the skill subsystem's
-"whatever the planner produced, including modifications, gets cached" (see
-`skill-subsystem.md`, "The reward model") is actually satisfied — the ledger *is*
-that artifact.
+**Skills are input to a draft, never executed verbatim** — a matched procedure
+shapes the plan; it does not become the execution. That is the core mitigation
+of the "decompose on assumptions" objection.
 
-### Subagents are full agents (the related fix)
+## Approval gate
 
-**Was:** classification (step 2), routing (step 3), and skill recording were
-all gated `input.ParentType == "session"` in `turn.go` — a subagent skipped the
-entire pipeline. That's wrong: a subagent handed "investigate why the deploy is
-failing and fix it" is a complex task that wants skill discovery (the
-`investigate-failure` seed procedure is written for exactly this), memory, and
-its own plan.
+`propose_plan`'s `needs_approval` rides out on
+`ModelCallOutput.NeedsApproval → TurnResult.NeedsApproval` (a control bool, same
+category as the next-step tier hint — no PLAN.md state, no dedicated activity).
 
-**Done:** steps 2 + 3 run for `ParentType == "turn"` as well. The subagent's
-seed message already exists — `InsertMessage` writes the spawn prompt as
-`role='user', seq=0` (insert_message.py), which is precisely what
-`ClassifyRequest` reads. `_recent_context` self-skips for a subagent
-(`turn_seq == 0 → ""`), and the spawn prompt is self-contained by construction,
-so that's correct, not a gap.
+- `false` → proceed.
+- `true` → `runApprovalGate` parks the plan on a child `UserInputRequestWorkflow`
+  of kind `plan_approval` — the same primitive permission gating uses, rendering
+  the plan with `approve` / `reject` buttons and free text. **approve** → run.
+  **free text** → a `<plan_id>:replan:<n>` planning turn seeded with the
+  feedback, then re-gate (cap 3 rounds, then proceed with the standing draft).
+  **reject / expire / cancel** → wrap up, `RecordSkill` `close_reason=rejected`.
 
-- **Classification** decides the subagent's own path. A subagent handed
-  "reformat this file" classifies `simple` and fast-paths — same `Route()`
-  fast-path bypass as a top-level turn. "Assume simple because subagent" is the
-  bug; "this specific task, classified, is trivial" is fine.
-- **Retrieval:** the subagent re-runs `SkillDiscover` + `ToolDiscover` (its task
-  differs from the parent's), and **inherits the parent's staged
-  `kind='memory'` rows** rather than re-querying agent-brain — memory is about
-  the user's world, stable across a turn tree, and the front-loaded snapshot is
-  a consistent point-in-time capture. `RoutingWorkflow` gets a
-  `parent_turn_id` input; when set, it copies the parent's `kind='memory'` rows
-  into the child's `turn_retrieval` and skips `MemoryRetrieve`.
-- **Skill recording** extends to `moderate`/`complex` subagent turns. Subagent
-  tasks are self-contained by construction — prime procedural material,
-  currently lost. Their procedures join the **same-session** co-occurrence
-  graph (`session_composed_procedure_ids` already keys on session, which the
-  subagent shares), so "parent used skill X, its subagent used skill Y" becomes
-  a real bundle signal.
-- **A subagent can spawn its own subagents** — the `spawn_subagent` nested
-  variant (`delegated_scope`/`kept_work` guard) already exists; this just makes
-  the spawned agent capable of the full pipeline at each level.
+Nested plans never gate (the root plan carries the user's oversight). This
+approval is the first concrete instance of proactivity — the agent initiating a
+message and waiting on the user — and it rides machinery that already exists.
 
-**Spawn criterion (unchanged, worth restating):** a subagent is for a
-**self-contained, detail-heavy slab** — a clear boundary, substantial enough to
-justify the spawn overhead, loosely coupled to the main line. Two reasons it
-pays off: **context isolation** (40 files of exploration never enter the main
-window — this is the majority case) and, later, parallelism (deferred).
-Sequential *dependent* steps — where step B needs step A's actual output, not a
-summary — stay inline in one loop. The unit of delegation is a slab that may be
-internally sequential, not a single checkpoint.
+## Checkpoint execution
 
-**Cost in deep trees:** each subagent adds one fast-tier classify + (if
-non-trivial) a retrieval fan-out. Bounded by tree size; the nested-spawn guard
-limits depth. A depth cap on *retrieval* (not spawning) is a cheap safety valve
-if trees get deep — deferred until observed.
+`NextCheckpoint` reads PLAN.md, returns the first non-terminal checkpoint as a
+seed message plus its `complex` flag.
 
-### Reconciliation trigger — mid-turn re-retrieval — BUILT
+- **Flat checkpoint** → one child `TurnWorkflow` seeded with the checkpoint
+  intent + `done_when` + the rendered plan. Full reason-act loop. It ends by
+  calling `checkpoint_done({checkpoint_id, status, note?, revised_tail?})` —
+  peeled by `ModelCall`, applied to PLAN.md by `plan.apply_checkpoint_done`.
+- **Re-planning the tail.** `revised_tail: [{intent, done_when?, complex?}]`
+  replaces every still-pending checkpoint *after* this one — this is where "the
+  first executing step invalidated its siblings" is fixed: every boundary is a
+  re-plan with real results in hand.
+- **Recursion (3C-iii).** A `complex:true` checkpoint runs as a nested
+  `PlanWorkflow` (`<plan_id>:cp:<n>:sub:plan`, `Depth+1`, cap `maxPlanDepth=2`).
+  The nested plan is an **opaque single task**: no approval gate, no `PlanDone`,
+  no `RecordSkill` of its own. On its return the parent calls
+  `MarkCheckpointDone`. Every turn id in the tree sits under the root's, so the
+  root's one `RecordSkill` prefix-sweeps them all — a deep task is learned as one
+  skill, deliberately.
 
-A mid-turn user follow-up is a course correction — a strong signal that the
-front-loaded context no longer fits. When `turn.go`'s loop dequeues a follow-up
-(the existing interrupt path: cancel in-flight calls, `InsertMessage`,
-`continue loop`), it also dispatches a **detached (`ABANDON`) `RoutingWorkflow`
-child with `Mode = "reconcile"`**, keyed `{turnID}:reconcile:{iteration}`.
-Skipped when routing never enriched the turn (`routing.Plan.FastPath`).
+## Interruption
 
-Reconcile mode:
+| when | handling |
+|---|---|
+| mid-checkpoint-turn | the user message is forwarded into the running child turn (the existing turn interrupt path) |
+| at a checkpoint boundary | `foldInFollowups`: drain `pending` into one `PlanHandling` turn (normal reason-act + `propose_plan`) → answers the user, may re-seed the plan; its output is delivered |
+| mid-nested-plan | `runNestedPlan` selects on a wake channel — a follow-up or `abandon` cancels the child; the checkpoint stays pending and the loop re-reads the ledger |
+| "stop / different thing now" | `abandon` (sent by `dispatch.go` when `ResolveOpenPlan` says supersede) → the loop breaks; `RecordSkill` still fires over the completed portion, `close_reason=superseded` |
 
-1. **Skips the `Route()` gate** — `plan = {Memory, Skills}`. No `ToolDiscover`
-   (the available capability set didn't change).
-2. **Re-keys inside the activities.** `MemoryRetrieve` / `SkillDiscover` get
-   `Reconcile: true`; each reads the turn's latest user message itself
-   (`retrieval/reconcile.py` — so no message content crosses the workflow
-   boundary) and searches on `"{original retrieval_query} / {correction}"` —
-   still covers the original task, now sharpened by the correction.
-3. **Replaces, not appends.** `replace_rows` swaps all `kind='memory'` /
-   `kind='skill'` rows atomically. Appending would bloat the rendered block
-   across repeated corrections; a superset query keeps the original coverage
-   without the growth. An empty reconcile result leaves the originals in place
-   (likelier a noisier query than a staleness signal).
-4. **`ComposeSkill` runs with `Reconcile: true`** — regenerates the
-   `kind='composed'` block from the replaced rows, but does **not** re-seed
-   `turn_plan` (the model has been tracking checkpoints via `plan_progress`;
-   overwriting intents/positions mid-turn would desync those reports).
-5. `build_conversation` picks the new rows up on the next `ModelCall`.
+## Completion → RecordSkill
 
-Detached and not awaited: there's no benefit to blocking the user's correction
-on a ≤10s retrieval, and the next `ModelCall` uses whatever landed by the time
-it assembles context. This is the only routing-like work that happens *inside*
-the loop, and only on an explicit divergence signal. It's what makes the
-correction path work *this turn* rather than only feeding next turn's synthesis
-(which `record.py`'s `required_correction` flag already does). `RoutingWorkflow`
-was built reusable for exactly this (`03-routing.md`, "Why a child workflow").
+One async activity, dispatched detached (ABANDON) by the root plan. **Replaces**
+the `RecordSkillOutcome` → `skill_candidates` → `SkillSynthesizeWorkflow` chain
+(migration `022` drops the table):
 
-**Failure-run trigger — deferred.** The doc originally paired "user correction"
-with "a run of tool failures on one checkpoint." Built only the correction half:
-the correction carries a clean query (the user's own words); a failure run does
-not (the error text never reaches the workflow, and "query = the stuck
-checkpoint's intent" needs plan reads the reconcile path doesn't have yet).
-Add it if failure loops are observed going unrecovered.
+- **input:** the plan's whole multi-turn trajectory (prefix-swept by
+  `turns.plan_id`), the final PLAN.md, and the outcome (`close_reason` +
+  stop reasons).
+- embeds the task, matches against `skill_procedures`: match → reinforce
+  (confidence EMA, re-`generalize` on a divergence); no match + success →
+  insert a new `learned:` procedure whose body is the trajectory's shape.
+- no candidates table, no synthesis debounce — record the procedure that was
+  actually followed, directly. Match-or-insert keeps the "similar runs converge
+  on one procedure" benefit the candidates table used to provide.
 
-### Data model — `turn_plan`
+## How the 2026-08-31 objections are handled
 
-The checkpoint ledger **mutates during the turn**, unlike the write-once
-`turn_retrieval` rows. It gets its own small table (migration `017`), mirrored
-to `deploy/helm/agent-harness-tenant/files/`.
+The prior design made the plan an in-loop advisory ledger, rejecting
+plan-and-execute for three reasons:
 
-```sql
-CREATE TABLE turn_plan (
-  turn_id     text NOT NULL REFERENCES turns(turn_id),
-  cp_id       text NOT NULL,            -- stable id the model references in plan_progress ("cp1", "cp2", ...)
-  checkpoint  int  NOT NULL,            -- ordinal position, 1-based; seeded contiguous, appended steps get MAX+1
-  intent      text NOT NULL,
-  done_when   text NOT NULL DEFAULT '',
-  status      text NOT NULL DEFAULT 'pending'
-              CHECK (status IN ('pending', 'active', 'done', 'revised', 'skipped')),
-  note        text,
-  updated_at  timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (turn_id, cp_id)
-);
-CREATE INDEX turn_plan_order_idx ON turn_plan (turn_id, checkpoint);
-```
+| objection | now |
+|---|---|
+| an upfront planner call costs 2–10s on every complex turn | **one** planning turn per task-run, not per user turn; it replaced `ComposeSkill`'s prose generation — roughly net-even |
+| plans built on assumptions; the first step invalidates its siblings | per-checkpoint tail re-planning (`revised_tail`) — the tail is re-derived with real results at every boundary |
+| model plan inertia | checkpoints are `done_when`-observable and the checkpoint turn is told "revise where the task diverges"; the tail is *expected* to change |
+| decompose-to-leaves recursion explodes | recursion only on an explicit `complex:true` flag; depth capped at `maxPlanDepth=2` |
 
-`activities/activities/plan.py` owns every read/write: `seed` (ComposeSkill),
-`apply_progress` (ModelCall), `read` + `render_block` (build_conversation),
-`read` + `render_final` (RecordSkillOutcome), `split_progress_calls` (ModelCall).
-Rows share the turn's lifecycle (FK to `turns`, no separate cleanup). `status`
-is stored as `pending` / `done` / `skipped` / `revised`; `active` is a render-
-time marker only, never written.
+## Degradation (no fallback)
 
-### Temporal shape
+- The planning turn fails to produce a valid `propose_plan` → bounded retry →
+  the run fails and surfaces (same posture as `ClassifyRequest`).
+- A checkpoint / nested-plan child fails → the error propagates and fails the
+  `PlanWorkflow`. No "skip and continue", no infinite retry.
+- `RecordSkill` fails → logged; the run is already closed; that trajectory is
+  lost to the skill store but nothing user-facing breaks.
 
-| Unit | Where | Cadence | Does |
-|---|---|---|---|
-| checkpoint emission | `ComposeSkill` (step 6) | per turn, when a skill composed | merge call returns `{procedure, checkpoints}`; `plan.seed` writes `turn_plan` |
-| progress application | inside `ModelCall` | per `ModelCall` whose response carried a `plan_progress` call | `plan.split_progress_calls` peels it; `plan.apply_progress` in its own txn |
-| progress rendering | inside `ModelCall` → `build_conversation` | every `ModelCall` | `plan.render_block` splices the block after the composed-skill block |
-| reconciliation | detached `RoutingWorkflow` (`Mode="reconcile"`), dispatched by `turn.go` | per mid-turn follow-up | re-keys memory + skills on the correction, `replace_rows` into `turn_retrieval`, `ComposeSkill` regenerates the composed block |
-| ledger → synthesis | `RecordSkillOutcome` (skill phase 2) | end of moderate/complex turn | `plan.render_final` prepended to the trajectory transcript |
+## Deferred
 
-**Worker placement:** the ledger itself is all tenant-worker — `turn_plan` is
-tenant Postgres, and `ComposeSkill` / `ModelCall` / `RecordSkillOutcome` already
-run there; the ledger never crosses the workflow boundary. `turn.go`'s only role
-is dispatching the reconcile child workflow on a follow-up.
-
-**Degradation:**
-- No composed skill → no ledger → loop runs as today.
-- `plan_progress` never called / malformed → ledger just doesn't advance; the
-  progress block still shows the initial plan, which is still useful scaffolding.
-- `plan.apply_progress` raises → caught in `ModelCall`, logged, the model call
-  itself still succeeds; the ledger is stale for a step, picked up next call.
-- Reconciliation fails → the loop continues with the original context (= the
-  current behavior with no reconciliation at all).
-
-### Deferred
-
-- **Failure-run reconciliation** — reconciliation fires only on a user
-  follow-up, not on a run of tool failures (see "Reconciliation trigger").
-- **Plan as a DAG** — `depends_on` edges, concurrent independent branches
-  fanned out as parallel child workflows. The data-model cost is small
-  (`depends_on text[]` on a checkpoint) but execution stays sequential/synchronous
-  for now; build when there's a concrete parallelism win to measure.
-- **An explicit re-plan call** — regenerating the whole ledger mid-turn via a
-  model call when it's drifted badly. The incremental revise + reconciliation
-  trigger should cover it; add only if ledgers are observed going stale wholesale.
-- **Retrieval depth cap for deep subagent trees** — a constant, added when trees
-  are observed getting deep enough to matter.
-- **Debounced reconciliation** — one reconcile child per follow-up. Fine for the
-  usual back-and-forth; if a burst of follow-ups fires several overlapping
-  reconciles, dedupe on a fixed workflow id (the skill-synthesis pattern).
-
-### Open Questions
-
-- **A `plan_progress`-only response ends the turn** (`no_tool_calls`). Correct
-  when the model marks the last checkpoint done and stops; a latent bug if the
-  model ever reports progress *instead of* doing the next step. Watch for it;
-  the fix if it bites is to keep the loop alive one more step when
-  `plan_updates` is non-empty but `raw_tool_calls` is empty.
-- **How compose decides checkpoint granularity** — one checkpoint per procedure
-  step is the obvious default; whether to collapse trivial adjacent steps is a
-  prompt-tuning question, deferred.
-- **Insert-at-position for added steps** — v1 appends. If the model frequently
-  adds steps that belong mid-plan, revisit with an `after` field + renumber.
-- **Whether the progress block should show *only* the plan or also a running
-  "steps taken" tail** — the LCM verbatim window already carries recent tool
-  calls; duplicating them in the progress block is probably noise. Start with
-  plan-only.
-- **Failure-run threshold for the reconciliation trigger** — how many retries
-  on one checkpoint before it fires. Numeric-tuning discipline; start at 2.
+- **Parallel checkpoints** — independent checkpoints fanned out concurrently
+  (`depends_on` in PLAN.md). Execution is sequential for now.
+- **Procedure generalization (topic → shape)** — `generalize.py`'s prompt now
+  forces task-CLASS altitude for `trigger_text`; unverified, and the
+  `RecordSkill` match test still embeds raw `task_text` against it (see
+  `skill-subsystem.md`).
+- **`plan_approval` gateway UI** — currently the kind-agnostic button path.
+- **Cross-session plan resumption** — picking an abandoned `PlanWorkflow` back up
+  days later; folded into proactivity's deliberation work.

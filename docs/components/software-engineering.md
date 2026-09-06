@@ -24,8 +24,18 @@
 >
 > Builds on [`session-filesystem.md`](session-filesystem.md) (the tenant PV,
 > leases), [`tool-registry.md`](tool-registry.md) (`shell_exec`),
-> [`delegated-agents.md`](delegated-agents.md). Consumed by
-> [`proactivity.md`](proactivity.md).
+> [`delegated-agents.md`](delegated-agents.md). **Fully decoupled from
+> `proactivity.md`** (no longer a consumer or dependency).
+>
+> **REVISION (2026-09-02):** where this doc says project work "rides the existing
+> Deliberate lane / episode / plan-ledger — no new workflow type", update to:
+> it rides the revised Deliberate lane
+> ([`request-pipeline/08-planning.md`](request-pipeline/08-planning.md)) — a
+> **`PlanWorkflow`** running an approved **PLAN.md** checkpoint-by-checkpoint.
+> `code_task` / `shell_exec` / `deploy` are the tools a checkpoint turn calls.
+> "Its plan ledger" = the project episode's PLAN.md; the general SWE procedure is
+> recorded by the one `RecordSkill` at episode close. The `deploy` activity's
+> orchestration (make/helm → rollout → verify → rollback) is unchanged.
 
 ### Role
 

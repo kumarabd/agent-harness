@@ -1,0 +1,38 @@
+{
+  "_comment": "First half of a chained pair (run back-to-back, SAME session key, manually). A Deliberate task -> PlanWorkflow. cp1 completes; cp2 does three SEQUENTIAL slow_tool calls (~4s each ⇒ ~15s of blocking) before checkpoint_done. plan-continuation-followup must land during that window: while a plan is running the coordinator is workActive and forwards ANY new message straight to the PlanWorkflow (NewMessage signal -> pending), which folds it in at the next checkpoint boundary as a PlanHandling turn <plan_id>:followup:1. (ResolveOpenPlan's attach/supersede branch only runs across a coordinator restart mid-plan, not scriptable here.) After cp2 completes, foldInFollowups runs the follow-up turn, then the plan finishes.",
+  "message": {
+    "role": "user",
+    "content": "Design and roll out a feature-flag system for the web app: pick an approach, add the evaluation hook, and migrate one existing hard-coded toggle to it."
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Plan:",
+      "tool_calls": [
+        { "name": "propose_plan", "is_subagent": false, "arguments": { "checkpoints": [
+          { "intent": "Choose a feature-flag approach (build vs library vs SaaS)", "done_when": "the approach is chosen with a one-line rationale" },
+          { "intent": "Add the flag-evaluation hook and migrate one hard-coded toggle", "done_when": "one toggle reads through the new hook and its old constant is gone" }
+        ] } }
+      ],
+      "usage": { "input_tokens": 130, "output_tokens": 50 }
+    }
+  ],
+  "checkpoint_responses": [
+    [
+      {
+        "content": "Chose a small in-house evaluator backed by a config table — no external dependency, boolean flags only for now.",
+        "tool_calls": [ { "name": "checkpoint_done", "is_subagent": false, "arguments": { "checkpoint_id": "cp1", "status": "done" } } ],
+        "usage": { "input_tokens": 90, "output_tokens": 30 }
+      }
+    ],
+    [
+      { "content": "Adding the hook — running the config-table migration.", "tool_calls": [ { "name": "slow_tool", "is_subagent": false, "arguments": { "step": "migrate" } } ], "usage": { "input_tokens": 90, "output_tokens": 20 } },
+      { "content": "Wiring the evaluation call path.", "tool_calls": [ { "name": "slow_tool", "is_subagent": false, "arguments": { "step": "wire" } } ], "usage": { "input_tokens": 90, "output_tokens": 20 } },
+      { "content": "Running the test suite.", "tool_calls": [ { "name": "slow_tool", "is_subagent": false, "arguments": { "step": "test" } } ], "usage": { "input_tokens": 90, "output_tokens": 20 } },
+      {
+        "content": "Hook added; migrated the beta-dashboard toggle to read through it and removed the BETA_DASHBOARD constant. Tests pass.",
+        "tool_calls": [ { "name": "checkpoint_done", "is_subagent": false, "arguments": { "checkpoint_id": "cp2", "status": "done" } } ],
+        "usage": { "input_tokens": 100, "output_tokens": 30 }
+      }
+    ]
+  ]
+}

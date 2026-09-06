@@ -153,6 +153,14 @@ func (b *Bot) runConnection(ctx context.Context, dg *discordgo.Session, connecti
 	// half, A+B) — same embedded worker, same connection, since pushing a
 	// pending request's prompt needs the identical live session.
 	deliverWorker.RegisterActivityWithOptions(deliverActivity.DeliverInterim, activity.RegisterOptions{Name: "DiscordDeliverInterim"})
+	// Delivery-in-the-loop (2026-09-06) — deliver_reply/deliver_attachment
+	// are real model tool calls (llm.py's schema, capabilities.py's
+	// deliver_reply/deliver_attachment entries), but still need the same
+	// live session every other delivery activity here does, so turn.go
+	// dispatches them to this same per-connection queue instead of the
+	// generic tenant-worker ToolCall path.
+	deliverWorker.RegisterActivityWithOptions(deliverActivity.DeliverReply, activity.RegisterOptions{Name: "DiscordDeliverReply"})
+	deliverWorker.RegisterActivityWithOptions(deliverActivity.DeliverAttachment, activity.RegisterOptions{Name: "DiscordDeliverAttachment"})
 	if err := deliverWorker.Start(); err != nil {
 		log.Printf("discord: failed to start embedded delivery worker: %v", err)
 		return

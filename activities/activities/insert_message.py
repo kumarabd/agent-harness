@@ -67,12 +67,14 @@ class InsertMessageActivity:
 
                 if input.is_turn_start:
                     await conn.execute(
-                        "INSERT INTO turns (turn_id, parent_id, parent_type, turn_seq, status) "
-                        "VALUES ($1, $2, $3, $4, 'running') ON CONFLICT (turn_id) DO NOTHING",
+                        "INSERT INTO turns (turn_id, parent_id, parent_type, turn_seq, status, initiated_by, plan_id) "
+                        "VALUES ($1, $2, $3, $4, 'running', $5, $6) ON CONFLICT (turn_id) DO NOTHING",
                         input.turn_id,
                         input.parent_id,
                         input.parent_type,
                         input.turn_seq,
+                        input.initiated_by or "user",
+                        input.plan_id or None,
                     )
 
                 if input.is_turn_start and input.parent_type == "turn":
@@ -88,19 +90,21 @@ class InsertMessageActivity:
                             "tool_calls row to derive its kickoff content from"
                         )
                     arguments = json.loads(row["arguments"])
-                    role, content = "user", str(arguments.get("prompt", ""))
+                    role, content, speaker_id = "user", str(arguments.get("prompt", "")), None
                 else:
                     role, content = input.message.role, input.message.content
+                    speaker_id = input.message.speaker_id or None
 
                 # seq computed inline (MAX+1) — one round-trip, and no window
                 # between the read and the insert. Safe here: the transaction
                 # plus the fact that a turn's messages are written serially.
                 await conn.execute(
-                    "INSERT INTO messages (parent_id, role, content, seq) "
+                    "INSERT INTO messages (parent_id, role, content, seq, speaker_id) "
                     "VALUES ($1, $2, $3, "
-                    "        (SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE parent_id = $1))",
+                    "        (SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE parent_id = $1), $4)",
                     input.turn_id,
                     role,
                     content,
+                    speaker_id,
                 )
         logger.info("InsertMessage[%s]: %s: %r", input.turn_id, role, content[:80])

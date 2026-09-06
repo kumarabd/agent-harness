@@ -3,9 +3,15 @@ successful task trajectories (plus any matched failures, plus a current body
 for refinement) into a structured procedure
 (docs/components/skill-subsystem.md, "The generalization pass").
 
+`trigger_text` must come out at task-CLASS altitude ("root-causing a
+regression a recent deploy introduced"), not topic altitude ("debugging the
+checkout NPE"): it's matched against future tasks by embedding similarity, so a
+topic-anchored trigger fragments the store into one procedure per subject
+instead of reinforcing one per process. The system prompt enforces this with
+explicit bad/good examples.
+
 Returns `None` when the model tier is unconfigured or the output can't be
-parsed — the caller then skips that synthesis group rather than writing a
-malformed procedure.
+parsed — the caller then skips rather than writing a malformed procedure.
 """
 
 from __future__ import annotations
@@ -26,14 +32,27 @@ _SYSTEM_PROMPT = (
     "You reconstruct a reusable procedure from transcripts of a task the agent completed "
     "SUCCESSFULLY. Output ONLY a JSON object — no prose, no markdown fences — with exactly:\n"
     '{\n'
-    '  "title": "short label",\n'
-    '  "trigger_text": "one sentence: when this procedure applies — general, not tied to the specific instance",\n'
+    '  "title": "short label for the KIND of task",\n'
+    '  "trigger_text": "one sentence naming the CLASS of task this procedure solves",\n'
     '  "body": [ { "step_id": "short-slug", "instruction": "what to do", '
     '"tool_ref": "abstract tool description or null", "slots": ["names"] } ],\n'
     '  "preconditions": ["strings"],\n'
     '  "done_criteria": ["strings"],\n'
     '  "notes": ["cautions — especially anything a failed attempt or a mid-task correction revealed"]\n'
     "}\n"
+    "\n"
+    "trigger_text RULE — describe the SHAPE of the work, NEVER its subject matter. The trigger is "
+    "matched against future tasks by meaning, so it must fit every task of the same kind regardless "
+    "of topic. Strip out the specific system, feature, domain, or entity names from this run and "
+    "state what class of problem was being solved.\n"
+    "  BAD  (topic-anchored): \"Adding an idempotency layer to the payments service\"\n"
+    "  GOOD (shape):          \"Making a mutating endpoint safe to retry (idempotency / dedup)\"\n"
+    "  BAD  (topic-anchored): \"Debugging the checkout NullPointerException from the March deploy\"\n"
+    "  GOOD (shape):          \"Root-causing a regression a recent deploy introduced\"\n"
+    "  BAD  (topic-anchored): \"Designing the new auth system\"\n"
+    "  GOOD (shape):          \"Producing a design/spec for a subsystem before building it\"\n"
+    "The same altitude applies to `title`: name the kind of task, not the instance.\n"
+    "\n"
     "Reconstruct the EFFECTIVE procedure the successful runs actually followed — the plan as amended "
     "by any correction visible in the transcript. Keep every tool_ref ABSTRACT (\"a version-control "
     "tool\"), never a concrete tool name. Weight recent transcripts more. If a CURRENT PROCEDURE is "

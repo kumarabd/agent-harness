@@ -52,7 +52,20 @@ async def compact(conn, session_key: str, provider, model: str) -> None:
         logger.info("lcm.compaction.compact[%s]: nothing new to compact", session_key)
         return
 
-    transcript = "\n".join(f"{m['role']}: {m['content']}" for m in span if m["content"])
+    # Real bug found 2026-09-04 (real-assembly scenario): a bare
+    # `f"{role}: {content}"` join reads only messages.content — an assistant
+    # message whose actual data lives in its paired tool_calls.result (e.g.
+    # "I have the numbers", result elsewhere = {"error_rate_pct": 0.4}) hands
+    # the summarizer LLM a sentence with no number in it. It doesn't refuse;
+    # it fabricates a plausible one, and that fabrication gets written to
+    # context_summaries and injected into every later prompt for the
+    # session — the same tool-call reconstruction gap assembly.assemble()
+    # already had to solve for the verbatim window (and record.py's own
+    # _build_transcript, independently, for a task-run's trajectory).
+    tool_calls_by_message = await _tool_calls_by_message(
+        conn, [m["message_id"] for m in span if m["role"] == "assistant"]
+    )
+    transcript = _build_transcript(span, tool_calls_by_message)
     content = await _escalating_summarize(provider, model, transcript)
 
     await conn.execute(
@@ -66,6 +79,38 @@ async def compact(conn, session_key: str, provider, model: str) -> None:
     logger.info("lcm.compaction.compact[%s]: wrote leaf summary covering %d messages", session_key, len(span))
 
     await _fold_leaves_if_due(conn, session_key, provider, model)
+
+
+async def _tool_calls_by_message(conn, assistant_message_ids: list) -> dict:
+    """One batched fetch, not one round-trip per message — same shape as
+    assembly.assemble()'s own tool_calls-by-message query, scoped to
+    whatever assistant messages are in the span being compacted rather than
+    the verbatim window."""
+    if not assistant_message_ids:
+        return {}
+    by_message: dict = {}
+    for row in await conn.fetch(
+        "SELECT message_id, tool_name, status, result FROM tool_calls "
+        "WHERE message_id = ANY($1::uuid[]) ORDER BY message_id, started_at",
+        assistant_message_ids,
+    ):
+        by_message.setdefault(row["message_id"], []).append(row)
+    return by_message
+
+
+def _build_transcript(span, tool_calls_by_message: dict) -> str:
+    """Flat text transcript for the summarizer LLM — same tool-call-result
+    inlining convention as record.py's own _build_transcript (a task-run's
+    trajectory has the identical problem: a tool call's result lives only in
+    tool_calls.result, never in messages.content)."""
+    lines: list[str] = []
+    for m in span:
+        if m["content"]:
+            lines.append(f"{m['role']}: {m['content']}")
+        for row in tool_calls_by_message.get(m["message_id"], []):
+            result = row["result"] if row["status"] == "ok" else f"(status={row['status']}) {row['result'] or ''}"
+            lines.append(f"  tool: {row['tool_name']} -> {result}")
+    return "\n".join(lines)
 
 
 async def _escalating_summarize(provider, model: str, transcript: str) -> str:

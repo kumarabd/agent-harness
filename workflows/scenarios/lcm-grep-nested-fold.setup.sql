@@ -20,6 +20,19 @@
 -- Fixed UUIDs so lcm-grep-nested-fold.json's scripted lcm_describe calls
 -- can reference them literally.
 
+-- Idempotency: the message/summary UUIDs below are fixed literals, so a prior
+-- run left them behind under a different {{SESSION_KEY}}. Clear them first so a
+-- standalone re-run doesn't hit messages_pkey. (run_all.sh also runs
+-- cleanup_test_data.sh up front; this covers `run_scenario.sh <name>` alone.)
+DELETE FROM messages WHERE message_id IN (
+  'd0000000-0000-0000-0000-000000000001', 'd0000000-0000-0000-0000-000000000002',
+  'd0000000-0000-0000-0000-000000000003', 'd0000000-0000-0000-0000-000000000004');
+DELETE FROM context_summaries WHERE summary_id IN (
+  'e0000000-0000-0000-0000-000000000001', 'e0000000-0000-0000-0000-000000000002',
+  'e0000000-0000-0000-0000-000000000003', 'e0000000-0000-0000-0000-000000000004',
+  'f0000000-0000-0000-0000-000000000003', 'f0000000-0000-0000-0000-000000000004',
+  'a0000000-0000-0000-0000-000000000007');
+
 INSERT INTO sessions (session_key, platform, channel_id, system_prompt)
 VALUES ('{{SESSION_KEY}}', 'test', 'test-channel', 'test')
 ON CONFLICT (session_key) DO NOTHING;

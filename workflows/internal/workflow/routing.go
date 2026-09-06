@@ -1,7 +1,6 @@
 package workflow
 
 import (
-	"fmt"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -17,14 +16,6 @@ import (
 // Placeholder value, numeric-tuning-deferred like every other threshold here.
 const retrievalPhaseTimeout = 10 * time.Second
 
-// composePhaseTimeout bounds ComposeSkill's own attempt. It's a medium-tier
-// LLM merge (~7s observed), and — since ComposeSkill has no fallback and a
-// failure now propagates (a new-episode compose failure fails the turn) — the
-// per-attempt budget has to comfortably cover a slow-but-real merge rather
-// than turning a slow response into a turn failure. Separate from
-// retrievalPhaseTimeout, which sizes the parallel fan-out, not this.
-const composePhaseTimeout = 45 * time.Second
-
 // RoutingPlan is Route()'s decision: which retrieval subsystems this turn
 // activates. FastPath == true means none of them — proceed straight to the
 // reason-act loop with today's un-enriched context.
@@ -37,14 +28,15 @@ type RoutingPlan struct {
 }
 
 // laneIsDeliberate reports whether a turn takes the Deliberate lane
-// (docs/components/lane-model.md) — the full retrieval pipeline plus an episode
-// and RL recording. Everything else is the Lite lane: memory-only retrieval
-// (or nothing, for conversational), no episode, no skills/tools/plan/recording.
-// Pure, deterministic, replay-safe — the single source of truth for the lane
-// split, consumed by both Route() here and turn.go's OpenEpisode / recording
-// gates. Deliberate is exactly (task, moderate|complex), (question, complex),
-// plus the Confidence < 0.5 fallback (a misclassified real task must not be
-// under-provisioned) and any unrecognised intent.
+// (docs/components/lane-model.md) — a PlanWorkflow task-run with the full
+// retrieval pipeline and RL recording. Everything else is the Lite lane:
+// memory-only retrieval (or nothing, for conversational), a plain TurnWorkflow,
+// no skills/tools/plan/recording. Pure, deterministic, replay-safe — the single
+// source of truth for the lane split, consumed by Route() here and by
+// dispatch.go's plan-vs-plain-turn decision. Deliberate is exactly
+// (task, moderate|complex), (question, complex), plus the Confidence < 0.5
+// fallback (a misclassified real task must not be under-provisioned) and any
+// unrecognised intent.
 func laneIsDeliberate(task types.TaskRepresentation) bool {
 	if task.Confidence < 0.5 {
 		return true
@@ -75,58 +67,49 @@ func Route(task types.TaskRepresentation) RoutingPlan {
 	return RoutingPlan{Memory: true}
 }
 
-// RoutingWorkflowInput is RoutingWorkflow's input — a turn_id plus step 2's
-// task representation (small derived routing metadata, not content).
+// RoutingWorkflowInput is RoutingWorkflow's input — the ids to stage under plus
+// step 2's task representation (small derived routing metadata, not content).
 // ParentTurnID is set only for a subagent turn (request-pipeline/
 // 08-planning.md): its memory is inherited from the parent's snapshot rather
 // than retrieved fresh.
 //
-// Mode == "reconcile" (request-pipeline/08-planning.md, "Reconciliation
-// trigger") is a lighter re-run dispatched mid-turn when the user corrects
-// course: memory + skill discovery only (no tools, no Route() gate), re-keyed
-// on the correction inside the activities, replacing the stale bundle;
-// ComposeSkill regenerates the composed block but leaves turn_plan alone.
+// Memory + tool discovery run every turn, staged under TurnID. Skill discovery
+// runs only when PlanID is set (a planning turn), staged under PlanID so the
+// planning turn's prompt and the run's RecordSkill can both read it.
 type RoutingWorkflowInput struct {
-	// EpisodeID (docs/components/episode-lifecycle.md) is the staging key —
-	// retrieval rows go to turn_retrieval keyed by it, so every turn of the
-	// episode shares one bundle. TurnID is the current turn (== EpisodeID for a
-	// new episode's opening turn; different for a continuation-turn reconcile,
-	// whose new message lives under TurnID).
-	EpisodeID    string                   `json:"episode_id"`
-	TurnID       string                   `json:"turn_id"`
+	TurnID string `json:"turn_id"` // memory + tool staging key (the current turn)
+	// PlanID set ⇒ also run skill discovery, staged under PlanID. Empty on a
+	// checkpoint / continuation / Lite turn.
+	PlanID       string                   `json:"plan_id,omitempty"`
 	Task         types.TaskRepresentation `json:"task"`
 	ParentTurnID string                   `json:"parent_turn_id,omitempty"`
-	Mode         string                   `json:"mode,omitempty"` // "" | "reconcile"
 }
 
 // RoutingResult is RoutingWorkflow's output — the plan it chose plus a
 // per-subsystem SubsystemResult (status + staged-row count). No content: the
-// staged rows live in turn_retrieval, read from there by the planner / prompt
-// assembly. Statuses: "ok" | "empty" | "error" | "timed_out" | "skipped".
+// staged rows live in turn_retrieval, read from there by prompt assembly.
+// Statuses: "ok" | "empty" | "error" | "timed_out" | "skipped".
 type RoutingResult struct {
-	Plan          RoutingPlan           `json:"plan"`
-	Memory        types.SubsystemResult `json:"memory"`
-	Tools         types.SubsystemResult `json:"tools"`
-	Skills        types.SubsystemResult `json:"skills"`
-	ComposedSkill bool                  `json:"composed_skill"`
+	Plan   RoutingPlan           `json:"plan"`
+	Memory types.SubsystemResult `json:"memory"`
+	Tools  types.SubsystemResult `json:"tools"`
+	Skills types.SubsystemResult `json:"skills"`
 }
 
 // RoutingWorkflow — request pipeline step 3 (docs/components/request-pipeline/
 // 03-routing.md). Child of TurnWorkflow, awaited before the reason-act loop.
-// Decides the plan, runs the active retrieval subsystems in parallel under a
-// phase deadline, then composes a skill if discovery produced candidates.
-// Every path is best-effort — a failed or timed-out subsystem is recorded and
-// the turn proceeds with whatever enrichment landed.
+// Decides the plan, then runs the active retrieval subsystems in parallel under
+// a phase deadline. Every path is best-effort — a failed or timed-out subsystem
+// is recorded and the turn proceeds with whatever enrichment landed.
 func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingResult, error) {
 	logger := workflow.GetLogger(ctx)
 
-	reconcile := input.Mode == "reconcile"
-	// Reconcile mode skips the Route() gate entirely: the user has already
-	// corrected course, so memory + skills are always worth re-keying. Tools
-	// are not — the available capability set didn't change.
 	plan := Route(input.Task)
-	if reconcile {
-		plan = RoutingPlan{Memory: true, Skills: true}
+	// Skill discovery only runs for a planning turn (PlanID set) — it stages the
+	// procedures once, under the plan. Checkpoint / continuation / Lite turns
+	// still get fresh memory + tools.
+	if input.PlanID == "" {
+		plan.Skills = false
 	}
 
 	result := RoutingResult{
@@ -136,7 +119,7 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 		Skills: types.SubsystemResult{Status: "skipped"},
 	}
 	if plan.FastPath {
-		logger.Info("routing: fast path — no enrichment", "episode_id", input.EpisodeID)
+		logger.Info("routing: fast path — no enrichment", "turn_id", input.TurnID)
 		return result, nil
 	}
 
@@ -158,17 +141,15 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 
 	if plan.Memory {
 		f := workflow.ExecuteActivity(actx, "MemoryRetrieve", types.MemoryRetrieveInput{
-			EpisodeID:      input.EpisodeID,
-			TurnID:         input.TurnID,
+			OwnerID:        input.TurnID,
 			RetrievalQuery: input.Task.RetrievalQuery,
 			ParentTurnID:   input.ParentTurnID,
-			Reconcile:      reconcile,
 		})
 		subsystems = append(subsystems, pendingSubsystem{f, &result.Memory})
 	}
 	if plan.Tools {
 		f := workflow.ExecuteActivity(actx, "ToolDiscover", types.ToolDiscoverInput{
-			EpisodeID:      input.EpisodeID,
+			OwnerID:        input.TurnID,
 			RetrievalQuery: input.Task.RetrievalQuery,
 			Entities:       input.Task.Entities,
 		})
@@ -176,10 +157,8 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 	}
 	if plan.Skills {
 		f := workflow.ExecuteActivity(actx, "SkillDiscover", types.SkillDiscoverInput{
-			EpisodeID:      input.EpisodeID,
-			TurnID:         input.TurnID,
+			PlanID:         input.PlanID,
 			RetrievalQuery: input.Task.RetrievalQuery,
-			Reconcile:      reconcile,
 		})
 		subsystems = append(subsystems, pendingSubsystem{f, &result.Skills})
 	}
@@ -236,31 +215,8 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 	}
 	cancelRetrieval()
 
-	logger.Info("routing: retrieval fan-out complete", "episode_id", input.EpisodeID,
+	logger.Info("routing: retrieval fan-out complete", "turn_id", input.TurnID, "plan_id", input.PlanID,
 		"memory", result.Memory.Status, "tools", result.Tools.Status, "skills", result.Skills.Status)
-
-	// --- step 6: compose a skill, only if discovery actually produced
-	// candidates (plan.Skills alone isn't enough — there may be no matching
-	// skeleton). ComposeSkill reads the staged memory/tool/skill rows itself.
-	//
-	// No fallback: ComposeSkill either produces the merged procedure or raises
-	// (activities/retrieval/compose.py). A failure here is NOT swallowed — it
-	// propagates out of RoutingWorkflow. For a new-episode turn that fails the
-	// turn (startRouting -> turn.go); for a detached reconcile pass it just
-	// records a failed child execution and leaves the episode's prior composed
-	// row in place. Either way it is visible, not papered over.
-	if result.Skills.Status == "ok" && result.Skills.Count > 0 {
-		cctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			StartToCloseTimeout: composePhaseTimeout,
-			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
-		})
-		var cr types.SubsystemResult
-		if err := workflow.ExecuteActivity(cctx, "ComposeSkill", types.ComposeSkillInput{EpisodeID: input.EpisodeID, Reconcile: reconcile}).Get(cctx, &cr); err != nil {
-			return result, fmt.Errorf("ComposeSkill (episode %s): %w", input.EpisodeID, err)
-		}
-		result.ComposedSkill = cr.Status == "ok" && cr.Count > 0
-	}
-
 	return result, nil
 }
 
@@ -272,14 +228,13 @@ func RoutingWorkflow(ctx workflow.Context, input RoutingWorkflowInput) (RoutingR
 // enrichment they've already superseded — that's a deliberate supersede, not
 // a failure, so err is nil in that case.
 //
-// A non-nil err means RoutingWorkflow genuinely failed — which, after the
-// "no fallback" changes, means ComposeSkill couldn't produce a merged
-// procedure (the fan-out subsystems record their own errors into the result
-// and never fail the workflow). The caller (turn.go) fails the turn on it.
-// The RoutingResult is always safe to read (zero value on failure/interrupt).
-// episodeID is the retrieval staging key (== turnID for a new episode's opening
-// turn); turnID is the current turn.
-func startRouting(ctx workflow.Context, episodeID, turnID, parentTurnID string, task types.TaskRepresentation, pendingMessages *[]types.SignalPayload) (RoutingResult, error) {
+// A non-nil err means RoutingWorkflow genuinely failed. The fan-out subsystems
+// record their own errors into the result and never fail the workflow, so in
+// practice this only fires on an infra fault (activity dispatch, Postgres). The
+// caller (turn.go) fails the turn on it. The RoutingResult is always safe to
+// read (zero value on failure/interrupt). planID is the skill staging key (set
+// only for a planning turn); turnID is the current turn.
+func startRouting(ctx workflow.Context, planID, turnID, parentTurnID string, task types.TaskRepresentation, pendingMessages *[]types.SignalPayload) (RoutingResult, error) {
 	logger := workflow.GetLogger(ctx)
 
 	routingCtx, cancelRouting := workflow.WithCancel(ctx)
@@ -288,7 +243,7 @@ func startRouting(ctx workflow.Context, episodeID, turnID, parentTurnID string, 
 		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
 	}
 	future := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(routingCtx, cwo), RoutingWorkflow, RoutingWorkflowInput{
-		EpisodeID:    episodeID,
+		PlanID:       planID,
 		TurnID:       turnID,
 		Task:         task,
 		ParentTurnID: parentTurnID,
@@ -318,7 +273,7 @@ func startRouting(ctx workflow.Context, episodeID, turnID, parentTurnID string, 
 		logger.Info("routing complete", "turn_id", turnID,
 			"fast_path", result.Plan.FastPath,
 			"memory", result.Memory.Status, "tools", result.Tools.Status,
-			"skills", result.Skills.Status, "composed_skill", result.ComposedSkill)
+			"skills", result.Skills.Status)
 		return result, nil
 	}
 }

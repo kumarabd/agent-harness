@@ -1,44 +1,50 @@
 # Component: Request Pipeline
 
-> STATUS: **All 9 pre-LLM phases (2–9) are built.** (2–4, 7 implemented; 5–6 =
-> the skill subsystem, phases 1–5; 8 = the living plan ledger +
-> subagents-as-full-agents + reconciliation trigger; 9 = prompt assembly's
-> section model + budget arbitration.) Steps 1, 10, 11 already exist under
-> other components. Every phase is additive and degrades cleanly to today's
-> behavior with its inputs absent — see "Degradation is layered" below.
+> STATUS: **BUILT** on branch `proactivity-substrate` (not deployed). The
+> pre-LLM pipeline is: **step 2** request understanding (`ClassifyRequest`),
+> **step 3** routing (`Route` + `RoutingWorkflow` retrieval fan-out), **steps
+> 4/5/7** memory / skill / tool discovery (staged to `turn_retrieval`), **step
+> 8** planning ([`08-planning.md`](request-pipeline/08-planning.md) —
+> plan-and-execute via `PlanWorkflow`), **step 9** prompt assembly
+> (`prompt.assemble`). **There is no step 6** — skill composition was removed;
+> the planning turn drafts the plan from the retrieved procedures directly.
+> Steps 1, 10, 11 live under other components.
 >
-> This file is the index and the cross-cutting contract. Each phase has its own
-> doc:
-> - [`02-request-understanding.md`](request-pipeline/02-request-understanding.md) — **implemented**
-> - [`03-routing.md`](request-pipeline/03-routing.md) — the router + `RoutingWorkflow` orchestration
-> - [`04-memory-retrieval.md`](request-pipeline/04-memory-retrieval.md)
-> - [`05-skill-discovery.md`](request-pipeline/05-skill-discovery.md) — pipeline contract; design in `skill-subsystem.md`
-> - [`06-skill-composition.md`](request-pipeline/06-skill-composition.md) — pipeline contract; design in `skill-subsystem.md`
-> - [`../skill-subsystem.md`](skill-subsystem.md) — **"The Skill Graph"**, the full design for steps 5 & 6
-> - [`07-tool-discovery.md`](request-pipeline/07-tool-discovery.md)
-> - [`08-planning.md`](request-pipeline/08-planning.md) — **built**; the living checkpoint ledger + subagents-as-full-agents + reconciliation trigger
-> - [`09-prompt-assembly.md`](request-pipeline/09-prompt-assembly.md) — **built**; the section model + budget arbitration
-> - [`../episode-lifecycle.md`](episode-lifecycle.md) — **built**; the episode as the unit of work — plan ledger, staged retrieval, and skill recording are episode-scoped, not per-turn
-> - [`../lane-model.md`](lane-model.md) — **design**; two lanes — **Lite** (memory only) and **Deliberate** (full pipeline + episode + RL). Skills / tools / plan ledger / episodes / RL recording are all Deliberate-only; Deliberate is `(task, moderate|complex)` + `(question, complex)` + `conf<0.5`
+> **REVISION (2026-09-04 — DESIGNED, not built).** `tool-registry.md`'s
+> "Resolved: Three-Layer Tool Taxonomy & Per-Task Resolution" changes what step
+> 7 produces: `ToolDiscover`'s rows become **callable function schemas** bound
+> by `tools_schema_for` for reasoning/checkpoint turns (the step-9 "capabilities"
+> hint block is dropped for those; it stays only for the planning turn, as a
+> reference catalog). `call_tool` leaves the model schema. Steps 2–6, 8 and the
+> pipeline shape are unchanged.
+>
+> This file is the index and the cross-cutting contract. Phase docs:
+> - [`02-request-understanding.md`](request-pipeline/02-request-understanding.md)
+> - [`03-routing.md`](request-pipeline/03-routing.md) — the router + `RoutingWorkflow`
+> - [`04-memory-retrieval.md`](request-pipeline/04-memory-retrieval.md) — per turn
+> - [`05-skill-discovery.md`](request-pipeline/05-skill-discovery.md) — per task-run; design in [`skill-subsystem.md`](skill-subsystem.md)
+> - [`06-skill-composition.md`](request-pipeline/06-skill-composition.md) — **removed**
+> - [`07-tool-discovery.md`](request-pipeline/07-tool-discovery.md) — per turn
+> - [`08-planning.md`](request-pipeline/08-planning.md) — plan-and-execute (`PlanWorkflow` + PLAN.md + approval gate + checkpoint recursion)
+> - [`09-prompt-assembly.md`](request-pipeline/09-prompt-assembly.md) — section model + budget arbitration
+> - [`../episode-lifecycle.md`](episode-lifecycle.md) — why a task-run is the unit
+> - [`../lane-model.md`](lane-model.md) — Lite (memory only) vs Deliberate (full pipeline + `PlanWorkflow` + RL)
 
 ### Role (one line)
 
 Everything between "a user message arrives" and "the reason-act loop runs its
 first `ModelCall`" — understanding the request, deciding which subsystems to
-consult, retrieving from each, composing a task-scoped skill, and assembling the
-final prompt — so the model is handed a specialized, self-contained package
-rather than a generic prompt plus "figure it out."
+consult, retrieving from each, and assembling the final prompt — so the model is
+handed a specialized, self-contained package rather than a generic prompt plus
+"figure it out."
 
 ### Why this exists (recap)
 
-Today the harness does almost no pre-processing: `llm.build_conversation` is a
-fixed four-part merge (system prompt + session-start memory block + LCM
-conversation + full tool schema), and routing/planning happen implicitly inside
-the model's own reason-act loop (`turn.go`). That works but leaves real gaps —
-no task representation, no skill surface, no task-scoped memory or tool
-retrieval, no composed procedure. This component is where those stages land,
-added **one at a time, each additive and each degrading cleanly to today's
-behavior when its inputs are absent.**
+Without pre-processing, `llm.build_conversation` would be a fixed merge (system
+prompt + memory block + LCM conversation + full tool schema) and routing /
+planning would happen implicitly inside the model's own reason-act loop. That
+leaves real gaps — no task representation, no skill surface, no task-scoped
+memory or tool retrieval. This component is where those stages land.
 
 ### The pipeline
 
@@ -46,34 +52,32 @@ behavior when its inputs are absent.**
               USER QUERY
                   │
                   ▼
-    ┌─────────────────────────┐   1. Query arrives + session context
-    │ Request Understanding   │   2. ← Task classification (fast-tier LLM)
+    ┌─────────────────────────┐   2. Request Understanding — ClassifyRequest (fast-tier LLM)
+    │  ClassifyRequest        │      → TaskRepresentation {intent, complexity, ...}
     └───────────┬─────────────┘
-                ▼
+                ▼   dispatch.go: conversational → plain turn
+                    Lite → plain turn · fresh Deliberate → PlanWorkflow
            ┌─────────┐             3. Routing — Route(taskRep) → RoutingPlan
-           │ Routing │                (+ fast-path bypass for trivial turns)
+           │ Routing │                (FastPath bypass for conversational)
            └────┬────┘
-     ┌──────────┼───────────┐        RoutingWorkflow (child of TurnWorkflow)
-     ▼          ▼           ▼         fans out the active subset in parallel:
-  MEMORY      SKILL       TOOL        4. memory retrieval
- RETRIEVAL   DISCOVERY   DISCOVERY    5. skill discovery
-     │          │           │         7. tool discovery
-     │          ▼           │
-     │      6. compose  ◄───┘         6. skill composition (needs memory + tools)
-     └──────┬───┘
-            ▼
-     RoutingResult  → staged bundle + per-subsystem status
-            │
-            ▼
-      PLAN LEDGER                     8. Planning — compose emits a checkpoint
-            │                            ledger; the loop tracks + revises it
+     ┌──────────┼───────────┐        RoutingWorkflow (child of TurnWorkflow):
+     ▼          ▼           ▼         fans out the active subset in parallel
+  MEMORY      SKILL       TOOL        4. memory retrieval  (per turn, owner=turn_id)
+ RETRIEVAL   DISCOVERY   DISCOVERY    5. skill discovery   (planning turn only, owner=plan_id)
+     │          │           │         7. tool discovery    (per turn, owner=turn_id)
+     └──────────┴─────┬─────┘
+                      ▼
+        turn_retrieval rows + per-subsystem status
+                      │
+                      ▼
+      PLANNING (Deliberate)          8. PlanWorkflow — planning turn drafts PLAN.md
+            │                           from the retrieved procedures; approval gate;
+            │                           one checkpoint turn per checkpoint
             ▼
       PROMPT ASSEMBLY                 9. prompt.assemble — ordered sections,
             │                            budget-shed capabilities/memory first
             ▼
            LLM                        10. Model execution (turn.go loop)
-            │                             — reports plan_progress each step;
-            │                               a correction/failure re-fires retrieval
             │
      ┌──────┴──────┐
      ▼             ▼
@@ -88,14 +92,14 @@ behavior when its inputs are absent.**
 | # | Phase | Doc | Status |
 |---|---|---|---|
 | 1 | Query arrives + session context | — (Gateway / Coordinator / LCM) | done |
-| 2 | Request understanding | `02-request-understanding.md` | **implemented** |
-| 3 | Routing + retrieval orchestration | `03-routing.md` | **implemented** (`RoutingWorkflow`; subsystems live) |
-| 4 | Memory retrieval | `04-memory-retrieval.md` | **implemented** (`MemoryRetrieve` → agent-brain, stages `kind='memory'`) |
-| 5 | Skill discovery | `05` + `skill-subsystem.md` | **built** (phases 1–5: flat-cosine + full scoring incl. recency → `kind='skill'`; cluster hierarchy deferred) |
-| 6 | Skill composition | `06` + `skill-subsystem.md` | **built** (merge → `kind='composed'` → into the prompt) |
-| 7 | Tool discovery | `07-tool-discovery.md` | **implemented** (`ToolDiscover` → `discover_tools`, stages `kind='tool'`) |
-| 8 | Planning | `08-planning.md`, `episode-lifecycle.md` | **built** — `turn_plan` ledger (migration `017`) seeded by `ComposeSkill`, `plan_progress` meta-tool applied in `ModelCall`, progress block in `build_conversation`, final state → synthesis. **Episode-scoped since 2026-09-01 (`episode-lifecycle.md`, migration `018`): the ledger + staged retrieval key on `episode_id` and persist across a task's turns; the pipeline runs once per episode, not per turn.** Subagents run steps 2–3 + skill recording. Follow-up → detached `RoutingWorkflow` `Mode="reconcile"` (mid-turn *and* between-turn continuation). Failure-run reconciliation + DAG deferred. |
-| 9 | Prompt assembly | `09-prompt-assembly.md` | **built** — `prompt.py`'s section model (composed skill, plan progress, capabilities hint, memory, in that order) + budget arbitration (sheds capabilities then memory). `llm.build_conversation` now a thin call-through. |
+| 2 | Request understanding | `02-request-understanding.md` | `ClassifyRequest` — built |
+| 3 | Routing + retrieval orchestration | `03-routing.md` | `Route` + `RoutingWorkflow` — built |
+| 4 | Memory retrieval | `04-memory-retrieval.md` | `MemoryRetrieve` → agent-brain, per turn, `kind='memory'` — built |
+| 5 | Skill discovery | `05` + `skill-subsystem.md` | `SkillDiscover` flat-cosine, per task-run, staged under plan_id — built |
+| 6 | ~~Skill composition~~ | `06` | **removed** — the planning turn drafts the plan from the retrieved procedures |
+| 7 | Tool discovery | `07-tool-discovery.md` | `ToolDiscover` → `discover_tools`, per turn, `kind='tool'` — built |
+| 8 | Planning | `08-planning.md` | plan-and-execute: `PlanWorkflow` → planning turn → PLAN.md → approval gate → checkpoint turns (w/ tail re-planning + `complex` recursion) → one async `RecordSkill` — built |
+| 9 | Prompt assembly | `09-prompt-assembly.md` | `prompt.assemble` — section model + budget arbitration — built |
 | 10 | Model execution | `components/temporal-workflow.md` | done |
 | 11 | Memory write-back | `components/memory-slot.md` | partial |
 
@@ -107,35 +111,32 @@ activity." It happens that all orchestration (the `TurnWorkflow` /
 `RoutingWorkflow` control flow, the `Route()` decision, fan-out, timers) is
 tenant-agnostic and runs on the shared **loop-worker**, and all the real work
 (every activity: `ClassifyRequest`, `MemoryRetrieve`, `ToolDiscover`,
-`SkillDiscover`, `ComposeSkill`, and later `Plan` / `AssembleContext`) needs
-per-tenant credentials (agent-brain, mcp-hub, model tiers) or tenant Postgres
-and runs on the per-tenant **tenant-worker** (Python). A tenant-agnostic step
+`SkillDiscover`, `ModelCall`, `RecordSkill`, the `plan_resolve` activities)
+needs per-tenant credentials (agent-brain, mcp-hub, model tiers) or tenant
+Postgres and runs on the per-tenant **tenant-worker** (Python). A tenant-agnostic step
 *could* live on loop-worker (a Go local activity, say) — none do yet only
 because none are tenant-agnostic. The reason-act loop is not special in this
 split: it is `TurnWorkflow` code on loop-worker dispatching `ModelCall` /
 `ToolCall` activities to tenant-worker — the exact same shape as the retrieval
 phase.
 
-**Degradation is layered.** Every phase degrades to "today's behavior" when its
-inputs or backends are absent:
-- *Subsystem-level* — a retrieval activity settles to `empty` (nothing relevant
-  / backend unconfigured) or `error` (configured, but failed after retries),
-  never a silent gap; the status is carried forward.
-- *Phase-level* — `RoutingWorkflow` itself failing, or its whole deadline
-  blowing, is caught by `TurnWorkflow`, logged, and the turn proceeds with an
-  empty bundle. Enrichment is never load-bearing.
+**Degradation is layered — except `ClassifyRequest`.** Retrieval degrades to
+"un-enriched" when its inputs or backends are absent:
+- *Subsystem-level* — a retrieval activity settles to `empty` or `error`, never
+  a silent gap; the status is carried forward.
+- *Phase-level* — `RoutingWorkflow` failing is caught by `TurnWorkflow`, logged,
+  and the turn proceeds with an empty bundle. Enrichment is never load-bearing.
+- **`ClassifyRequest` is the exception — no fallback.** It's the lane decision
+  and every downstream step keys on it, so a persistent failure fails the turn
+  and surfaces rather than routing everything as `(task, moderate)`.
 
 **Reference-passing — two categories.** *Small derived routing signals* — step
 2's `TaskRepresentation` (intent, complexity, `retrieval_query`, `entities`),
-per-subsystem status, result counts — cross the workflow freely as activity I/O,
-the same category as `ModelCallOutput.NextHintTier` and
-`ToolCallRef.{Server,Tool}`. *Bulk retrieved content* — memory item text, the
-composed skill, tool schemas — goes through a turn-scoped staging table
-(`turn_retrieval`); workflows carry only references + status, and it never
-enters loop-worker memory. See `03-routing.md`.
-
-**Best-effort, never a gate.** No phase can fail or block a turn. The worst case
-for any misroute or missing backend is the current, un-enriched harness.
+per-subsystem status, `NeedsApproval` — cross the workflow freely as activity
+I/O, the same category as `ModelCallOutput.NextHintTier`. *Bulk retrieved
+content* — memory item text, rendered skill procedures, tool schemas — goes
+through the `turn_retrieval` staging table; workflows carry only references +
+status. See `03-routing.md`.
 
 ### Open Questions / To Design
 
@@ -149,6 +150,13 @@ for any misroute or missing backend is the current, un-enriched harness.
 
 ### Notes Log
 
+- 2026-09-02: **Plan-and-execute revision.** See the REVISION banner at the top
+  and `08-planning.md` / `episode-lifecycle.md`. Staging model (`turn_retrieval`,
+  `turn_plan`) removed; `MemoryRetrieve`/`ToolDiscover` go per-turn;
+  `SkillDiscover` feeds a planning turn once per episode; `ComposeSkill` deleted;
+  a `PlanWorkflow` executes an approved PLAN.md checkpoint-by-checkpoint;
+  recording collapses to one async `RecordSkill`. `RoutingWorkflow`'s future
+  shape is open. Not built.
 - 2026-09-01: **Episodes — `episode-lifecycle.md`. Fixes multi-turn synthesis
   fragmentation.** The plan ledger + staged retrieval (`turn_plan` /
   `turn_retrieval`, key column renamed `turn_id` → `episode_id`, migration

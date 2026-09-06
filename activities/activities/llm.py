@@ -24,21 +24,21 @@ that call's result, matched by tool_call_id (tool_calls.tool_call_id is
 reused verbatim as OpenAI's tool_call_id — any string works, no second ID
 scheme needed).
 
-TOOLS_SCHEMA now also includes `memory_search`/`memory_expand`
-(docs/components/memory-slot.md) and `search_tools`/`call_tool`
-(docs/components/tool-registry.md) alongside `shell_exec` — real,
-model-offerable tools. tools.TOOL_REGISTRY's `search`/`slow_tool`/
-`noop_tool` entries are still fixture-only stubs (docs/components/
-activities-outbound-delivery.md's demo tools) and must never be offered to
-a real model. Not read dynamically off TOOL_REGISTRY, which has no
-LLM-schema metadata yet — a generic schema-registry abstraction for exactly
-five tools would be premature; add future real tools here by hand alongside
-their TOOL_REGISTRY entry in tools.py.
+This module owns the raw JSON **schema dicts** (`TOOLS_SCHEMA` + the plan
+meta-tool schemas + the nested spawn_subagent variant) — pure data. Which turn
+kinds see each, whether it's peeled, its layer and its native-activity timing
+all live in `capabilities.py` (docs/components/tool-registry.md, "Resolved:
+Three-Layer Tool Taxonomy & Per-Task Resolution"). `tools_schema_for` is now a
+thin adapter into `capabilities.schema_for`; `tools.TOOL_REGISTRY` derives its
+handler+timing wiring from `capabilities.CAPABILITIES`. Adding a model-facing
+tool = one schema dict here + one `Capability` row + one `_HANDLERS` entry in
+`tools.py`. `tools.TOOL_REGISTRY`'s `search`/`slow_tool`/`noop_tool` remain
+fixture-only stubs and must never be offered to a real model.
 
 **Prompt assembly** — request pipeline step 9
 (docs/components/request-pipeline/09-prompt-assembly.md), `prompt.py` — owns
 the whole ordered, budget-bounded conversation: `lcm.assemble`'s summary
-DAG + verbatim window, then the composed skill (step 6), the plan ledger
+DAG + verbatim window, then retrieved skills (step 5), the plan ledger
 (step 8), discovered tools (step 7), and long-term memory (step 4), each
 staged by the request pipeline's retrieval phase and read fresh every
 ModelCall. `build_conversation` here is kept only as model_call.py's stable
@@ -105,17 +105,52 @@ _SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"
 # tier hinting depends on it), and platform_prompts.go's own
 # voiceSystemPromptText copies this exact sentence verbatim, so it has to
 # keep matching byte-for-byte.
+# 2026-09-04 revision (tool-registry.md, "Resolved: Three-Layer Tool
+# Taxonomy & Per-Task Resolution") — call_tool left the model-facing schema
+# (a resolved tool is offered under its own name, callable directly), and the
+# prior wording ("search_tools/call_tool to discover and invoke") went stale
+# alongside it: a real run against this exact instruction produced a model
+# stuck calling lcm_grep a dozen times with empty content and no answer,
+# hunting for a call_tool it could never validly select from its own tool
+# list. Rewritten to match what's actually offered: shell_exec + whatever
+# tools are already directly callable this turn, plus search_tools for
+# anything not already offered — found results become callable by name on
+# the NEXT step, not this one.
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful, general-purpose personal assistant with real tools — not limited to "
-    "coding tasks. You have direct shell access (shell_exec) for local/system tasks, and "
-    "search_tools/call_tool to discover and invoke whatever broader real capabilities this "
-    "deployment has registered — third-party APIs and services beyond the shell, specific to "
-    "this environment. Use memory_search (and memory_expand for full detail) to recall relevant "
-    "context from past conversations when it's genuinely useful, not on every turn. After using "
-    "a tool, summarize the result in plain text for the user rather than leaving it as raw "
-    "output. "
+    "coding tasks. You have direct shell access (shell_exec) for local/system tasks. Any other "
+    "capability already relevant to this task is offered directly, callable by its own name — "
+    "call it like any other tool, there is no extra step. If you need something not already "
+    "offered, call search_tools to look for it; a match becomes directly callable by name on "
+    "your NEXT step, not this one, so don't expect to invoke it in the same response that found "
+    "it. Use memory_search (and memory_expand for full detail) to recall relevant context from "
+    "past conversations when it's genuinely useful, not on every turn. If memory_search doesn't "
+    "surface something you need to know about a person or entity in the conversation, don't "
+    "guess — ask the user directly if it's blocking what you're doing right now, or call "
+    "create_intention to follow up later if it isn't. After using a tool, "
+    "summarize the result in plain text for the user rather than leaving it as raw output. "
     f"Every response, also call {_NEXT_STEP_HINT_TOOL_NAME} alongside anything "
     "else you call, declaring what the next step needs."
+)
+
+# docs/components/request-pipeline/08-planning.md (Phase 3C, plan-and-execute) —
+# the planning turn's system prompt. This turn does NOT execute anything: it
+# reads the task (and any composed skill / retrieved procedures already in the
+# prompt), decides the shape of the work, and emits a checkpoint plan via
+# propose_plan. PlanWorkflow then runs one checkpoint turn per checkpoint, and
+# each of those may re-plan the remainder — so the plan is a first draft, not a
+# contract. Keep checkpoints coarse (a handful, each a meaningful unit of
+# progress with an observable 'done when'), not a keystroke-level script.
+PLANNING_SYSTEM_PROMPT = (
+    "You are planning a task, not executing it. Think through what the task requires, draw on any "
+    "procedure or skill already shown in your context, and lay out a short ordered list of "
+    "checkpoints — each a meaningful unit of progress with an observable condition that means it's "
+    "done. Aim for a handful of coarse steps, not a line-by-line script; the agent executing each "
+    "checkpoint can re-plan the rest as it learns more. Mark a checkpoint complex=true when it is "
+    "itself a multi-step subtask worth its own plan. Call propose_plan with your checkpoints "
+    "and nothing else — set needs_approval=true when the work is risky, expensive, or hard to "
+    "reverse and the user should see the plan before it runs; leave it off for routine work. "
+    f"Also call {_NEXT_STEP_HINT_TOOL_NAME}, declaring what the first checkpoint needs."
 )
 
 TOOLS_SCHEMA = [
@@ -235,15 +270,20 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "search_tools",
-            # Description mirrors mcp-hub's own real search_tools tool
-            # description, plus a note about the shell-hub fan-out (this
-            # project's own addition, not mcp-hub's).
+            # Rewritten 2026-09-04 alongside DEFAULT_SYSTEM_PROMPT — call_tool
+            # is no longer a tool the model can select at all (tool-registry.md,
+            # "Resolved: Three-Layer Tool Taxonomy & Per-Task Resolution");
+            # telling it to "use call_tool" here left it with no valid way to
+            # act on its own search results. A match this call surfaces is
+            # bound (tools._persist_discovered) and offered directly, by its
+            # own name, starting the turn's NEXT step.
             "description": (
                 "Semantically search the tools available across all registered MCP "
-                "backends, plus locally-available shell/CLI capabilities. Returns "
-                "candidates with a server, tool name, description, and input schema. "
-                "Use call_tool to invoke an mcp-hub result (server != \"shell\"), or "
-                "shell_exec directly to invoke a shell result (server == \"shell\")."
+                "backends, plus locally-available shell/CLI capabilities, for something not "
+                "already offered to you directly. Returns candidates with a server, tool name, "
+                "description, and input schema — for your own awareness of what exists. A match "
+                "becomes directly callable by its own tool name (or shell_exec, for a shell "
+                "result) starting your NEXT step, not this one."
             ),
             "parameters": {
                 "type": "object",
@@ -301,6 +341,79 @@ TOOLS_SCHEMA = [
                     "prompt": {"type": "string", "description": "The self-contained task for the subagent to perform."},
                 },
                 "required": ["prompt"],
+            },
+        },
+    },
+    # docs/components/proactivity.md — the agent's own standing intentions.
+    # Each is an IntentionWorkflow execution (no table); these tools start /
+    # signal / cancel / query it via the Temporal client (tools_intention.py).
+    {
+        "type": "function",
+        "function": {
+            "name": "create_intention",
+            "description": (
+                "Arm a standing intention — something you should keep watching for or doing on the "
+                "user's behalf, beyond this turn (\"remind me to leave 2h before my flight\", "
+                "\"tell me when the deploy goes green\", \"every weekday morning give me my priorities\"). "
+                "When it triggers, you get woken with a fresh turn to decide whether and how to act. "
+                "The bar is high — arm one only when there's a real, lasting reason to."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "objective": {"type": "string", "description": "What you're committing to, in the user's terms."},
+                    "why": {"type": "string", "description": "Optional one line of context carried to the future turn."},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["time", "deadline", "condition", "state", "event", "inactivity", "schedule"],
+                        "description": "time/deadline = fire once at fire_at; condition/state/event = poll a probe until it holds; inactivity = fire if the user goes quiet for idle_for_seconds; schedule = recurring, needs cron or every_seconds.",
+                    },
+                    "fire_at": {"type": "string", "description": "ISO-8601 timestamp (kind=time/deadline). Compute this relative to the actual current date — check it first (e.g. via shell_exec); never assume or recall a date from memory."},
+                    "idle_for_seconds": {"type": "number", "description": "Seconds of user silence before firing (kind=inactivity)."},
+                    "cron": {"type": "string", "description": "Cron expression, UTC (kind=schedule) — e.g. \"0 9 * * MON-FRI\"."},
+                    "every_seconds": {"type": "number", "description": "Fixed interval in seconds (kind=schedule), alternative to cron."},
+                    "poll_every_seconds": {"type": "number", "description": "Poll interval (kind=condition/state/event; default 300)."},
+                    "expires_at": {"type": "string", "description": "ISO-8601; give up unfired after this (poll kinds)."},
+                    "probe": {
+                        "type": "object",
+                        "description": "What to check each poll (kind=condition/state/event).",
+                        "properties": {
+                            "tool": {"type": "string", "description": "A call_tool \"server/tool\" to run."},
+                            "args": {"type": "object", "description": "Arguments for that tool."},
+                            "predicate": {"type": "string", "description": "Natural-language condition to judge against the result."},
+                        },
+                        "required": ["tool", "predicate"],
+                    },
+                },
+                "required": ["objective", "kind"],
+            },
+        },
+    },
+    # docs/components/tool-registry.md, "Resolved: Three-Layer Tool Taxonomy"
+    # — the 5 CRUD operations on an armed intention (everything but create)
+    # collapsed into one dispatcher tool. These are operations on one
+    # construct, not 5 distinct intents, unlike e.g. memory_search vs.
+    # lcm_grep (different substrates, deliberately left separate).
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_intention",
+            "description": (
+                "List, inspect, revise, snooze, or cancel your armed intentions. "
+                "list needs nothing else. inspect/revise/snooze/cancel need intention_id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "inspect", "revise", "snooze", "cancel"]},
+                    "intention_id": {"type": "string", "description": "Required for every action except list."},
+                    "objective": {"type": "string", "description": "revise: the new objective."},
+                    "why": {"type": "string", "description": "revise: the new one-line context."},
+                    "fire_at": {"type": "string", "description": "revise: new ISO-8601 fire time."},
+                    "poll_every_seconds": {"type": "number", "description": "revise: new poll interval."},
+                    "by_seconds": {"type": "number", "description": "snooze: push the next fire out by this many seconds."},
+                },
+                "required": ["action"],
             },
         },
     },
@@ -380,55 +493,6 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            # docs/components/request-pipeline/08-planning.md — the living
-            # checkpoint ledger. A meta-tool like declare_next_step_hint: it
-            # rides the response's existing round-trip, carries no work of its
-            # own, and ModelCall peels it out of the tool stream to apply
-            # against turn_plan rather than minting a tool_calls row for it.
-            # Offered on every turn; it's a no-op the model omits when no plan
-            # is shown or nothing changed.
-            "name": "plan_progress",
-            "description": (
-                "When a plan is shown in your context, call this alongside your response whenever a "
-                "checkpoint's state changes: mark it \"done\" once its 'done when' condition is met, "
-                "\"skipped\" if you're deliberately bypassing it, or \"revised\" (with a note) if the "
-                "task diverged from what that step assumed. You may also add a step the plan is "
-                "missing by giving a new checkpoint_id together with an intent. Omit this tool "
-                "entirely on steps where no checkpoint changed."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "updates": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "checkpoint_id": {
-                                    "type": "string",
-                                    "description": "The cp id shown in the plan block (e.g. \"cp2\"), or a new id to add a missing step.",
-                                },
-                                "status": {"type": "string", "enum": ["done", "skipped", "revised"]},
-                                "note": {
-                                    "type": "string",
-                                    "description": "Why the step was revised or skipped, or what a correction changed.",
-                                },
-                                "intent": {
-                                    "type": "string",
-                                    "description": "Only when adding a step the plan is missing: what the new step accomplishes.",
-                                },
-                            },
-                            "required": ["checkpoint_id"],
-                        },
-                    },
-                },
-                "required": ["updates"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": _NEXT_STEP_HINT_TOOL_NAME,
             # docs/components/model-registry.md, "Resolved: Selection
             # Mechanism" — included alongside whatever other tool_calls a
@@ -454,12 +518,10 @@ TOOLS_SCHEMA = [
 ]
 
 # docs/components/context-slot.md's Memory-Access Tools — lcm_expand is
-# subagent-only at the schema level: excluded from the list entirely for a
-# main-agent (top-level) turn rather than listed and rejected at runtime if
-# called anyway, per the explicit design decision behind this. lcm_grep/
-# lcm_describe carry no such restriction — same "unrestricted" treatment as
-# memory_search/memory_expand above.
-_SUBAGENT_ONLY_TOOL_NAMES = {"lcm_expand"}
+# subagent-only at the schema level (excluded from a main-agent turn's schema
+# entirely, not listed-and-rejected). That rule now lives as data:
+# `capabilities.CAPABILITIES` gives lcm_expand `turn_kinds={SUBAGENT}` while
+# lcm_grep / lcm_describe carry the full non-planning set.
 
 # docs/components/temporal-workflow.md's recursion-termination guard — the
 # variant of spawn_subagent offered to a subagent (as opposed to the root
@@ -504,18 +566,184 @@ _SPAWN_SUBAGENT_NESTED_SCHEMA = {
 }
 
 
-def tools_schema_for(is_subagent: bool) -> list[dict]:
-    """model_call.py's one call site for what used to be the flat
-    TOOLS_SCHEMA constant — every ModelCall now goes through this so both
-    the lcm_expand exclusion and the spawn_subagent variant substitution
-    above are enforced uniformly on both the streaming and non-streaming
-    call paths, not duplicated at each site."""
-    if is_subagent:
-        return [
-            _SPAWN_SUBAGENT_NESTED_SCHEMA if tool["function"]["name"] == _SPAWN_SUBAGENT_TOOL_NAME else tool
-            for tool in TOOLS_SCHEMA
-        ]
-    return [tool for tool in TOOLS_SCHEMA if tool["function"]["name"] not in _SUBAGENT_ONLY_TOOL_NAMES]
+# docs/components/request-pipeline/08-planning.md (Phase 3C) — the checkpoint
+# turn's completion report. A meta-tool like declare_next_step_hint: it rides
+# the response's existing round-trip, carries no work of its own, and ModelCall
+# peels it to apply against PLAN.md rather than minting a tool_calls row. Only
+# offered to a checkpoint turn (the seed message names the checkpoint).
+_CHECKPOINT_DONE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "checkpoint_done",
+        "description": (
+            "You are executing one checkpoint of a plan. Call this once the checkpoint's "
+            "'done when' condition is met: status \"done\", or \"skipped\" if you deliberately "
+            "bypassed it, or \"revised\" (with a note) if the task diverged from what the step "
+            "assumed. If what you found means the REST of the plan should change, pass "
+            "revised_tail — an ordered list of the remaining checkpoints, which replaces every "
+            "still-pending step after this one."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "checkpoint_id": {
+                    "type": "string",
+                    "description": "The cp id from the seed message (e.g. \"cp2\").",
+                },
+                "status": {"type": "string", "enum": ["done", "skipped", "revised"]},
+                "note": {
+                    "type": "string",
+                    "description": "Why the step was revised or skipped, or anything the next checkpoint needs to know.",
+                },
+                "revised_tail": {
+                    "type": "array",
+                    "description": "Optional. The remaining plan, re-planned: replaces all still-pending checkpoints after this one.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "intent": {"type": "string", "description": "What this step accomplishes."},
+                            "done_when": {"type": "string", "description": "The observable condition that means it's complete."},
+                        },
+                        "required": ["intent"],
+                    },
+                },
+            },
+            "required": ["checkpoint_id", "status"],
+        },
+    },
+}
+
+
+# Delivery-in-the-loop (2026-09-06, docs/components/activities-outbound-delivery.md's
+# already-resolved "Retry Policy: Model-Driven, Not a Static Playbook" applied
+# to delivery itself): never in a turn's default schema (capabilities.py's
+# turn_kinds=frozenset()) — offered only via schema_for's `also` param, by
+# turn.go's bounded post-Deliver-failure recovery round or the plan-workflow
+# presentation turn. Each call is one platform message; the model decides
+# how/whether to split a long reply across several deliver_reply calls, or
+# switch to deliver_attachment, informed by whatever it retrieved from
+# skills/seeds/deliver-long-content.json — not a mechanical char-count cut.
+_DELIVER_REPLY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "deliver_reply",
+        "description": (
+            "Send content to the user as one message on their platform. Call it more than once "
+            "to split a long reply across several messages — split at natural boundaries "
+            "(paragraphs, sections), not an arbitrary character count. Fails with a "
+            "content_too_long error (and the limit) if this call's content still doesn't fit; "
+            "on that, split further or switch to deliver_attachment."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The text to send as one message."},
+            },
+            "required": ["content"],
+        },
+    },
+}
+
+_DELIVER_ATTACHMENT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "deliver_attachment",
+        "description": (
+            "Send content to the user as a file attachment instead of inline text — the right "
+            "choice for long structured content (a plan, a checklist, code) that doesn't read "
+            "well split across several messages."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The full content to write to the file."},
+                "filename": {"type": "string", "description": "A short, descriptive filename (e.g. \"plan.md\")."},
+            },
+            "required": ["content", "filename"],
+        },
+    },
+}
+
+
+_PROPOSE_PLAN_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "propose_plan",
+        "description": (
+            "Emit the checkpoint plan for this task: an ordered list of coarse steps, each with an "
+            "intent and an observable 'done_when'. This is the only tool you call on a planning turn."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "checkpoints": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "intent": {"type": "string", "description": "What this step accomplishes."},
+                            "done_when": {"type": "string", "description": "The observable condition that means it's complete."},
+                            "complex": {
+                                "type": "boolean",
+                                "description": "True if this step is itself a multi-step subtask that deserves its own plan (it will be run as a nested planning+execution pass). Leave off for ordinary steps.",
+                            },
+                        },
+                        "required": ["intent"],
+                    },
+                },
+                "needs_approval": {
+                    "type": "boolean",
+                    "description": "True if the plan should be shown to the user for approval before execution begins.",
+                },
+            },
+            "required": ["checkpoints"],
+        },
+    },
+}
+
+
+# name -> schema dict, over every model-facing schema this module defines
+# (the base list plus the two plan meta-tools). `capabilities.schema_for`
+# reads this back; the nested spawn_subagent variant is passed separately.
+_SCHEMA_BY_NAME: dict[str, dict] = {
+    t["function"]["name"]: t
+    for t in [
+        *TOOLS_SCHEMA,
+        _PROPOSE_PLAN_SCHEMA,
+        _CHECKPOINT_DONE_SCHEMA,
+        _DELIVER_REPLY_SCHEMA,
+        _DELIVER_ATTACHMENT_SCHEMA,
+    ]
+}
+
+
+def tools_schema_for(
+    is_subagent: bool,
+    planning: bool = False,
+    plan_handling: bool = False,
+    checkpoint: bool = False,
+    resolved: "list | tuple" = (),
+    offer_delivery_tools: bool = False,
+) -> list[dict]:
+    """`model_call.py`'s one call site for the model-facing tool schema.
+
+    The turn-kind rules — lcm_expand being subagent-only, the spawn_subagent
+    nested-variant swap, which turns see propose_plan / checkpoint_done — now
+    live as data in `capabilities.CAPABILITIES` (tool-registry.md, "Resolved:
+    Three-Layer Tool Taxonomy"). This is a thin adapter from the historical
+    boolean flags to `capabilities.schema_for`. `resolved` is the per-turn
+    list of `Capability` objects `ToolDiscover` produced (empty until Phase 3).
+
+    `offer_delivery_tools` — turn.go's delivery-recovery round, or
+    plan_workflow.go's plan-presentation turn — force-includes
+    deliver_reply/deliver_attachment via `schema_for`'s `also`, since those two
+    are never in any turn kind's default set (situational, not standing).
+    """
+    from . import capabilities
+
+    kind = capabilities.turn_kind_of(is_subagent, planning, plan_handling, checkpoint)
+    also = frozenset({"deliver_reply", "deliver_attachment"}) if offer_delivery_tools else frozenset()
+    return capabilities.schema_for(kind, resolved, also)
 
 
 @dataclass
@@ -533,17 +761,23 @@ class RealModelResult:
 
 
 async def build_conversation(
-    conn, turn_id: str, episode_id: str, system_prompt: str, context_window: int = 0
-) -> tuple[list[dict], int]:
+    conn, turn_id: str, plan_id: str, system_prompt: str, context_window: int = 0, *, planning: bool = False,
+) -> tuple[list[dict], int, list]:
     """Thin call-through to `prompt.assemble` — request pipeline step 9
     (docs/components/request-pipeline/09-prompt-assembly.md) owns the section
     model, ordering, and budget arbitration; this stays the stable call site
-    model_call.py already uses. `episode_id` (docs/components/episode-lifecycle.md)
+    model_call.py already uses. `plan_id` (docs/components/episode-lifecycle.md)
     keys the enrichment sections; empty for a conversational fast-path turn.
     `context_window` (0 if unknown, e.g. the fixture path) bounds how much of it
     enrichment may consume before `prompt.assemble` starts shedding sections.
+
+    Returns `(conversation, context_tokens, resolved_tools)` — `resolved_tools`
+    (docs/components/tool-registry.md, "Resolved: Three-Layer Tool Taxonomy &
+    Per-Task Resolution") is the per-task set of directly-callable `Capability`
+    objects `model_call.py` hands to `tools_schema_for`; always empty when
+    `planning=True` (that turn gets a reference catalog in-prompt instead).
     """
-    return await prompt.assemble(conn, turn_id, episode_id, system_prompt, context_window)
+    return await prompt.assemble(conn, turn_id, plan_id, system_prompt, context_window, planning=planning)
 
 
 # call_model / call_model_streaming moved to

@@ -13,6 +13,8 @@
 // in Postgres, read/written by the activity implementations directly.
 package types
 
+import "time"
+
 // Usage mirrors a model call's token accounting, used by the turn workflow's
 // inline token/cost budget check (components/temporal-workflow.md, Resolved:
 // Stop-Condition Default Values). Numbers, not content — stays workflow-visible.
@@ -29,6 +31,13 @@ type Usage struct {
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content,omitempty"`
+	// SpeakerID — docs/components/memory-slot.md "Resolved: Per-Message
+	// Speaker Identity". The platform-native sender id of whoever actually
+	// authored this message (gateway/core.MessageEvent.User), threaded
+	// through untouched from Ingest(). Empty for any message this process
+	// synthesizes itself (proactive wake fold-in, subagent kickoff content,
+	// plan seed/revision text) — those have no real human sender.
+	SpeakerID string `json:"speaker_id,omitempty"`
 }
 
 // TurnInput starts a Turn Workflow — top-level or, recursively, a subagent.
@@ -61,6 +70,43 @@ type TurnInput struct {
 	// there's nothing left to derive. Used at delivery time to compute the
 	// target task queue deterministically (deliver:{platform}:{connection_id}).
 	ConnectionID string `json:"connection_id,omitempty"`
+	// InitiatedBy — docs/components/proactivity.md. Provenance of the turn:
+	// "user" (a real inbound message — the default), "intn:<id>" (an
+	// IntentionWorkflow fired and the coordinator woke), or "plan" (a
+	// planning / checkpoint turn under a PlanWorkflow). Threaded straight
+	// through to the InsertMessage call that creates the turns row. Empty is
+	// treated as "user".
+	InitiatedBy string `json:"initiated_by,omitempty"`
+	// --- docs/components/request-pipeline/08-planning.md, Phase 3C ---
+	// PreInserted: the turns row + seq-0 message already exist (the dispatch
+	// helper did InsertMessage before deciding what workflow to start). Skip
+	// the start-of-turn InsertMessage.
+	PreInserted bool `json:"pre_inserted,omitempty"`
+	// PlanningMode: this turn drafts a checkpoint plan (one ModelCall, planning
+	// system prompt, `propose_plan` tool) rather than running the task. Ends
+	// after the model calls propose_plan. The PlanWorkflow reads PLAN.md next.
+	PlanningMode bool `json:"planning_mode,omitempty"`
+	// PlanHandling: a mid-plan follow-up turn under a PlanWorkflow — a normal
+	// reason-act turn (it can answer the user and use tools) that ALSO gets the
+	// `propose_plan` tool so it can reshape the still-pending plan tail given
+	// what the follow-up asked. Not PlanningMode (which is propose-plan-only).
+	PlanHandling bool `json:"plan_handling,omitempty"`
+	// PlanID: the task-run this turn belongs to (the planning turn's id). Set by
+	// PlanWorkflow for every turn it runs, and by dispatch.go for a Lite turn it
+	// pre-resolved. When Task is also set, TurnWorkflow skips its own
+	// ClassifyRequest.
+	PlanID string `json:"plan_id,omitempty"`
+	// Task: pre-resolved classification, passed through when PlanID is set.
+	Task *TaskRepresentation `json:"task,omitempty"`
+	// OfferDeliveryTools: this turn's ModelCall calls offer deliver_reply/
+	// deliver_attachment (docs/components/activities-outbound-delivery.md's
+	// model-driven retry philosophy applied to delivery itself) — set by
+	// plan_workflow.go's plan-presentation turn. Threaded into every
+	// ModelCallInput this turn builds, mirrored by Python's
+	// ModelCallInput.offer_delivery_tools. turn.go's own bounded
+	// post-Deliver-failure recovery round sets this directly on a raw
+	// ModelCallInput instead (not a new turn), so it doesn't need this field.
+	OfferDeliveryTools bool `json:"offer_delivery_tools,omitempty"`
 }
 
 // TurnResult is a Turn Workflow's return value. Deliberately holds no content
@@ -84,6 +130,11 @@ type TurnResult struct {
 	// freshly-arrived signal once this turn's future resolves, starting a
 	// new turn with it rather than discarding it.
 	InterruptedDuringDelivery *SignalPayload `json:"interrupted_during_delivery,omitempty"`
+	// NeedsApproval — docs/components/request-pipeline/08-planning.md. Only a
+	// planning turn sets it (from its one ModelCall's propose_plan). PlanWorkflow
+	// reads it off the planning turn's result to decide whether to run the
+	// approval gate. A control bool, not content.
+	NeedsApproval bool `json:"needs_approval,omitempty"`
 }
 
 // SignalPayload is what SignalWithStart / a follow-up signal carries into the
@@ -95,18 +146,34 @@ type SignalPayload struct {
 	Message Message `json:"message"`
 }
 
+// WakePayload is what a fired IntentionWorkflow's FireIntention activity sends
+// to the session CoordinatorWorkflow via the Wake signal
+// (docs/components/proactivity.md, "The fire path"). No content beyond a short
+// objective + reason; the coordinator synthesises the turn's seed message from
+// it. IntentionID is the firing IntentionWorkflow's id, recorded as the turn's
+// initiated_by ("intn:<IntentionID>").
+type WakePayload struct {
+	IntentionID string `json:"intention_id"`
+	Objective   string `json:"objective"`
+	Why         string `json:"why,omitempty"`
+}
+
 // ModelCallInput is ModelCall's only input — no content. ModelCall reads
 // prior turn history from Postgres itself (it *is* the context-hydration
 // step now) and looks up ContextSeq's scripted/real response.
 type ModelCallInput struct {
 	TurnID string `json:"turn_id"`
-	// EpisodeID — docs/components/episode-lifecycle.md. The episode this turn
-	// belongs to (== the anchor turn_id). Prompt assembly reads the staged
-	// retrieval + plan ledger by this, and plan_progress updates apply against
-	// it, so a continuation turn advances the episode's one ledger. Empty for a
-	// conversational fast-path turn.
-	EpisodeID  string `json:"episode_id"`
+	// PlanID — the task-run this turn belongs to (== the planning turn's id).
+	// Prompt assembly reads the staged skills + the PLAN.md ledger by this, and
+	// propose_plan / checkpoint_done updates apply against it. Empty for a Lite
+	// or conversational turn.
+	PlanID     string `json:"plan_id"`
 	ContextSeq int    `json:"context_seq"`
+	// PlanHandling — docs/components/request-pipeline/08-planning.md. A mid-plan
+	// follow-up turn: normal reason-act, but `propose_plan` is offered alongside
+	// the regular tools and peeled the same way PlanningMode peels it, so the
+	// turn can revise the plan tail while still answering the user.
+	PlanHandling bool `json:"plan_handling,omitempty"`
 	// docs/components/model-registry.md, "Resolved: Selection Mechanism" —
 	// the previous step's self-declared hint for this step, threaded
 	// through opaquely (this workflow never interprets these, just copies
@@ -122,6 +189,15 @@ type ModelCallInput struct {
 	// medium. The workflow never interprets it; empty for subagents and when
 	// step 2 fell back.
 	Complexity string `json:"complexity"`
+	// PlanningMode — docs/components/request-pipeline/08-planning.md, Phase 3C.
+	// This is the planning turn under a PlanWorkflow: ModelCall uses the
+	// planning system prompt, offers only `propose_plan`, and peels that call
+	// off to write PLAN.md. The turn ends after one such call.
+	PlanningMode bool `json:"planning_mode,omitempty"`
+	// OfferDeliveryTools — mirrors types.TurnInput's field of the same name;
+	// see there. Also set directly (without a TurnInput) by turn.go's local
+	// post-Deliver-failure recovery round.
+	OfferDeliveryTools bool `json:"offer_delivery_tools,omitempty"`
 }
 
 // ClassifyRequestInput is ClassifyRequest's only input
@@ -139,133 +215,93 @@ type ClassifyRequestInput struct {
 // are — routing metadata derived from the message, not the message content
 // (which stays Postgres-side). RetrievalQuery/Entities are passed straight
 // into the step-4/5/7 retrieval activities by RetrievalWorkflow. Confidence ==
-// 0 marks a fallback / un-classified turn (the activity degrades to a neutral
-// representation rather than failing).
+// A zero value marks an un-classified turn; ClassifyRequest fails rather than
+// returning one (no fallback — request-pipeline/02-request-understanding.md).
 type TaskRepresentation struct {
 	Intent         string   `json:"intent"`     // "conversational" | "question" | "task" | "meta"
 	Complexity     string   `json:"complexity"` // "trivial" | "simple" | "moderate" | "complex"
 	Confidence     float64  `json:"confidence"`
 	RetrievalQuery string   `json:"retrieval_query"`
 	Entities       []string `json:"entities"`
-	// ContinuesPrior — docs/components/episode-lifecycle.md. Whether this
-	// message continues the session's currently-open episode or starts a new
-	// one. Only meaningful when an episode is open; false on the classifier
-	// fallback (OpenEpisode's degraded path uses embedding similarity instead).
+	// ContinuesPrior — whether this message continues the session's in-progress
+	// task-run or starts a new one. Consumed by ResolveOpenPlan, which
+	// cross-checks it against embedding similarity when Confidence is low.
 	ContinuesPrior bool `json:"continues_prior"`
 }
 
 // MemoryRetrieveInput is MemoryRetrieve's input
 // (docs/components/request-pipeline/04-memory-retrieval.md). RetrievalQuery is
 // the distilled query from step 2's TaskRepresentation — a small derived
-// signal passed straight in by RoutingWorkflow, not read from Postgres.
+// signal passed straight in, not read from Postgres.
+//
+// MemoryRetrieve runs once PER TURN, staged under the current turn's id
+// (OwnerID = TurnID).
 type MemoryRetrieveInput struct {
-	// EpisodeID (docs/components/episode-lifecycle.md) is the staging key —
-	// rows go to turn_retrieval keyed by it. TurnID is the current turn, used
-	// only for the reconcile-mode "latest user message" lookup.
-	EpisodeID      string `json:"episode_id"`
-	TurnID         string `json:"turn_id"`
+	OwnerID        string `json:"owner_id"` // the current turn_id — turn_retrieval staging key
 	RetrievalQuery string `json:"retrieval_query"`
 	// ParentTurnID is set only for a subagent turn ("Subagents are full
-	// agents"). When present, MemoryRetrieve resolves the parent turn's episode
-	// and copies its staged kind='memory' rows instead of re-querying
-	// agent-brain — memory is about the user's world, stable across a turn tree.
+	// agents"). When present, MemoryRetrieve copies the parent turn's staged
+	// kind='memory' rows instead of re-querying agent-brain — memory is about
+	// the user's world, stable across a turn tree.
 	ParentTurnID string `json:"parent_turn_id,omitempty"`
-	// Reconcile (episode-lifecycle.md / request-pipeline/08-planning.md) — when
-	// true the activity re-keys on the current turn's latest user message and
-	// replaces the episode's staged rows.
-	Reconcile bool `json:"reconcile,omitempty"`
 }
 
 // ToolDiscoverInput is ToolDiscover's input
-// (docs/components/request-pipeline/07-tool-discovery.md). Runs once per
-// episode (the opening turn); staged by EpisodeID.
+// (docs/components/request-pipeline/07-tool-discovery.md). REVISED 2026-09-02:
+// runs once PER TURN, staged under OwnerID = the current turn_id.
 type ToolDiscoverInput struct {
-	EpisodeID      string   `json:"episode_id"`
+	OwnerID        string   `json:"owner_id"`
 	RetrievalQuery string   `json:"retrieval_query"`
 	Entities       []string `json:"entities"`
 }
 
 // SkillDiscoverInput is SkillDiscover's input
-// (docs/components/request-pipeline/05-skill-discovery.md). See
-// MemoryRetrieveInput for the EpisodeID / TurnID split.
+// (docs/components/request-pipeline/05-skill-discovery.md). Plan-scoped — runs
+// once on the planning turn, staged under PlanID for the prompt + RecordSkill.
 type SkillDiscoverInput struct {
-	EpisodeID      string `json:"episode_id"`
-	TurnID         string `json:"turn_id"`
+	PlanID         string `json:"plan_id"`
 	RetrievalQuery string `json:"retrieval_query"`
-	Reconcile      bool   `json:"reconcile,omitempty"`
 }
 
-// ComposeSkillInput is ComposeSkill's input
-// (docs/components/request-pipeline/06-skill-composition.md). The activity
-// reads the staged memory/tool/skill rows from turn_retrieval by EpisodeID.
-type ComposeSkillInput struct {
-	EpisodeID string `json:"episode_id"`
-	// request-pipeline/08-planning.md — a reconcile-mode compose regenerates the
-	// kind='composed' block but does not re-seed turn_plan.
-	Reconcile bool `json:"reconcile,omitempty"`
+// RecordSkillInput is RecordSkill's input
+// (docs/components/skill-subsystem.md REVISION 2026-09-02). Dispatched once when
+// a task-run (PlanWorkflow, or a Deliberate subagent turn) finishes. The
+// activity reads the whole multi-turn trajectory / tool calls / staged skill
+// rows / PLAN.md from Postgres + the PV itself, then match-or-inserts against
+// skill_procedures. Intent/Complexity/CloseReason come from the caller (there
+// is no `episodes` row to read them from — decision B).
+type RecordSkillInput struct {
+	PlanID      string `json:"plan_id"`
+	StopReason  string `json:"stop_reason"`
+	Intent      string `json:"intent"`
+	Complexity  string `json:"complexity"`
+	CloseReason string `json:"close_reason"` // "plan_complete" | "superseded" | "turn_end" | ""
 }
 
-// RecordSkillOutcomeInput is RecordSkillOutcome's input
-// (docs/components/skill-subsystem.md, "Recording" + episode-lifecycle.md).
-// Fires ONCE when an episode closes. The activity reads the whole multi-turn
-// trajectory / tool calls / staged skill rows / plan ledger / episode row
-// from Postgres itself.
-type RecordSkillOutcomeInput struct {
-	EpisodeID  string `json:"episode_id"`
-	StopReason string `json:"stop_reason"`
+// --- docs/components/request-pipeline/08-planning.md — task-run resolution ---
+//
+// Decision B (episode-lifecycle.md): the PlanWorkflow *is* the task-run. There
+// is no `episodes` table. `plan_id` == the anchor/planning turn id; a running
+// PlanWorkflow has id "<plan_id>:plan".
+
+// ResolveOpenPlanInput — dispatch.go asks: is there a Deliberate task already in
+// progress for this session, and does this new message continue it?
+type ResolveOpenPlanInput struct {
+	SessionKey string             `json:"session_key"`
+	TurnID     string             `json:"turn_id"` // the just-inserted message's turn
+	Task       TaskRepresentation `json:"task"`
 }
 
-// --- docs/components/episode-lifecycle.md ---
-
-// OpenEpisodeInput — the activity reads the turn's parent_type / seed message /
-// session from Postgres; the workflow supplies the turn_id, step 2's task
-// representation, and WantNewEpisode (the Go-side laneIsDeliberate verdict —
-// docs/components/lane-model.md). WantNewEpisode only governs the no-open-episode
-// case: a Lite turn with nothing to attach to gets EpisodeID "" back. A turn
-// continuing an open episode always attaches regardless.
-type OpenEpisodeInput struct {
-	TurnID         string             `json:"turn_id"`
-	Task           TaskRepresentation `json:"task"`
-	WantNewEpisode bool               `json:"want_new_episode"`
-}
-
-// OpenEpisodeResult — EpisodeID is what to stage/key the turn under. Attached
-// means this turn joined an already-open episode (skip the full pipeline,
-// reconcile-refresh only). SupersededEpisodeID is non-empty when a
-// previously-open episode was closed to make room.
-type OpenEpisodeResult struct {
-	EpisodeID           string `json:"episode_id"`
-	Attached            bool   `json:"attached"`
-	SupersededEpisodeID string `json:"superseded_episode_id"`
-}
-
-// CompleteEpisodeInput — called at every turn end for a turn that belongs to an
-// episode: records the turn's stop_reason on the episode and, if the plan
-// ledger is now all-terminal, closes the episode as complete.
-type CompleteEpisodeInput struct {
-	EpisodeID  string `json:"episode_id"`
-	StopReason string `json:"stop_reason"`
-}
-
-type CompleteEpisodeResult struct {
-	Completed bool `json:"completed"`
-}
-
-// CloseSessionEpisodesInput — dispatched on the coordinator's idle-exit.
-type CloseSessionEpisodesInput struct {
-	SessionKey string `json:"session_key"`
-}
-
-type CloseSessionEpisodesResult struct {
-	EpisodeIDs []string `json:"episode_ids"`
-}
-
-// SkillSynthesizeInput is SkillSynthesize's input
-// (docs/components/skill-subsystem.md, "Synthesis"). The activity processes
-// the whole un-synthesized candidate queue; this carries only the triggering
-// turn, for logging.
-type SkillSynthesizeInput struct {
-	TriggerTurnID string `json:"trigger_turn_id"`
+// ResolveOpenPlanResult:
+//   - Continue: a PlanWorkflow is running for this session and this message
+//     continues its task — the caller signals "<PlanID>:plan".
+//   - Supersede: a PlanWorkflow is running but this is a new task — the caller
+//     signals it to abandon, then starts a fresh plan.
+//   - otherwise both false: no plan in progress.
+type ResolveOpenPlanResult struct {
+	PlanID        string `json:"plan_id"`
+	ShouldContinue bool  `json:"should_continue"`
+	Supersede     bool   `json:"supersede"`
 }
 
 // SubsystemResult is what each retrieval-phase activity returns to
@@ -293,13 +329,16 @@ type ToolCallRef struct {
 	// IsSubagent in this first pass — deliberately not designed for that
 	// combination yet.
 	RequiresApproval bool `json:"requires_approval"`
-	// The resolved {server, tool} identity behind this call — "shell" +
-	// the reduced command-name token for shell_exec, or the real
-	// {server,tool} pair for call_tool. Crosses the reference-passing
-	// boundary the same way ToolName already does (dispatch/routing
-	// metadata, not the call's actual arguments — components/multi-tenancy.md's
-	// "tool name... is workflow-visible by design, not an accepted leak").
-	// Only populated when RequiresApproval is true; empty otherwise.
+	// The resolved {server, tool} identity behind this call — "shell" + the
+	// reduced command-name token for shell_exec, the real {server,tool} pair
+	// for call_tool, or (docs/components/tool-registry.md, "Resolved:
+	// Three-Layer Tool Taxonomy & Per-Task Resolution") the ToolDiscover
+	// Capability's own {server,tool} for a per-task resolved call — set
+	// whenever ModelCall knows the identity, not only when RequiresApproval
+	// is true. Crosses the reference-passing boundary the same way ToolName
+	// already does (dispatch/routing metadata, not the call's actual
+	// arguments — components/multi-tenancy.md's "tool name... is
+	// workflow-visible by design, not an accepted leak").
 	Server string `json:"server,omitempty"`
 	Tool   string `json:"tool,omitempty"`
 }
@@ -325,6 +364,11 @@ type ModelCallOutput struct {
 	// into the next ModelCallInput. This workflow never interprets these.
 	NextHintModality string `json:"next_hint_modality"`
 	NextHintTier     string `json:"next_hint_tier"`
+	// NeedsApproval — docs/components/request-pipeline/08-planning.md. Set on a
+	// planning turn's one call when the model's `propose_plan` asked for
+	// approval before execution. A control bool, same category as NextHintTier;
+	// TurnWorkflow copies it into TurnResult and PlanWorkflow gates on it.
+	NeedsApproval bool `json:"needs_approval,omitempty"`
 }
 
 // ToolCallInput is ToolCall's only input — it reads its own arguments from
@@ -364,6 +408,14 @@ type InsertMessageInput struct {
 	ParentID    string  `json:"parent_id"`
 	ParentType  string  `json:"parent_type"`
 	TurnSeq     *int    `json:"turn_seq,omitempty"`
+	// InitiatedBy — set only on the is_turn_start call; written to
+	// turns.initiated_by (docs/components/proactivity.md). Empty → 'user'.
+	InitiatedBy string `json:"initiated_by,omitempty"`
+	// PlanID — set on the is_turn_start call for any turn under a PlanWorkflow
+	// (docs/components/request-pipeline/08-planning.md). Written to
+	// turns.plan_id, which RecordSkill's trajectory gather keys on (by prefix,
+	// so a nested plan's turns are swept in too).
+	PlanID string `json:"plan_id,omitempty"`
 }
 
 // UserInputOption is one selectable choice in a UserInputRequest.
@@ -438,6 +490,15 @@ type UserInputRequestWorkflowInput struct {
 	ConnectionID string `json:"connection_id,omitempty"`
 }
 
+// ErrTypeContentTooLong — the Temporal ApplicationError type name Deliver
+// (deliver_discord.go) uses when a final answer doesn't fit in one platform
+// message, and turn.go's deliverConnectionBased checks for to decide whether
+// to run its delivery-recovery round (deliver_reply/deliver_attachment)
+// instead of just losing the response. Shared here (not a local const in
+// either package) since both sides of the activity/workflow boundary need
+// the exact same string.
+const ErrTypeContentTooLong = "ContentTooLong"
+
 type UserInputRequestWorkflowOutput struct {
 	Response UserInputResponse `json:"response"`
 	// Set only when ApprovalGatedCall was set on the input — the real
@@ -446,4 +507,120 @@ type UserInputRequestWorkflowOutput struct {
 	// drainResult reads this directly; plain UserInputRequestWorkflow
 	// consumers (a future decision-request use) never see it set.
 	ToolCallOutput *ToolCallOutput `json:"tool_call_output,omitempty"`
+}
+
+// --- docs/components/proactivity.md — intentions ---
+
+// IntentionInput is IntentionWorkflow's input, and its own ContinueAsNew
+// carry-forward. The workflow id is IntentionID ("intn:<user>:<slug>"). A
+// calendar-recurring intention is a Temporal Schedule that starts one of these
+// per firing (Kind "time"), so the workflow itself only ever runs one of:
+// "time"/"deadline" (one-shot), "condition"/"state"/"event" (poll loop),
+// "inactivity" (idle timer restarted by a `reset` signal).
+type IntentionInput struct {
+	IntentionID string `json:"intention_id"`
+	SessionKey  string `json:"session_key"` // whose CoordinatorWorkflow the fire wakes
+	Objective   string `json:"objective"`
+	Why         string `json:"why,omitempty"`
+	Kind        string `json:"kind"`
+
+	FireAt     time.Time     `json:"fire_at,omitempty"`     // one-shot: absolute wall-clock
+	Probe      *ProbeSpec    `json:"probe,omitempty"`       // poll kinds
+	PollEvery  time.Duration `json:"poll_every,omitempty"`  // poll kinds
+	ExpiresAt  time.Time     `json:"expires_at,omitempty"`  // poll kinds: give up unfired
+	IdleFor    time.Duration `json:"idle_for,omitempty"`    // inactivity
+	FiredCount int           `json:"fired_count,omitempty"` // carried across ContinueAsNew
+}
+
+// ProbeSpec is what a poll-kind intention checks each cycle: run `Tool` (a
+// call_tool "server/tool", or a builtin name) with `Args`, then judge `Predicate`
+// (natural language) against the result.
+type ProbeSpec struct {
+	Tool      string         `json:"tool"`
+	Args      map[string]any `json:"args,omitempty"`
+	Predicate string         `json:"predicate"`
+}
+
+// IntentionReviseSignal — the `revise` signal payload. Only set fields apply.
+type IntentionReviseSignal struct {
+	Objective string        `json:"objective,omitempty"`
+	Why       string        `json:"why,omitempty"`
+	FireAt    time.Time     `json:"fire_at,omitempty"`
+	PollEvery time.Duration `json:"poll_every,omitempty"`
+}
+
+// IntentionStatus is the `status` query result.
+type IntentionStatus struct {
+	IntentionID string `json:"intention_id"`
+	Objective   string `json:"objective"`
+	Kind        string `json:"kind"`
+	State       string `json:"state"` // "armed" | "firing" | "expired"
+	FiredCount  int    `json:"fired_count"`
+}
+
+// --- docs/components/request-pipeline/08-planning.md — plan-and-execute ---
+
+// PlanWorkflowInput starts a PlanWorkflow — the orchestrator for one Deliberate
+// task-run (workflow id "<plan_id>:plan"). It runs the planning turn, gates on
+// approval, then dispatches one checkpoint TurnWorkflow per non-terminal
+// checkpoint in PLAN.md, folds in any mid-plan follow-up at each checkpoint
+// boundary, and finally records the skill + tells the coordinator it's done.
+type PlanWorkflowInput struct {
+	PlanID       string             `json:"plan_id"` // == the planning turn id
+	SessionKey   string             `json:"session_key"`
+	ConnectionID string             `json:"connection_id,omitempty"`
+	InitiatedBy  string             `json:"initiated_by,omitempty"`
+	Task         TaskRepresentation `json:"task"`
+	// --- 3C-iii checkpoint recursion (docs/components/request-pipeline/08-planning.md) ---
+	// ParentPlanID: the plan whose complex checkpoint spawned this one. Empty ⟺
+	// this IS the root. A nested plan's completion reaches its parent via the
+	// child-workflow future — no PlanDone signal (that's root→coordinator only),
+	// no RecordSkill of its own (the root's one RecordSkill prefix-sweeps every
+	// turn in the tree, since each nested plan's turn ids sit under the root's).
+	ParentPlanID string `json:"parent_plan_id,omitempty"`
+	// Depth: 0 at the root, +1 per nesting level. A checkpoint at maxPlanDepth
+	// runs as a flat turn instead of recursing (it can still spawn subagents).
+	Depth int `json:"depth,omitempty"`
+	// SeedText: the spawning checkpoint's seed message. Empty ⟺ root (its
+	// planning turn is PreInserted by dispatch.go); set for a nested plan, whose
+	// planning turn inserts this as its own seq-0 message.
+	SeedText string `json:"seed_text,omitempty"`
+}
+
+// NextCheckpointResult — the NextCheckpoint activity reads PLAN.md and returns
+// the first non-terminal checkpoint, formatted as the seed message text for a
+// checkpoint TurnWorkflow (intent + done_when + the whole rendered plan for
+// context + the "call checkpoint_done" instruction). HasNext is false when
+// every checkpoint is terminal.
+type NextCheckpointResult struct {
+	HasNext      bool   `json:"has_next"`
+	CheckpointID string `json:"checkpoint_id,omitempty"`
+	SeedText     string `json:"seed_text,omitempty"`
+	// Complex — the planning model flagged this checkpoint as itself a
+	// multi-step subtask (propose_plan's per-checkpoint `complex`). PlanWorkflow
+	// runs it as a nested PlanWorkflow instead of a flat turn (3C-iii), unless
+	// the depth cap is hit.
+	Complex bool `json:"complex,omitempty"`
+}
+
+
+// FireIntentionInput — FireIntention SignalWithStarts the session coordinator
+// with a WakePayload built from this.
+type FireIntentionInput struct {
+	IntentionID string `json:"intention_id"`
+	SessionKey  string `json:"session_key"`
+	Objective   string `json:"objective"`
+	Why         string `json:"why,omitempty"`
+}
+
+// CheckConditionInput / CheckConditionResult — CheckCondition runs a poll-kind
+// intention's probe and judges its predicate.
+type CheckConditionInput struct {
+	IntentionID string    `json:"intention_id"`
+	Probe       ProbeSpec `json:"probe"`
+}
+
+type CheckConditionResult struct {
+	Fired bool   `json:"fired"`
+	Note  string `json:"note,omitempty"`
 }

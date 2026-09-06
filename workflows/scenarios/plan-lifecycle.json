@@ -1,0 +1,56 @@
+{
+  "_comment": "request-pipeline/08-planning.md — the plan-and-execute happy path. A clearly-Deliberate debugging task (matches the investigate-failure seed): dispatch.go starts a PlanWorkflow. turn:1 is the PLANNING turn (PlanningMode) — its one scripted response calls propose_plan with 3 checkpoints, no needs_approval, so the approval gate auto-proceeds. plan.seed writes PLAN.md. The PlanWorkflow then runs one checkpoint turn per checkpoint (<turn:1>:cp:1..3), each scripted to call checkpoint_done -> plan.apply_checkpoint_done marks it. All terminal -> finishPlan dispatches RecordSkill (close_reason plan_complete) + signals the coordinator PlanDone. SkillDiscover staged the investigate-failure procedure under the plan_id (owner_id) for the planning turn's prompt + RecordSkill attribution.",
+  "message": {
+    "role": "user",
+    "content": "Users report the checkout endpoint returns HTTP 500 intermittently since Tuesday's deploy. Reproduce it, find the root cause, apply a fix, and confirm the reproduction passes."
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Here is the plan.",
+      "tool_calls": [
+        { "name": "propose_plan", "is_subagent": false, "arguments": { "checkpoints": [
+          { "intent": "Reproduce the intermittent 500 locally", "done_when": "the 500 reproduces on demand" },
+          { "intent": "Isolate the root cause to a specific change or condition", "done_when": "the offending change is named with evidence" },
+          { "intent": "Apply the minimal fix and re-run the reproduction", "done_when": "the reproduction passes and the cause is understood" }
+        ] } }
+      ],
+      "usage": { "input_tokens": 140, "output_tokens": 60 }
+    }
+  ],
+  "checkpoint_responses": [
+    [
+      {
+        "content": "Looking at the failing endpoint.",
+        "tool_calls": [
+          { "name": "search", "is_subagent": false, "arguments": { "query": "checkout 500 NullPointerException payment client since deploy" } }
+        ],
+        "usage": { "input_tokens": 120, "output_tokens": 40 }
+      },
+      {
+        "content": "Reproduced: ~1 in 5 requests 500 with a NullPointerException in the payment client.",
+        "tool_calls": [
+          { "name": "checkpoint_done", "is_subagent": false, "arguments": { "checkpoint_id": "cp1", "status": "done" } }
+        ],
+        "usage": { "input_tokens": 120, "output_tokens": 40 }
+      }
+    ],
+    [
+      {
+        "content": "Root cause: Tuesday's deploy dropped PAYMENT_CLIENT_KEY from the env; the client lazily inits null and only fails once the connection pool cycles — hence intermittent.",
+        "tool_calls": [
+          { "name": "checkpoint_done", "is_subagent": false, "arguments": { "checkpoint_id": "cp2", "status": "done", "note": "PAYMENT_CLIENT_KEY missing from the deploy manifest" } }
+        ],
+        "usage": { "input_tokens": 120, "output_tokens": 40 }
+      }
+    ],
+    [
+      {
+        "content": "Restored PAYMENT_CLIENT_KEY in the manifest and added a fail-fast startup check so a missing var can't reach production silently. Reproduction now passes 100/100.",
+        "tool_calls": [
+          { "name": "checkpoint_done", "is_subagent": false, "arguments": { "checkpoint_id": "cp3", "status": "done" } }
+        ],
+        "usage": { "input_tokens": 120, "output_tokens": 40 }
+      }
+    ]
+  ]
+}

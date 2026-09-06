@@ -62,6 +62,151 @@ A real gap, not a hypothetical one: `shell_exec` is invisible to `search_tools` 
 
 **Considered and reverted**: an explicit `DEFAULT_SYSTEM_PROMPT` rule telling the model to check `search_tools` before reaching for a shell command on external-service tasks. Reverted — it's solving a problem the mechanism doesn't have. Nothing structurally requires a search before invocation: `shell_exec` and `call_tool` are both directly callable, unconditionally. `shell_exec`'s schema is always visible, so the model can call it directly whenever it already knows what it wants, no search needed. `call_tool` practically needs `search_tools` first almost every time *not* because of a prompt rule but because its `server`/`tool`/`arguments` are opaque, per-deployment identifiers the model has no way to know without having seen a `search_tools` result — a structural fact, not an instruction. The direct-invocation-when-known / discover-then-combine-when-ambiguous split falls out of what information the model actually has at each point, not from prompt engineering layered on top of it. Each tool's own description (already reasonably specific) is enough for a capable model to reason correctly without an extra imperative rule.
 
+### Resolved: Three-Layer Tool Taxonomy & Per-Task Resolution (2026-09-04 — DESIGNED, not built)
+
+The flat "everything the model can call is a tool" framing was hiding three
+different constructs behind one schema list. They are:
+
+| Layer | What it is | Members |
+|---|---|---|
+| **Interfaces** | open-ended external reach | `shell_exec` (local; discover + invoke in one), `search_tools` (remote discovery), the per-task **resolved tools** (below), and `call_tool` — now an *internal* dispatch verb, not model-facing |
+| **Cognition** | reading the agent's own substrate | `memory_search` / `memory_expand` (agent-brain), `lcm_grep` / `lcm_describe` / `lcm_expand` (this session's history + compaction DAG) |
+| **Control** | steering the constructs the agent lives inside | `declare_next_step_hint` (tier), `propose_plan` / `checkpoint_done` (plan), `spawn_subagent` (subagent tree), the intention tools |
+
+Only **Interfaces** vary by task. Cognition is always relevant; Control is
+scoped by turn kind. The concrete decisions:
+
+**Per-task tool resolution — discovery output becomes callable schema, not a
+prompt hint.** `ToolDiscover` (`07-tool-discovery.md`) already fetches each
+candidate's `input_schema` and stages it in `turn_retrieval.metadata`, unused.
+For a reasoning / checkpoint turn, `tools_schema_for` now reads those rows and
+adds the top few as **directly-callable function schemas**, alongside the
+always-present `shell_exec` + `search_tools`. The model calls `weather_lookup(...)`
+directly instead of `search_tools` → read schema → `call_tool`. The resolved set
+is **additive** — a discovery miss just means the model does one `search_tools`
+call itself (same cost as today's two-step), never a blocked capability. The
+`09-prompt-assembly.md` "capabilities" hint block is removed for these turns.
+
+**`call_tool` is internal.** The harness holds a per-turn `name → {server, tool}`
+map; a model call to a resolved name is dispatched by the workflow through one
+generic mcp-hub-tier activity carrying `{server, tool, arguments}` (the single
+timing profile, no per-tool `ActivityOptions` — the native-tier cross-language
+duplication problem stays contained). mcp-hub owns name collision / disambiguation.
+`search_tools` **stays model-facing** — the explicit "I need something you didn't
+give me" verb; its mid-turn results are bound into the schema for the rest of that
+turn's iterations. **No proactive per-iteration re-discovery** — the machinery
+(embedding search + schema rebuild + cache invalidation each step) isn't worth a
+benefit `search_tools` already covers.
+
+**Planning turn gets a capability catalog, not callable tools.** The planning
+turn does no work by design, but today it plans *blind* — `tools_schema_for(planning=True)`
+gives it only `propose_plan` + the hint tool. It now also receives the resolved
+set rendered as a compact **reference catalog in context** (`08-planning.md`),
+so the plan is built with knowledge of what's actually reachable.
+
+**Intention tools: 6 → 2.** `create_intention` (the one complex schema) stays;
+`list` / `inspect` / `revise` / `snooze` / `cancel` collapse into
+`manage_intention(action, intention_id, …)` — CRUD operations on one object, not
+distinct intents. Always present (no classify gating). ~350 tokens vs ~600.
+
+**Subagent tools scoped.** `spawn_subagent` is in the schema only for complexity
+≥ `moderate`, the Deliberate lane, or a checkpoint turn — a trivial/Lite turn
+shouldn't be delegating. `merge_subagent_output` only after a subagent was
+spawned this turn.
+
+**Considered and rejected:**
+- *Collapsing the cognition tools into one `recall(query)`* — `memory_search`
+  (semantic) and `lcm_grep` (literal regex) on two different substrates are
+  genuinely distinct intents; a unified tool forces the harness to *infer* which
+  the model wanted from a natural-language string — a new failure surface for
+  ~650 tokens. The cognition tools are left exactly as they are.
+- *Gating the intention tools on a classify "intention ask" signal* — risks
+  suppressing the agent proactively arming an intention the user didn't phrase
+  as "remind me." The 6→2 consolidation removes the token cost without that risk.
+- *Proactive per-iteration re-discovery* — see above.
+
+**Unchanged by this pass:** the cognition tools; tier selection
+(`declare_next_step_hint` + `tier_for_complexity` bootstrap + escalate-on-retry,
+all per `model-registry.md`); the two-tier native/mcp-hub execution split; the
+`propose_plan` / `checkpoint_done` turn-kind scoping already in `tools_schema_for`.
+
+#### Implementation shape — one `Capability` record
+
+The taxonomy above becomes **one declarative table**, replacing four
+hand-synced things: `llm.py`'s `TOOLS_SCHEMA` list, `tools.py`'s `TOOL_REGISTRY`
+dict (the sync is manual today — `llm.py`'s own docstring says "add future real
+tools here **by hand** alongside their `TOOL_REGISTRY` entry"), the
+`_SUBAGENT_ONLY_TOOL_NAMES` set + the `_PROPOSE_PLAN_SCHEMA` /
+`_CHECKPOINT_DONE_SCHEMA` / `_SPAWN_SUBAGENT_NESTED_SCHEMA` special constants,
+and `tools_schema_for`'s `if planning / if is_subagent / …` cascade.
+
+```python
+# activities/activities/capabilities.py  (new)
+
+class Layer(StrEnum):
+    INTERFACE = "interface"   # shell_exec, search_tools, per-task resolved tools
+    COGNITION = "cognition"   # memory_search/expand, lcm_grep/describe/expand
+    CONTROL   = "control"     # declare_next_step_hint, propose_plan, checkpoint_done,
+                              #   spawn_subagent, merge_subagent_output, create_intention, manage_intention
+
+class TurnKind(StrEnum):
+    REASONING = "reasoning"          # a plain / Lite reason-act iteration
+    PLANNING = "planning"            # the planning turn — invokes nothing
+    CHECKPOINT = "checkpoint"        # executing one plan checkpoint
+    PLAN_HANDLING = "plan_handling"  # a mid-plan follow-up
+    SUBAGENT = "subagent"            # a subagent turn — some schemas swap
+
+@dataclass(frozen=True)
+class Capability:
+    name: str
+    layer: Layer
+    schema: dict                       # OpenAI function schema (data, kept in llm.py)
+    handler: Handler | None            # None ⇒ peeled control signal (applied, not dispatched)
+    turn_kinds: frozenset[TurnKind]    # which turns expose it — replaces the if-cascade
+    peel: bool = False
+    timing: ToolSpec = _TIER_A         # native-activity heartbeat/timeout tuning (was TOOL_REGISTRY's value)
+    subagent_schema: dict | None = None  # schema override under TurnKind.SUBAGENT (only spawn_subagent)
+```
+
+Three pure functions, no branches:
+
+```python
+def schema_for(kind: TurnKind, resolved: list[Capability]) -> list[dict]:
+    static = [(c.subagent_schema if kind is TurnKind.SUBAGENT and c.subagent_schema else c.schema)
+              for c in CAPABILITIES if kind in c.turn_kinds]
+    return static + [c.schema for c in resolved]
+
+def route(raw_tool_calls, active: dict[str, Capability]):
+    peeled   = [(active[tc.name], tc) for tc in raw_tool_calls if active[tc.name].peel]
+    dispatch = [(active[tc.name], tc) for tc in raw_tool_calls if not active[tc.name].peel]
+    return peeled, dispatch
+
+def timing_for(name: str) -> ToolSpec:   # what tools.py's dispatch + the Go side need
+    ...
+```
+
+- **`llm.py`** keeps the raw `_*_SCHEMA` dicts (they're data) and its
+  `tools_schema_for(...)` becomes a one-line call into `schema_for`.
+- **`tools.py`**'s `TOOL_REGISTRY` is derived from `CAPABILITIES`
+  (`{c.name: c.timing for c in CAPABILITIES if c.handler}`) — the manual sync is gone.
+- **Peeling is one pass** (`route`) instead of split across the two providers
+  (`declare_next_step_hint`) and `model_call` (`propose_plan` / `checkpoint_done`).
+  The providers still *parse the tier value* out of the hint call — that's
+  response interpretation, stays provider-side — but the "don't dispatch it"
+  decision moves to `route`.
+- **Resolved tools** are `Capability` objects built per turn from the
+  `turn_retrieval` `kind='tool'` rows: `layer=INTERFACE`, `handler` = a closure
+  binding `call_tool(server, tool, …)`, `peel=False`. They never enter the
+  static `CAPABILITIES` list.
+- **Go side** (`tool_tiers.go`) stays a small static map for native tools +
+  one generic mcp-hub-tier `ActivityOptions` for any name not in it (every
+  resolved tool). `model_call` tags a resolved-tool call on `types.ToolCall`
+  so `turn.go` picks the generic profile. The native-tier cross-language
+  duplication (Open Questions) is neither worsened nor solved here.
+
+This is a consolidation — one dataclass and one list where there were four
+structures kept in sync by hand — not a new framework.
+
 ### Open Questions / To Design
 - **Cross-language duplication — narrowed to the native tier only. Explicitly deferred, future item — not urgent at current scope (one tool).** mcp-hub-mediated tools no longer need this solved (a manifest, not per-language config). For `shell_exec`-class tools specifically: `tool_tiers.go`'s `HeartbeatTimeout`/`StartToCloseTimeout` are Temporal `ActivityOptions`, not activity input — the workflow must resolve them to concrete Go values *before* calling `ExecuteActivity` (declaring them *is* invocation), and can't ask the Python registry at runtime either (workflow code can't do arbitrary I/O, Temporal's determinism rule). So passing config to the activity at invocation time doesn't close this — by the time something could be "passed as input," the workflow has already had to commit to a value some other way. Real fix, if/when this stops being one tool's worth of duplication: codegen `tool_tiers.go` from the Python `TOOL_REGISTRY` at build time, or have both sides load from one shared, language-neutral config file — either way the Go side still ends up with a resolved static value, just not hand-typed independently of Python's.
 - **Extensibility — resolved for the mcp-hub tier (a manifest), still open for the native tier.** Adding a new native, durable tool is still necessarily a code change in both languages; no way around that given Temporal's own constraints.
@@ -71,6 +216,7 @@ A real gap, not a hypothetical one: `shell_exec` is invisible to `search_tools` 
 - **shell-hub relevance floor** — 2026-08-23 live testing (see Notes Log) found a real, evidenced ~0.05–0.08 raw cosine-similarity gap between a query's best match when the corpus genuinely has nothing relevant vs. when it does, but that number comes from exactly two example queries against one embedding model — deliberately not turned into a hard threshold this pass, same numeric-tuning discipline as every other undecided threshold in this project (compression thresholds, heartbeat intervals). Revisit once real usage data exists.
 
 ### Notes Log
+- 2026-09-04: Resolved the three-layer tool taxonomy (interfaces / cognition / control) and per-task tool resolution — DESIGNED, not built (see the "Resolved" section above). Reached over a design conversation whose guardrails were: no quality loss while optimizing other parameters, no fallback/hacky methods, don't overengineer. Half the ideas floated (a unified `recall` cognition tool, proactive per-iteration re-discovery, classify-gated intention tools) were rejected against that bar; what survived is the discovery→callable-schema change (uses schemas already fetched, removes a round-trip), `call_tool` internalisation, the planning-turn capability catalog, and the intention 6→2 CRUD consolidation. Companion doc edits: `07-tool-discovery.md`, `09-prompt-assembly.md`, `08-planning.md`, `request-pipeline.md`.
 - 2026-08-23 (later still): The earlier entry below this one ("the search step's own ranking already handles residual noise") turned out to be only partly true — confirmed via live testing against the real embedding endpoint and the real tenant-worker container, prompted by a real `search_tools` call surfacing several irrelevant shell commands alongside genuinely relevant mcp-hub results. Found two real, distinct bugs, not one: (1) `tools.py`'s `search_tools` applied the full `top_k` to both mcp-hub and shell-hub independently and concatenated — a "top 5" request silently returned up to 10; fixed by splitting `top_k` between the two sources, mcp-hub (the curated, primary tier) taking the remainder on an odd split. (2) `shell_hub._describe_command` took the *first* non-empty `--help` line unconditionally — for bash-family tools that lead `--help` with a version banner, this indexed a version string as the "description," which carries no signal about what the tool does; confirmed directly (`rbash`'s indexed description was literally `"GNU bash, version 5.2.37..."`). Fixed by scanning the first several lines for one that's actually substantial (not a version banner, not just a short stub like `"help:"`), and returning `None` — excluded from the index entirely, not degraded to a bare-name fallback — when nothing substantial is found; a zero-signal entry doesn't just fail to help retrieval, it actively adds noise (confirmed empirically: `unix_update`, with no extractable `--help` output at all, still scored competitively on pure embedding noise before this fix). Verified both fixes in the real container against the real embedding endpoint: `bashbug` now indexes a real usage line instead of a version banner, and `rbash`/`unix_update`/`which.debianutils` (genuinely no substantial `--help` output on this image) are now correctly excluded rather than indexed under noise-contributing bare names. Also surfaced a residual, deeper gap while testing: this tenant-worker image genuinely has no git/curl/GitHub-adjacent tool at all, so for that class of query there's nothing good in shell-hub's corpus for any ranking algorithm to surface — a real similarity-floor fix would help here, evidenced but deliberately deferred (see Open Questions) rather than shipped on a two-data-point number.
 - 2026-08-23 (later same day): Closed shell-hub's remaining catalog gap
 - 2026-08-23 (later same day): Closed shell-hub's remaining catalog gap — auto-populates from a real `$PATH` scan of the tenant-worker's own image plus `--help`-derived descriptions, not hand-seeded. Verified directly in a real `docker build`/`docker run` of the tenant-worker image, not assumed (found and reverted an over-engineered ~360-entry hardcoded `python:3.12-slim` baseline-diff approach along the way — didn't actually solve the noise problem, since this project's own pip dependencies add their own console-script noise regardless of base-image filtering; the search step's own ranking already handles residual noise, so chasing a clean catalog pre-filter wasn't worth the image-tag-coupled maintenance cost). Also found and fixed a real zvec doc-id character-validity crash from a real `$PATH` scan result, via real-container testing.

@@ -6,7 +6,34 @@
 // (Resolved: Determinism Constraints on the Loop).
 package ids
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
+
+// UserScopeOf returns the user-stable scope a standing intention keys on
+// (docs/components/proactivity.md). A session_key is deliberately
+// channel/branch-scoped, not user-scoped (gateway core.SessionKeyFor) — for web
+// it embeds the user ("agent:main:web:user:<id>"); for a shared Discord channel
+// the channel is the best available scope. Stripping any per-branch
+// ":session:<id>" or per-thread ":thread:<id>" suffix gives a namespace shared
+// across a user's branches/threads, and the result is always itself a valid
+// canonical session_key — so it also names the session a fired intention wakes.
+// Mirrored in activities/activities/ids.py (user_scope_of).
+func UserScopeOf(sessionKey string) string {
+	for _, marker := range []string{":session:", ":thread:"} {
+		if head, _, ok := strings.Cut(sessionKey, marker); ok {
+			return head
+		}
+	}
+	return sessionKey
+}
+
+// IntentionID builds an IntentionWorkflow's id: "intn:{scope}:{slug}", where
+// scope is UserScopeOf(session_key). Mirrored in tools_intention.py.
+func IntentionID(scope, slug string) string {
+	return fmt.Sprintf("intn:%s:%s", scope, slug)
+}
 
 // TurnID builds a top-level turn's workflow ID: "{session_key}:turn:{turn_seq}".
 func TurnID(sessionKey string, turnSeq int) string {
