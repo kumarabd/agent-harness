@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"errors"
 	"fmt"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -281,39 +282,65 @@ func runNestedPlan(
 	return false, childErr
 }
 
-// runPlanPresentationTurn seeds a normal reason-act turn whose job is to show
-// the current plan to the user before runApprovalGate opens its approve/
-// reject prompt — the plan text itself is never Go-rendered or embedded in a
-// UserInputRequest.Prompt; the model reads it (prompt.assemble already
-// splices the current PLAN.md into any plan-owned turn's prompt via
-// plan.render_block) and delivers it via deliver_reply/deliver_attachment,
-// its own call on how (informed by skills/seeds/deliver-long-content.json —
-// docs/components/activities-outbound-delivery.md's model-driven retry
-// philosophy applied to delivery itself). Same runChildTurn shape as
-// foldInFollowups/runRejectionNoticeTurn; a failure here is best-effort —
-// logs and moves on rather than blocking the approval gate from opening.
-func runPlanPresentationTurn(ctx workflow.Context, input types.PlanWorkflowInput, task types.TaskRepresentation, round int) {
+// deliverPlanForApproval shows the current plan to the user before
+// runApprovalGate opens its approve/reject prompt — deterministic and
+// automatic by default, not a model's job: the checkpoint list from
+// propose_plan already IS the thing to show, verbatim (or near enough via
+// RenderPlan's plain rendering) — there's no judgment call to make in the
+// common case, so no ModelCall runs for it.
+//
+// Superseded design (2026-09-06, direct user correction): an earlier version
+// seeded a whole reason-act turn and trusted the model to call
+// deliver_reply/deliver_attachment on its own. A live run showed the model
+// reading render_block's "follow it where it fits" framing (written for a
+// turn EXECUTING a checkpoint, not presenting one) and answering checkpoint
+// 1's own clarifying questions in plain prose instead — zero tool calls, and
+// since a plan-owned turn gets no automatic Deliver, that answer never
+// reached Discord. The fix isn't a better prompt: delivery of a plan that
+// already exists shouldn't depend on a model choosing to act at all. A model
+// only gets involved when there's an actual judgment call to make — the
+// content doesn't fit in one message. Deliver returns a typed
+// ContentTooLong error in that case (deliver_discord.go), and this hands off
+// to runDiscordDeliveryRecovery — the SAME mechanism turn.go's own
+// end-of-turn Deliver already uses — which gives the model
+// deliver_attachment/deliver_reply and lets it react using
+// skills/seeds/deliver-long-content.json (write the plan to a file and
+// attach it, per that skill's own guidance for structured content).
+func deliverPlanForApproval(ctx workflow.Context, input types.PlanWorkflowInput, round int) {
 	logger := workflow.GetLogger(ctx)
 	turnID := fmt.Sprintf("%s:present:%d", input.PlanID, round)
-	in := types.TurnInput{
-		SessionKey:   input.SessionKey,
-		TurnID:       turnID,
-		ParentType:   "plan",
-		ParentID:     input.PlanID,
-		ConnectionID: input.ConnectionID,
-		InitiatedBy:  "plan",
-		PlanID:       input.PlanID,
-		Task:         &task,
-		InitialMessage: types.Message{
-			Role: "user",
-			Content: "The plan above needs to be presented to the user before they can approve or " +
-				"reject it. Deliver it to them now.",
-		},
-		OfferDeliveryTools: true,
+	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+	actx := workflow.WithActivityOptions(ctx, ao)
+
+	var rendered string
+	if err := workflow.ExecuteActivity(actx, "RenderPlan", input.PlanID).Get(ctx, &rendered); err != nil {
+		logger.Warn("plan presentation: RenderPlan failed", "plan_id", input.PlanID, "round", round, "error", err)
+		return
 	}
-	if _, err := runChildTurn(ctx, turnID, in); err != nil {
-		logger.Warn("plan presentation turn failed — approval gate will open without it", "plan_id", input.PlanID, "round", round, "error", err)
+	insert := types.InsertMessageInput{
+		TurnID:      turnID,
+		IsTurnStart: true,
+		ParentType:  "plan",
+		ParentID:    input.PlanID,
+		InitiatedBy: "plan",
+		PlanID:      input.PlanID,
+		Message:     types.Message{Role: "assistant", Content: rendered},
 	}
+	if err := workflow.ExecuteActivity(actx, "InsertMessage", insert).Get(ctx, nil); err != nil {
+		logger.Warn("plan presentation: InsertMessage failed", "plan_id", input.PlanID, "round", round, "error", err)
+		return
+	}
+
+	err := workflow.ExecuteActivity(actx, "Deliver", turnID).Get(ctx, nil)
+	if err == nil {
+		return
+	}
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) && appErr.Type() == types.ErrTypeContentTooLong {
+		runDiscordDeliveryRecovery(ctx, turnID, input.ConnectionID, 0)
+		return
+	}
+	logger.Warn("plan presentation: Deliver failed", "plan_id", input.PlanID, "round", round, "error", err)
 }
 
 // runApprovalGate returns (proceed, closeReason). It's a no-op unless the
@@ -331,13 +358,10 @@ func runApprovalGate(ctx workflow.Context, input types.PlanWorkflowInput, task t
 	for round := 1; ; round++ {
 		// Present the plan fresh each round — a revision (below) changes the
 		// ledger, and the re-gate must show the updated draft, not the stale
-		// one from round 1. A real turn, not a Go-rendered string: it reads
-		// the current PLAN.md via prompt.assemble's own plan section (already
-		// spliced into any plan-owned turn's prompt) and delivers it itself
-		// via deliver_reply/deliver_attachment — the model's own judgment on
-		// how, informed by skills/seeds/deliver-long-content.json, not a
-		// mechanical length-check-then-embed.
-		runPlanPresentationTurn(ctx, input, task, round)
+		// one from round 1. Deterministic by default (see deliverPlanForApproval's
+		// own doc comment for why this isn't a model's job); a model only
+		// gets pulled in if the rendered plan doesn't fit in one message.
+		deliverPlanForApproval(ctx, input, round)
 
 		reqID := fmt.Sprintf("%s:approval:%d", input.PlanID, round)
 		cwo := workflow.ChildWorkflowOptions{
@@ -413,7 +437,7 @@ func runApprovalGate(ctx workflow.Context, input types.PlanWorkflowInput, task t
 			logger.Warn("re-plan turn failed — proceeding with the standing draft", "plan_id", input.PlanID, "error", err)
 			return true, ""
 		}
-		// No Deliver(replanID) here — the next round's runPlanPresentationTurn
+		// No Deliver(replanID) here — the next round's deliverPlanForApproval
 		// call re-reads PLAN.md fresh and presents the revised draft itself.
 	}
 }

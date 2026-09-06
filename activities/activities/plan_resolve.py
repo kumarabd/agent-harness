@@ -124,6 +124,20 @@ class NextCheckpointActivity:
         return NextCheckpointResult(has_next=False)
 
 
+class RenderPlanActivity:
+    def __init__(self, pool):
+        self._pool = pool  # unused (PLAN.md is on the PV) — kept for symmetry
+
+    @activity.defn(name="RenderPlan")
+    async def __call__(self, plan_id: str) -> str:
+        """plan_workflow.go's deliverPlanForApproval: fetch the current
+        PLAN.md rendered for direct, deterministic delivery to the user
+        (plan.render_for_approval) — re-fetched fresh each approval round so
+        a revision reflects the just-updated ledger."""
+        checkpoints = await plan.read(plan_id)
+        return plan.render_for_approval(checkpoints)
+
+
 class MarkCheckpointDoneActivity:
     def __init__(self, pool):
         self._pool = pool  # unused (PLAN.md is on the PV)

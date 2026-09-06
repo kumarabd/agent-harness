@@ -121,18 +121,67 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 	if alreadyDelivered {
 		return nil
 	}
+
+	// Real, live bug found 2026-09-06: a plan-owned turn (ParentType=="plan")
+	// gets no automatic Deliver call from turn.go at all — plan_workflow.go's
+	// runPlanPresentationTurn is expected to make its OWN delivery happen via
+	// deliver_reply/deliver_attachment tool calls, but nothing enforces the
+	// model actually calling one; a live run showed the model answering in
+	// plain prose (content written to `messages` as always) with zero tool
+	// calls, and since ParentType=="plan" skips the automatic path, that
+	// content never reached Discord — total silence, turn marked completed.
+	// plan_workflow.go now unconditionally calls Deliver(turnID) after that
+	// turn regardless of what the model did, as a guaranteed-response safety
+	// net (docs/components/activities-outbound-delivery.md's spirit: the
+	// loop must ensure something reaches the user). This check makes that
+	// safe to call unconditionally: if a deliver_reply/deliver_attachment
+	// call already succeeded for this turn, the plan/answer already reached
+	// the user via that tool — sending this turn's own separate `content`
+	// on top would be a confusing duplicate, not a genuine second thing to
+	// say, so skip the send (but still mark delivered, matching every other
+	// genuine-completion path below).
+	var alreadyDeliveredViaTool bool
+	if err := a.pool.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM tool_calls WHERE parent_id = $1 AND tool_name IN ('deliver_reply', 'deliver_attachment') AND status = 'ok')",
+		turnID,
+	).Scan(&alreadyDeliveredViaTool); err != nil {
+		return err
+	}
+	if alreadyDeliveredViaTool {
+		_, err := a.pool.Exec(ctx,
+			"INSERT INTO delivered_responses (response_id) VALUES ($1) ON CONFLICT DO NOTHING", turnID)
+		return err
+	}
 	markDelivered := func() error {
 		_, err := a.pool.Exec(ctx,
 			"INSERT INTO delivered_responses (response_id) VALUES ($1) ON CONFLICT DO NOTHING", turnID)
 		return err
 	}
 
+	// Real, live bug found 2026-09-06: this join assumed t.parent_id IS the
+	// session_key, true only for a top-level turn (parent_type='session').
+	// Any turn under a PlanWorkflow — a checkpoint, a mid-plan follow-up, a
+	// rejection notice, the plan-presentation turn — has parent_id pointing
+	// at the PLAN (its planning turn's id), not the session, so this join
+	// returned zero rows for every one of them, and the resulting error was
+	// silently discarded at every call site (finishPlan/foldInFollowups/
+	// plan_workflow.go's own `_ = ...Get(ctx, nil)` calls) — meaning no
+	// checkpoint output or plan-owned turn's answer has ever actually
+	// reached Discord through this path. Fixed generally: every plan-owned
+	// turn's plan_id points at its planning turn, and the planning turn
+	// itself is always top-level (parent_id IS the session_key, and it
+	// self-references its own plan_id — confirmed live) — so joining through
+	// COALESCE(t.plan_id, t.turn_id) resolves the right root for both a
+	// plain top-level turn (plan_id NULL, root = itself) and any plan-owned
+	// turn (root = its planning turn). Same fix applied to DeliverChunk and
+	// DeliverReply/DeliverAttachment's deliverToolChannelAndPrompt below.
 	var channelID, sessionKey, content string
 	var streamedMessageRef *string
 	err := a.pool.QueryRow(ctx, `
 		SELECT s.channel_id, s.session_key, m.content, t.streamed_message_ref
 		FROM turns t
-		JOIN sessions s ON s.session_key = t.parent_id
+		JOIN turns root ON root.turn_id = COALESCE(t.plan_id, t.turn_id)
+		JOIN sessions s ON s.session_key = root.parent_id
 		JOIN LATERAL (
 			SELECT content FROM messages
 			WHERE parent_id = t.turn_id AND role = 'assistant'
@@ -331,11 +380,17 @@ func (a *discordDeliverActivity) DeliverInterim(ctx context.Context, requestID s
 
 	var channelID, sessionKey, prompt string
 	var optionsJSON []byte
+	// COALESCE(t.plan_id, t.turn_id) — same fix as Deliver's own query above;
+	// every plan-approval request today is keyed on the planning turn itself
+	// (always top-level, so this was harmless in practice so far), but a
+	// permission/decision UserInputRequest keyed on a plan-owned turn would
+	// have hit the same zero-row join.
 	err := a.pool.QueryRow(ctx, `
 		SELECT s.channel_id, s.session_key, r.prompt, r.options
 		FROM user_input_requests r
 		JOIN turns t ON t.turn_id = r.turn_id
-		JOIN sessions s ON s.session_key = t.parent_id
+		JOIN turns root ON root.turn_id = COALESCE(t.plan_id, t.turn_id)
+		JOIN sessions s ON s.session_key = root.parent_id
 		WHERE r.request_id = $1
 	`, requestID).Scan(&channelID, &sessionKey, &prompt, &optionsJSON)
 	if err != nil {
@@ -399,11 +454,17 @@ func (a *discordDeliverActivity) deliverToolResult(ctx context.Context, toolCall
 
 // deliverToolChannelAndPrompt resolves a deliver_reply/deliver_attachment
 // call's target channel + turn's session_key, the same join Deliver/
-// DeliverInterim already use — a tool call's channel is its owning turn's
-// session's channel, there is no per-call routing concept.
+// DeliverInterim already use (and the same COALESCE(t.plan_id, t.turn_id)
+// fix — deliver_reply/deliver_attachment are dispatched from plan-owned
+// turns at least as often as top-level ones, so this one would have hit the
+// zero-row bug immediately, not just in theory).
 func (a *discordDeliverActivity) deliverToolChannelAndPrompt(ctx context.Context, turnID string) (channelID, sessionKey string, err error) {
 	err = a.pool.QueryRow(ctx,
-		"SELECT s.channel_id, s.session_key FROM turns t JOIN sessions s ON s.session_key = t.parent_id WHERE t.turn_id = $1",
+		`SELECT s.channel_id, s.session_key
+		 FROM turns t
+		 JOIN turns root ON root.turn_id = COALESCE(t.plan_id, t.turn_id)
+		 JOIN sessions s ON s.session_key = root.parent_id
+		 WHERE t.turn_id = $1`,
 		turnID,
 	).Scan(&channelID, &sessionKey)
 	return
@@ -556,9 +617,14 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 	var channelID, sessionKey string
 	var streamedMessageRef *string
 	var streamedMessageOffset int
+	// Same COALESCE(t.plan_id, t.turn_id) fix as Deliver's own query above —
+	// streamingEligible (turn.go) doesn't check ParentType, so a plan-owned
+	// turn's streaming-eligible first iteration hit this same zero-row join.
 	err = a.pool.QueryRow(ctx, `
 		SELECT s.channel_id, s.session_key, t.streamed_message_ref, t.streamed_message_offset
-		FROM turns t JOIN sessions s ON s.session_key = t.parent_id
+		FROM turns t
+		JOIN turns root ON root.turn_id = COALESCE(t.plan_id, t.turn_id)
+		JOIN sessions s ON s.session_key = root.parent_id
 		WHERE t.turn_id = $1
 	`, turnID).Scan(&channelID, &sessionKey, &streamedMessageRef, &streamedMessageOffset)
 	if err != nil {

@@ -283,6 +283,26 @@ def render_block(checkpoints: list[Checkpoint]) -> str:
     return "\n".join(lines)
 
 
+def render_for_approval(checkpoints: list[Checkpoint]) -> str:
+    """The plan text delivered to the user before they approve/reject it
+    (plan_workflow.go's deliverPlanForApproval). Distinct from render_block
+    (spliced into a MODEL's own prompt, framed as guidance to follow/revise
+    — real, live bug found 2026-09-06: reusing render_block's "follow it
+    where it fits" framing for a turn asking a model to *present* the plan
+    made it start executing checkpoint 1 instead). This text is delivered
+    directly, deterministically, never read by a model — plain and human-
+    facing, no active-checkpoint marker (nothing has run yet at approval
+    time)."""
+    if not checkpoints:
+        return "(no checkpoints proposed)"
+    lines = ["Proposed plan:"]
+    for cp in checkpoints:
+        lines.append(f"  {cp.checkpoint}. {cp.intent}")
+        if cp.done_when:
+            lines.append(f"     done when: {cp.done_when}")
+    return "\n".join(lines)
+
+
 def render_final(checkpoints: list[Checkpoint]) -> str:
     """The final ledger as text for RecordSkill's trajectory — the effective
     procedure the run followed."""

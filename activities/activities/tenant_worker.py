@@ -79,6 +79,7 @@ from .classify import ClassifyRequestActivity
 from .plan_resolve import (
     MarkCheckpointDoneActivity,
     NextCheckpointActivity,
+    RenderPlanActivity,
     ResolveOpenPlanActivity,
 )
 from .skills import seed as skill_seed
@@ -166,6 +167,7 @@ async def main() -> None:
             ClassifyRequestActivity(pool).__call__,
             ResolveOpenPlanActivity(pool, client).__call__,
             NextCheckpointActivity(pool).__call__,
+            RenderPlanActivity(pool).__call__,
             MarkCheckpointDoneActivity(pool).__call__,
             MemoryRetrieveActivity(pool).__call__,
             ToolDiscoverActivity(pool).__call__,
