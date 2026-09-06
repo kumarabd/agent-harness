@@ -1,0 +1,18 @@
+-- Real, live bug found 2026-09-06: DeliverChunk edits `streamed_message_ref`
+-- in place with turn_deliveries' cumulative content (006_streaming_delivery.sql's
+-- own comment on why it must be cumulative, not a diff). Discord hard-rejects
+-- an edit once that cumulative content exceeds its per-message length cap
+-- (2000 chars, higher on boosted guilds) with HTTP 400 BASE_TYPE_MAX_LENGTH —
+-- confirmed live: every further chunk for a long turn retried the same
+-- too-long edit 3 times and gave up, permanently dropping the rest of the
+-- response from the user's view, even though the turn itself completed and
+-- persisted correctly server-side.
+--
+-- Fix: once the unflushed remainder would exceed a safe length, roll over to
+-- a NEW message instead of continuing to grow the old one. This column marks
+-- where, within turn_deliveries' cumulative content, the CURRENTLY-EDITED
+-- message's own visible text begins — `content[streamed_message_offset:]` is
+-- always what's actually sent/edited into `streamed_message_ref`. Default 0
+-- (the whole cumulative content is shown in the one message) matches every
+-- existing streamed turn's actual behavior before this migration.
+ALTER TABLE turns ADD COLUMN streamed_message_offset int NOT NULL DEFAULT 0;

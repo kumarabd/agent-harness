@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"unicode"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/jackc/pgx/v5"
@@ -56,6 +57,35 @@ func discordSendableContent(content string) string {
 		return discordEmptyContentPlaceholder
 	}
 	return content
+}
+
+// discordMessageLengthLimit — real, live bug found 2026-09-06 (028_turns_
+// streamed_message_offset.sql's own comment has the full story): Discord
+// hard-rejects a message/edit over its per-message length cap (2000 chars
+// standard, higher on boosted guilds). Deliberately conservative and fixed
+// rather than detected per-guild — under-using a boosted guild's higher cap
+// (an extra rollover message) is a far smaller cost than mis-detecting a
+// boost level and hitting this exact 400 again.
+const discordMessageLengthLimit = 1900
+
+// discordSplitForLimit returns the largest prefix of runes that fits within
+// limit, preferring to break at the last whitespace rune within that prefix
+// (so a rollover doesn't cut a word in half) and falling back to a hard cut
+// at exactly limit when no whitespace exists to break at (e.g. one giant
+// unbroken token). Never returns an empty head when runes is non-empty —
+// limit is always > 0 in every real call site here.
+func discordSplitForLimit(runes []rune, limit int) (head, rest []rune) {
+	if len(runes) <= limit {
+		return runes, nil
+	}
+	cut := limit
+	for i := limit - 1; i > 0; i-- {
+		if unicode.IsSpace(runes[i]) {
+			cut = i + 1 // keep the whitespace itself with the head, matching how it read before splitting
+			break
+		}
+	}
+	return runes[:cut], runes[cut:]
 }
 
 // Deliver reads the turn's final assistant message, checks-then-inserts into
@@ -382,11 +412,12 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 	// via discordSendableContent, never used to decide whether to send.
 	var channelID, sessionKey string
 	var streamedMessageRef *string
+	var streamedMessageOffset int
 	err = a.pool.QueryRow(ctx, `
-		SELECT s.channel_id, s.session_key, t.streamed_message_ref
+		SELECT s.channel_id, s.session_key, t.streamed_message_ref, t.streamed_message_offset
 		FROM turns t JOIN sessions s ON s.session_key = t.parent_id
 		WHERE t.turn_id = $1
-	`, turnID).Scan(&channelID, &sessionKey, &streamedMessageRef)
+	`, turnID).Scan(&channelID, &sessionKey, &streamedMessageRef, &streamedMessageOffset)
 	if err != nil {
 		return err
 	}
@@ -401,35 +432,67 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 		return markSent()
 	}
 
-	sendContent := discordSendableContent(content)
+	// Real, live bug found 2026-09-06 (028_turns_streamed_message_offset.sql's
+	// own comment has the full story): `content` is the CUMULATIVE text for
+	// the whole turn so far, but content[streamed_message_offset:] — not
+	// content itself — is what the CURRENTLY-EDITED message actually shows;
+	// everything before that offset already belongs to an earlier, now-
+	// finalized message from a prior rollover. Once the unflushed remainder
+	// would exceed Discord's per-message length cap, roll over to a new
+	// message instead of continuing to grow (and eventually 400-reject) the
+	// old one.
+	contentRunes := []rune(content)
+	if streamedMessageOffset > len(contentRunes) {
+		streamedMessageOffset = len(contentRunes) // defensive; should never happen
+	}
+	visible := contentRunes[streamedMessageOffset:]
 
+	for len(visible) > discordMessageLengthLimit {
+		head, rest := discordSplitForLimit(visible, discordMessageLengthLimit)
+		headContent := discordSendableContent(string(head))
+		if streamedMessageRef == nil {
+			msg, err := a.session.ChannelMessageSend(channelID, headContent)
+			if err != nil {
+				return err
+			}
+			a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, headContent)
+			log.Printf("discord: turn %s streamed chunk %d filled message %s to the length cap, rolling over", turnID, seq, msg.ID)
+		} else {
+			if _, err := a.session.ChannelMessageEdit(channelID, *streamedMessageRef, headContent); err != nil {
+				return err
+			}
+			a.recordAmbientBotMessage(ctx, channelID, *streamedMessageRef, sessionKey, headContent)
+			log.Printf("discord: turn %s streamed chunk %d filled message %s to the length cap, rolling over", turnID, seq, *streamedMessageRef)
+		}
+		streamedMessageOffset += len(head)
+		visible = rest
+		streamedMessageRef = nil // every rolled-over message is finalized; the next segment always starts a fresh one
+	}
+
+	sendContent := discordSendableContent(string(visible))
+
+	var activeMessageID string
 	if streamedMessageRef == nil {
 		msg, err := a.session.ChannelMessageSend(channelID, sendContent)
 		if err != nil {
 			return err
 		}
-		if _, err := a.pool.Exec(ctx,
-			"UPDATE turns SET streamed_message_ref = $1 WHERE turn_id = $2 AND streamed_message_ref IS NULL",
-			msg.ID, turnID,
-		); err != nil {
+		activeMessageID = msg.ID
+		log.Printf("discord: turn %s streamed chunk %d created message %s", turnID, seq, msg.ID)
+	} else {
+		if _, err := a.session.ChannelMessageEdit(channelID, *streamedMessageRef, sendContent); err != nil {
 			return err
 		}
-		a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, sendContent)
-		log.Printf("discord: turn %s streamed chunk %d created message %s", turnID, seq, msg.ID)
-		return markSent()
+		activeMessageID = *streamedMessageRef
+		log.Printf("discord: turn %s streamed chunk %d edited message %s", turnID, seq, *streamedMessageRef)
 	}
+	a.recordAmbientBotMessage(ctx, channelID, activeMessageID, sessionKey, sendContent)
 
-	if _, err := a.session.ChannelMessageEdit(channelID, *streamedMessageRef, sendContent); err != nil {
+	if _, err := a.pool.Exec(ctx,
+		"UPDATE turns SET streamed_message_ref = $1, streamed_message_offset = $2 WHERE turn_id = $3",
+		activeMessageID, streamedMessageOffset, turnID,
+	); err != nil {
 		return err
 	}
-	// Same message id as the create branch above — this call keeps the
-	// ambient mirror's content current through the edit (ON CONFLICT DO
-	// UPDATE, recordAmbientBotMessage's own comment), so a reply arriving
-	// mid-stream still sees the latest text, not a stale first-chunk
-	// snapshot. reply_to_platform_message_id is recomputed identically from
-	// the same sessionKey each call — deterministic, so re-writing it here
-	// is a no-op in practice, not a risk of drifting to a different value.
-	a.recordAmbientBotMessage(ctx, channelID, *streamedMessageRef, sessionKey, sendContent)
-	log.Printf("discord: turn %s streamed chunk %d edited message %s", turnID, seq, *streamedMessageRef)
 	return markSent()
 }
