@@ -119,9 +119,12 @@ func PlanWorkflow(ctx workflow.Context, input types.PlanWorkflowInput) error {
 			return nil
 		}
 	}
-	// Show the plan (root delivers; a nested plan's output surfaces via its
-	// parent's checkpoint deliveries).
-	if isRoot {
+	// Show the plan. When approval was required, the last approval-gate round
+	// already showed it (the rendered plan rides inline in that prompt —
+	// propose_plan never writes to the planning turn's own messages row, so a
+	// generic Deliver(input.PlanID) here would show nothing); only the
+	// auto-proceed path (no approval needed) still needs an explicit Deliver.
+	if isRoot && !planRes.NeedsApproval {
 		_ = workflow.ExecuteActivity(actx, "Deliver", input.PlanID).Get(ctx, nil)
 	}
 
@@ -278,6 +281,41 @@ func runNestedPlan(
 	return false, childErr
 }
 
+// runPlanPresentationTurn seeds a normal reason-act turn whose job is to show
+// the current plan to the user before runApprovalGate opens its approve/
+// reject prompt — the plan text itself is never Go-rendered or embedded in a
+// UserInputRequest.Prompt; the model reads it (prompt.assemble already
+// splices the current PLAN.md into any plan-owned turn's prompt via
+// plan.render_block) and delivers it via deliver_reply/deliver_attachment,
+// its own call on how (informed by skills/seeds/deliver-long-content.json —
+// docs/components/activities-outbound-delivery.md's model-driven retry
+// philosophy applied to delivery itself). Same runChildTurn shape as
+// foldInFollowups/runRejectionNoticeTurn; a failure here is best-effort —
+// logs and moves on rather than blocking the approval gate from opening.
+func runPlanPresentationTurn(ctx workflow.Context, input types.PlanWorkflowInput, task types.TaskRepresentation, round int) {
+	logger := workflow.GetLogger(ctx)
+	turnID := fmt.Sprintf("%s:present:%d", input.PlanID, round)
+	in := types.TurnInput{
+		SessionKey:   input.SessionKey,
+		TurnID:       turnID,
+		ParentType:   "plan",
+		ParentID:     input.PlanID,
+		ConnectionID: input.ConnectionID,
+		InitiatedBy:  "plan",
+		PlanID:       input.PlanID,
+		Task:         &task,
+		InitialMessage: types.Message{
+			Role: "user",
+			Content: "The plan above needs to be presented to the user before they can approve or " +
+				"reject it. Deliver it to them now.",
+		},
+		OfferDeliveryTools: true,
+	}
+	if _, err := runChildTurn(ctx, turnID, in); err != nil {
+		logger.Warn("plan presentation turn failed — approval gate will open without it", "plan_id", input.PlanID, "round", round, "error", err)
+	}
+}
+
 // runApprovalGate returns (proceed, closeReason). It's a no-op unless the
 // planning turn's propose_plan set needs_approval. proceed=false means the user
 // rejected the plan (or ignored the request until it expired) — the caller
@@ -289,10 +327,18 @@ func runApprovalGate(ctx workflow.Context, input types.PlanWorkflowInput, task t
 		return true, ""
 	}
 	logger := workflow.GetLogger(ctx)
-	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
-	actx := workflow.WithActivityOptions(ctx, ao)
 
 	for round := 1; ; round++ {
+		// Present the plan fresh each round — a revision (below) changes the
+		// ledger, and the re-gate must show the updated draft, not the stale
+		// one from round 1. A real turn, not a Go-rendered string: it reads
+		// the current PLAN.md via prompt.assemble's own plan section (already
+		// spliced into any plan-owned turn's prompt) and delivers it itself
+		// via deliver_reply/deliver_attachment — the model's own judgment on
+		// how, informed by skills/seeds/deliver-long-content.json, not a
+		// mechanical length-check-then-embed.
+		runPlanPresentationTurn(ctx, input, task, round)
+
 		reqID := fmt.Sprintf("%s:approval:%d", input.PlanID, round)
 		cwo := workflow.ChildWorkflowOptions{
 			WorkflowID:        reqID,
@@ -302,7 +348,7 @@ func runApprovalGate(ctx workflow.Context, input types.PlanWorkflowInput, task t
 			RequestID:     reqID,
 			TurnID:        input.PlanID,
 			Kind:          "plan_approval",
-			Prompt:        "Review the plan above. Approve to start, or send it back with changes.",
+			Prompt:        "Approve the plan above to start, or send it back with changes.",
 			Options:       []types.UserInputOption{{ID: "approve", Label: "Approve"}, {ID: "reject", Label: "Reject"}},
 			AllowFreeText: true, // free text = a revision instruction
 			Context:       map[string]any{"plan_id": input.PlanID, "round": round},
@@ -314,11 +360,14 @@ func runApprovalGate(ctx workflow.Context, input types.PlanWorkflowInput, task t
 			ConnectionID: input.ConnectionID,
 		}).Get(ctx, &out)
 		if err != nil {
-			// Cancelled (an unrelated message came in and cancelled the wait) —
-			// treat as "don't execute", same fail-closed stance permission
-			// gating takes on a cancelled approval.
+			// An unrelated message interrupted the wait (cancelled the child
+			// workflow) — "don't execute", same fail-closed stance permission
+			// gating takes on a cancelled approval, but distinct from an
+			// explicit reject: the interrupting message already IS the
+			// user's next word, so no cancellation notice or follow-up
+			// intention here — that would talk over what they just sent.
 			logger.Info("plan approval request cancelled", "plan_id", input.PlanID, "error", err)
-			return false, "rejected"
+			return false, "cancelled"
 		}
 
 		decision := ""
@@ -338,7 +387,7 @@ func runApprovalGate(ctx workflow.Context, input types.PlanWorkflowInput, task t
 		case feedback == "":
 			// No selection and no text — the request expired. Fail closed.
 			logger.Info("plan approval expired with no response", "plan_id", input.PlanID)
-			return false, "rejected"
+			return false, "expired"
 		}
 
 		// A revision instruction (with or without an explicit option). Re-plan
@@ -364,7 +413,8 @@ func runApprovalGate(ctx workflow.Context, input types.PlanWorkflowInput, task t
 			logger.Warn("re-plan turn failed — proceeding with the standing draft", "plan_id", input.PlanID, "error", err)
 			return true, ""
 		}
-		_ = workflow.ExecuteActivity(actx, "Deliver", replanID).Get(ctx, nil)
+		// No Deliver(replanID) here — the next round's runPlanPresentationTurn
+		// call re-reads PLAN.md fresh and presents the revised draft itself.
 	}
 }
 
@@ -425,6 +475,26 @@ func finishPlan(ctx workflow.Context, input types.PlanWorkflowInput, task types.
 	if cpN > 0 {
 		_ = workflow.ExecuteActivity(actx, "Deliver", fmt.Sprintf("%s:cp:%d", input.PlanID, cpN)).Get(ctx, nil)
 	}
+
+	// Bug 2 (approval-gate outcomes): the gate's three non-proceed reasons
+	// used to collapse into silence. "cancelled" (an unrelated message
+	// interrupted the wait) stays silent on purpose — that message already
+	// is the user's next word, matching this codebase's existing
+	// interrupt-handling philosophy elsewhere. "expired" is a plain FYI, no
+	// judgment call involved, so a fixed string is fine. "rejected" runs a
+	// real (but content-neutral) turn instead: workflow code names no tool
+	// and takes no stance on whether/how to follow up — that's deliberately
+	// left to whatever the model decides is right for the situation, learned
+	// procedure or not (docs/components/skill-subsystem.md: skills only
+	// apply inside a real ModelCall turn, so a turn has to exist here for
+	// that door to be open at all — a bare InsertMessage would close it).
+	switch closeReason {
+	case "rejected":
+		runRejectionNoticeTurn(ctx, input, task)
+	case "expired":
+		deliverPlanNotice(actx, input.PlanID, "Plan cancelled — I didn't hear back in time. Send me another message whenever you'd like to pick this back up.")
+	}
+
 	if input.ParentPlanID != "" {
 		return // nested — the parent owns close-out
 	}
@@ -433,6 +503,59 @@ func finishPlan(ctx workflow.Context, input types.PlanWorkflowInput, task types.
 	if err := workflow.SignalExternalWorkflow(ctx, input.SessionKey, "", PlanDoneSignalName, input.PlanID).Get(ctx, nil); err != nil {
 		logger.Warn("failed to signal coordinator PlanDone", "plan_id", input.PlanID, "error", err)
 	}
+}
+
+// deliverPlanNotice inserts a synthetic assistant message onto the planning
+// turn (turn_id == plan_id — that turns row already exists by the time this
+// is ever called) and delivers it, same InsertMessage+Deliver shape turn.go's
+// own failTurn uses for its "something went wrong" notice. This is the only
+// way the user ever sees a plan-approval outcome that isn't "approved": the
+// planning turn's own messages row otherwise stays empty forever (propose_plan
+// writes to PLAN.md, not to messages).
+func deliverPlanNotice(actx workflow.Context, planID, content string) {
+	insert := types.InsertMessageInput{
+		TurnID:  planID,
+		Message: types.Message{Role: "assistant", Content: content},
+	}
+	_ = workflow.ExecuteActivity(actx, "InsertMessage", insert).Get(actx, nil)
+	_ = workflow.ExecuteActivity(actx, "Deliver", planID).Get(actx, nil)
+}
+
+// runRejectionNoticeTurn seeds a normal reason-act turn after an explicit
+// plan rejection, so the model (not workflow code) both acknowledges the
+// cancellation and reacts however it judges fit — including, if it has
+// learned to, creating a check-in intention itself. The seed states the bare
+// fact and nothing else: no tool is named, no follow-up is suggested. Same
+// runChildTurn+explicit-Deliver shape foldInFollowups uses for its own
+// mid-plan follow-up turns; if the turn itself fails, this logs and returns
+// rather than falling back to a canned message, matching that function's own
+// tolerance.
+func runRejectionNoticeTurn(ctx workflow.Context, input types.PlanWorkflowInput, task types.TaskRepresentation) {
+	logger := workflow.GetLogger(ctx)
+	seed := "The plan you proposed"
+	if task.RetrievalQuery != "" {
+		seed += " for \"" + task.RetrievalQuery + "\""
+	}
+	seed += " was just rejected, with no reason given. Let the user know it's cancelled."
+
+	turnID := input.PlanID + ":rejected"
+	in := types.TurnInput{
+		SessionKey:     input.SessionKey,
+		TurnID:         turnID,
+		ParentType:     "plan",
+		ParentID:       input.PlanID,
+		ConnectionID:   input.ConnectionID,
+		InitiatedBy:    "plan",
+		PlanID:         input.PlanID,
+		Task:           &task,
+		InitialMessage: types.Message{Role: "user", Content: seed},
+	}
+	if _, err := runChildTurn(ctx, turnID, in); err != nil {
+		logger.Warn("plan-rejection follow-up turn failed", "plan_id", input.PlanID, "error", err)
+		return
+	}
+	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+	_ = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, ao), "Deliver", turnID).Get(ctx, nil)
 }
 
 // runChildTurn runs a child TurnWorkflow under this plan and waits for it,

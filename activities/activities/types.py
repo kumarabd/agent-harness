@@ -64,6 +64,11 @@ class ModelCallInput:
     # normal reason-act, but `propose_plan` is offered alongside the regular
     # tools and peeled the same way planning_mode peels it.
     plan_handling: bool = False
+    # Delivery-in-the-loop (2026-09-06) — offers deliver_reply/deliver_attachment
+    # for this one call: turn.go's bounded post-Deliver-failure recovery round,
+    # or a plan-presentation turn (plan_workflow.go). Mirrored in types.go's
+    # ModelCallInput.OfferDeliveryTools.
+    offer_delivery_tools: bool = False
 
 
 @dataclass

@@ -117,6 +117,19 @@ CAPABILITIES: list[Capability] = [
     Capability("propose_plan", Layer.CONTROL, frozenset({TurnKind.PLANNING, TurnKind.PLAN_HANDLING}), peel=True),
     Capability("checkpoint_done", Layer.CONTROL, frozenset({TurnKind.CHECKPOINT}), peel=True),
     Capability("declare_next_step_hint", Layer.CONTROL, _ALL, peel=True),
+    # Delivery-in-the-loop (2026-09-06): content that won't fit in one platform
+    # message is the model's own judgment call (split at natural boundaries vs.
+    # attach as a file — see skills/seeds/deliver-long-content.json), not a
+    # mechanical Go length-check. turn_kinds=frozenset() — never in any turn's
+    # default schema; offered only via schema_for's `also` param, by turn.go
+    # (a bounded recovery round after an automatic Deliver fails) or
+    # plan_workflow.go (the dedicated plan-presentation turn). No handler_ref:
+    # dispatched by turn.go straight to the owning gateway connection's own
+    # embedded worker (same routing as Deliver/DeliverChunk/DeliverInterim),
+    # never through the generic tenant-worker ToolCall path — same shape as
+    # spawn_subagent being dispatched as a child workflow instead of a handler.
+    Capability("deliver_reply", Layer.CONTROL, frozenset()),
+    Capability("deliver_attachment", Layer.CONTROL, frozenset()),
 ]
 
 BY_NAME: dict[str, Capability] = {c.name: c for c in CAPABILITIES}
@@ -140,15 +153,24 @@ def turn_kind_of(is_subagent: bool, planning: bool, plan_handling: bool, checkpo
     return TurnKind.REASONING
 
 
-def schema_for(kind: TurnKind, resolved: "list[Capability] | tuple[Capability, ...]" = ()) -> list[dict]:
+def schema_for(
+    kind: TurnKind,
+    resolved: "list[Capability] | tuple[Capability, ...]" = (),
+    also: frozenset[str] = frozenset(),
+) -> list[dict]:
     """The model-facing tool schema for a turn: the static capabilities whose
     `turn_kinds` include `kind`, then any per-turn resolved tools appended.
-    `spawn_subagent` swaps to its nested variant on a subagent turn."""
+    `spawn_subagent` swaps to its nested variant on a subagent turn.
+
+    `also` force-includes named capabilities regardless of `turn_kinds` —
+    for capabilities like `deliver_reply`/`deliver_attachment` that are never
+    part of any turn kind's default set, only offered situationally by the
+    caller (turn.go's delivery-recovery round, the plan-presentation turn)."""
     from .llm import _SCHEMA_BY_NAME, _SPAWN_SUBAGENT_NESTED_SCHEMA  # lazy — avoids an import cycle
 
     out: list[dict] = []
     for c in CAPABILITIES:
-        if kind not in c.turn_kinds:
+        if kind not in c.turn_kinds and c.name not in also:
             continue
         if kind is TurnKind.SUBAGENT and c.has_subagent_variant:
             out.append(_SPAWN_SUBAGENT_NESTED_SCHEMA)

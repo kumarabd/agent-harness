@@ -614,6 +614,57 @@ _CHECKPOINT_DONE_SCHEMA = {
 }
 
 
+# Delivery-in-the-loop (2026-09-06, docs/components/activities-outbound-delivery.md's
+# already-resolved "Retry Policy: Model-Driven, Not a Static Playbook" applied
+# to delivery itself): never in a turn's default schema (capabilities.py's
+# turn_kinds=frozenset()) — offered only via schema_for's `also` param, by
+# turn.go's bounded post-Deliver-failure recovery round or the plan-workflow
+# presentation turn. Each call is one platform message; the model decides
+# how/whether to split a long reply across several deliver_reply calls, or
+# switch to deliver_attachment, informed by whatever it retrieved from
+# skills/seeds/deliver-long-content.json — not a mechanical char-count cut.
+_DELIVER_REPLY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "deliver_reply",
+        "description": (
+            "Send content to the user as one message on their platform. Call it more than once "
+            "to split a long reply across several messages — split at natural boundaries "
+            "(paragraphs, sections), not an arbitrary character count. Fails with a "
+            "content_too_long error (and the limit) if this call's content still doesn't fit; "
+            "on that, split further or switch to deliver_attachment."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The text to send as one message."},
+            },
+            "required": ["content"],
+        },
+    },
+}
+
+_DELIVER_ATTACHMENT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "deliver_attachment",
+        "description": (
+            "Send content to the user as a file attachment instead of inline text — the right "
+            "choice for long structured content (a plan, a checklist, code) that doesn't read "
+            "well split across several messages."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The full content to write to the file."},
+                "filename": {"type": "string", "description": "A short, descriptive filename (e.g. \"plan.md\")."},
+            },
+            "required": ["content", "filename"],
+        },
+    },
+}
+
+
 _PROPOSE_PLAN_SCHEMA = {
     "type": "function",
     "function": {
@@ -656,7 +707,13 @@ _PROPOSE_PLAN_SCHEMA = {
 # reads this back; the nested spawn_subagent variant is passed separately.
 _SCHEMA_BY_NAME: dict[str, dict] = {
     t["function"]["name"]: t
-    for t in [*TOOLS_SCHEMA, _PROPOSE_PLAN_SCHEMA, _CHECKPOINT_DONE_SCHEMA]
+    for t in [
+        *TOOLS_SCHEMA,
+        _PROPOSE_PLAN_SCHEMA,
+        _CHECKPOINT_DONE_SCHEMA,
+        _DELIVER_REPLY_SCHEMA,
+        _DELIVER_ATTACHMENT_SCHEMA,
+    ]
 }
 
 
@@ -666,6 +723,7 @@ def tools_schema_for(
     plan_handling: bool = False,
     checkpoint: bool = False,
     resolved: "list | tuple" = (),
+    offer_delivery_tools: bool = False,
 ) -> list[dict]:
     """`model_call.py`'s one call site for the model-facing tool schema.
 
@@ -675,11 +733,17 @@ def tools_schema_for(
     Three-Layer Tool Taxonomy"). This is a thin adapter from the historical
     boolean flags to `capabilities.schema_for`. `resolved` is the per-turn
     list of `Capability` objects `ToolDiscover` produced (empty until Phase 3).
+
+    `offer_delivery_tools` — turn.go's delivery-recovery round, or
+    plan_workflow.go's plan-presentation turn — force-includes
+    deliver_reply/deliver_attachment via `schema_for`'s `also`, since those two
+    are never in any turn kind's default set (situational, not standing).
     """
     from . import capabilities
 
     kind = capabilities.turn_kind_of(is_subagent, planning, plan_handling, checkpoint)
-    return capabilities.schema_for(kind, resolved)
+    also = frozenset({"deliver_reply", "deliver_attachment"}) if offer_delivery_tools else frozenset()
+    return capabilities.schema_for(kind, resolved, also)
 
 
 @dataclass

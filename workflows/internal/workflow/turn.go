@@ -200,7 +200,11 @@ func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, par
 	_ = workflow.ExecuteActivity(actx, "Persist", turnID, "failed", planID).Get(actx, nil)
 	if parentType == "session" {
 		_ = workflow.ExecuteActivity(actx, "Deliver", turnID).Get(actx, nil)
-		if payload := deliverConnectionBased(ctx, interrupts, sessionKey, connectionID, turnID); payload != nil {
+		// The failure-notice text is short and fixed — no recovery needed
+		// here even on a ContentTooLong error, unlike the normal end-of-turn
+		// site below.
+		payload, _ := deliverConnectionBased(ctx, interrupts, sessionKey, connectionID, turnID)
+		if payload != nil {
 			// nil error, not cause: Temporal discards a child workflow's
 			// return VALUE when it also returns a non-nil error (recorded
 			// as a failed execution instead) — returning cause here would
@@ -246,14 +250,22 @@ type deliveryInterruptSource struct {
 // Returns the interrupting payload (non-nil) if that happened — the caller
 // is responsible for handing it back to the Coordinator via TurnResult,
 // since only the caller has a real return path there.
-func deliverConnectionBased(ctx workflow.Context, interrupts *deliveryInterruptSource, sessionKey, connectionID, turnID string) *types.SignalPayload {
+//
+// Also returns the delivery activity's own error — but ONLY when it's the
+// deliver_discord.go errTypeContentTooLong case (real, live bug found
+// 2026-09-06: every other error here was, and still is, silently discarded,
+// same tolerance Persist/other best-effort bookkeeping calls already get
+// elsewhere in this file; deliberately not widening that now). The caller
+// uses this one case to run a model-driven recovery round instead of simply
+// losing the response.
+func deliverConnectionBased(ctx workflow.Context, interrupts *deliveryInterruptSource, sessionKey, connectionID, turnID string) (*types.SignalPayload, error) {
 	if connectionID == "" {
-		return nil
+		return nil, nil
 	}
 	platform := platformFromSessionKey(sessionKey)
 	activityName, timeout, ok := connectionDeliveryActivity(platform)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 
 	deliverCtx, deliverCancel := workflow.WithCancel(ctx)
@@ -265,15 +277,24 @@ func deliverConnectionBased(ctx workflow.Context, interrupts *deliveryInterruptS
 	actx := workflow.WithActivityOptions(deliverCtx, ao)
 	future := workflow.ExecuteActivity(actx, activityName, turnID)
 
-	if interrupts == nil || interrupts.notify == nil {
-		_ = future.Get(actx, nil)
+	deliverErr := func(err error) error {
+		var appErr *temporal.ApplicationError
+		if errors.As(err, &appErr) && appErr.Type() == types.ErrTypeContentTooLong {
+			return err
+		}
 		return nil
 	}
 
+	if interrupts == nil || interrupts.notify == nil {
+		err := future.Get(actx, nil)
+		return nil, deliverErr(err)
+	}
+
 	interrupted := false
+	var settledErr error
 	sel := workflow.NewSelector(ctx)
 	sel.AddFuture(future, func(f workflow.Future) {
-		_ = f.Get(actx, nil)
+		settledErr = f.Get(actx, nil)
 	})
 	sel.AddReceive(interrupts.notify, func(c workflow.ReceiveChannel, more bool) {
 		c.Receive(ctx, nil)
@@ -282,15 +303,92 @@ func deliverConnectionBased(ctx workflow.Context, interrupts *deliveryInterruptS
 	})
 	sel.Select(ctx)
 	if !interrupted {
-		return nil
+		return nil, deliverErr(settledErr)
 	}
 	_ = future.Get(actx, nil) // wait for the now-cancelling activity to actually finish
 	msgs := *interrupts.messages
 	if len(msgs) == 0 {
-		return nil
+		return nil, nil
 	}
 	payload := msgs[len(msgs)-1]
-	return &payload
+	return &payload, nil
+}
+
+// deliveryRecoveryRoundCap — bounded, same "retry a couple of times then give
+// up" shape as this codebase's other retry ceilings (e.g. plan_workflow.go's
+// planApprovalRevisionCap), not an unbounded loop.
+const deliveryRecoveryRoundCap = 2
+
+// runDiscordDeliveryRecovery — real, live bug fixed 2026-09-06: Deliver's
+// error used to be silently discarded entirely (deliverConnectionBased's own
+// `_ = future.Get(...)`), so a final answer too long for one Discord message
+// just vanished, turn marked complete, no trace anywhere. Now that a
+// ContentTooLong failure surfaces (see deliverConnectionBased above), this
+// closes the loop the way docs/components/activities-outbound-delivery.md's
+// "Retry Policy: Model-Driven, Not a Static Playbook" already does for every
+// other tool failure: feed the model an observation and let IT decide how to
+// redeliver — deliver_reply (split at natural boundaries) or
+// deliver_attachment — informed by whatever it retrieves from
+// skills/seeds/deliver-long-content.json, not a mechanical Go split.
+//
+// Bounded at deliveryRecoveryRoundCap rounds of its own small ModelCall +
+// dispatch (not the main loop — this runs after TurnWorkflow's own loop has
+// already exited, so it can't just `continue loop` back in without
+// restructuring that loop's stop-condition machinery, which is out of scope
+// here). If the model still hasn't gotten anything delivered by the cap,
+// this logs and gives up — an accepted, bounded gap (same tolerance this
+// codebase already gives a dropped streamed preview chunk elsewhere), not a
+// mechanical fallback duplicating deliver_discord.go's own length-checked
+// sends.
+func runDiscordDeliveryRecovery(ctx workflow.Context, turnID, connectionID string, contextSeq int) {
+	logger := workflow.GetLogger(ctx)
+	iao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+	iactx := workflow.WithActivityOptions(ctx, iao)
+
+	obs := "Your reply didn't fit as one Discord message. Use deliver_reply (call it more than once " +
+		"to split at natural boundaries — paragraphs, sections) or deliver_attachment (send it as a " +
+		"file instead) to actually get it to the user."
+	insert := types.InsertMessageInput{TurnID: turnID, Message: types.Message{Role: "user", Content: obs}}
+	if err := workflow.ExecuteActivity(iactx, "InsertMessage", insert).Get(iactx, nil); err != nil {
+		logger.Warn("delivery recovery: failed to insert observation", "turn_id", turnID, "error", err)
+		return
+	}
+
+	delivered := false
+	for round := 0; round < deliveryRecoveryRoundCap && !delivered; round++ {
+		contextSeq++
+		var mcOut types.ModelCallOutput
+		mao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 3}}
+		mctx := workflow.WithActivityOptions(ctx, mao)
+		modelInput := types.ModelCallInput{TurnID: turnID, ContextSeq: contextSeq, OfferDeliveryTools: true}
+		if err := workflow.ExecuteActivity(mctx, "ModelCall", modelInput).Get(mctx, &mcOut); err != nil {
+			logger.Warn("delivery recovery: ModelCall failed", "turn_id", turnID, "round", round, "error", err)
+			return
+		}
+		if !mcOut.HasToolCalls {
+			break
+		}
+		for _, tc := range mcOut.ToolCalls {
+			activityName, ok := deliveryToolActivity("discord", tc.ToolName)
+			if !ok {
+				continue // the model called something else here — not this routine's concern
+			}
+			dao := workflow.ActivityOptions{
+				ActivityID:          tc.ToolCallID,
+				StartToCloseTimeout: activityTimeoutTierA,
+				TaskQueue:           "deliver:discord:" + connectionID,
+				RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+			}
+			dctx := workflow.WithActivityOptions(ctx, dao)
+			var out types.ToolCallOutput
+			if err := workflow.ExecuteActivity(dctx, activityName, types.ToolCallInput{ToolCallID: tc.ToolCallID}).Get(dctx, &out); err == nil && out.Status == "ok" {
+				delivered = true
+			}
+		}
+	}
+	if !delivered {
+		logger.Error("delivery recovery: gave up after round cap, response may not have reached the user", "turn_id", turnID)
+	}
 }
 
 // platformFromSessionKey extracts the platform segment from a session_key of
@@ -342,6 +440,31 @@ func connectionDeliveryChunkActivity(platform string) (activityName string, time
 		return "VoiceDeliverChunk", voiceChunkDeliveryTimeout, true
 	default:
 		return "", 0, false
+	}
+}
+
+// deliveryToolActivity — deliver_reply/deliver_attachment are real model
+// tool calls (docs/components/activities-outbound-delivery.md's model-driven
+// retry philosophy, applied to delivery itself), but unlike an ordinary tool
+// they need the owning gateway connection's own live session, so the Act
+// dispatch loop below routes them here instead of through the generic
+// "ToolCall" tenant-worker path — same connectionDeliveryActivity/
+// connectionDeliveryChunkActivity literal-lookup idiom, just keyed on tool
+// name instead of a fixed per-platform pair. Discord only for now (delivery-
+// in-the-loop landed Discord-first); ok=false elsewhere falls through to the
+// generic path, which will correctly fail these as "unknown tool" since
+// capabilities.py gives them no handler_ref.
+func deliveryToolActivity(platform, toolName string) (activityName string, ok bool) {
+	if platform != "discord" {
+		return "", false
+	}
+	switch toolName {
+	case "deliver_reply":
+		return "DiscordDeliverReply", true
+	case "deliver_attachment":
+		return "DiscordDeliverAttachment", true
+	default:
+		return "", false
 	}
 }
 
@@ -710,9 +833,10 @@ loop:
 			// Step 2's estimate — ModelCall uses it only to bootstrap the
 			// first call's tier (when HintTier is empty). Zero value for
 			// subagents; harmless to pass every iteration.
-			Complexity:   taskRep.Complexity,
-			PlanningMode: input.PlanningMode,
-			PlanHandling: input.PlanHandling,
+			Complexity:         taskRep.Complexity,
+			PlanningMode:       input.PlanningMode,
+			PlanHandling:       input.PlanHandling,
+			OfferDeliveryTools: input.OfferDeliveryTools,
 		}
 		mcFuture := workflow.ExecuteActivity(mctx, "ModelCall", modelInput)
 
@@ -883,6 +1007,21 @@ loop:
 				cctx := workflow.WithChildOptions(cancelCtx, cwo)
 				fut := workflow.ExecuteChildWorkflow(cctx, TurnWorkflow, childInput)
 				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isSubagent: true})
+			} else if deliveryActivityName, ok := deliveryToolActivity(platformFromSessionKey(input.SessionKey), tc.ToolName); ok {
+				// deliver_reply/deliver_attachment — routed to the owning
+				// gateway connection's own embedded worker, same task-queue
+				// scheme Deliver/DeliverChunk/DeliverInterim already use,
+				// not the generic tenant-worker ToolCall path (see
+				// deliveryToolActivity's own doc comment).
+				ao := workflow.ActivityOptions{
+					ActivityID:          tc.ToolCallID,
+					StartToCloseTimeout: activityTimeoutTierA,
+					TaskQueue:           "deliver:discord:" + input.ConnectionID,
+					RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+				}
+				actx := workflow.WithActivityOptions(cancelCtx, ao)
+				fut := workflow.ExecuteActivity(actx, deliveryActivityName, types.ToolCallInput{ToolCallID: tc.ToolCallID})
+				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut})
 			} else {
 				timing := toolTimingFor(tc.ToolName)
 				ao := workflow.ActivityOptions{
@@ -1022,7 +1161,11 @@ loop:
 		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 		actx := workflow.WithActivityOptions(ctx, ao)
 		_ = workflow.ExecuteActivity(actx, "Deliver", input.TurnID).Get(actx, nil)
-		interruptedPayload = deliverConnectionBased(ctx, interrupts, input.SessionKey, input.ConnectionID, input.TurnID)
+		var deliverErr error
+		interruptedPayload, deliverErr = deliverConnectionBased(ctx, interrupts, input.SessionKey, input.ConnectionID, input.TurnID)
+		if deliverErr != nil {
+			runDiscordDeliveryRecovery(ctx, input.TurnID, input.ConnectionID, contextSeq)
+		}
 	}
 
 	// A turn under a PlanWorkflow (planning / checkpoint / handling) never

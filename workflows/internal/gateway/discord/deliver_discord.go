@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"unicode"
@@ -11,11 +12,14 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/sdk/temporal"
 
 	"agent-harness/workflows/internal/gateway/core"
 	"agent-harness/workflows/internal/gateway/discordui"
 	"agent-harness/workflows/internal/gateway/speech"
+	"agent-harness/workflows/internal/types"
 )
+
 
 // discordDeliverActivity is the real implementation of docs/components/
 // gateway.md's "Resolved: Outbound Flow" DeliverActivity, for Discord
@@ -202,6 +206,24 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 	}
 
 	sendContent := discordSendableContent(content)
+	// Real, live bug found 2026-09-06: unlike DeliverChunk (streaming) and
+	// DeliverInterim, this plain final-answer path had NO length guard at
+	// all — a long non-streamed answer hit Discord's raw API rejection
+	// (HTTP 400 BASE_TYPE_MAX_LENGTH) with no distinguishable error, and the
+	// caller (turn.go's deliverConnectionBased) discards this activity's
+	// error entirely, so the failure was completely invisible. Returning a
+	// typed ContentTooLong error here (checked BEFORE the API round-trip,
+	// not after) lets turn.go tell this apart from any other delivery
+	// failure and run its model-driven recovery round (deliver_reply /
+	// deliver_attachment) instead of just losing the response — see
+	// deliverConnectionBased's own doc comment.
+	if n := len([]rune(sendContent)); n > discordMessageLengthLimit {
+		return temporal.NewApplicationErrorWithOptions(
+			fmt.Sprintf("content too long for one Discord message: %d > %d", n, discordMessageLengthLimit),
+			types.ErrTypeContentTooLong,
+			temporal.ApplicationErrorOptions{NonRetryable: true, Details: []any{n, discordMessageLengthLimit}},
+		)
+	}
 	msg, err := a.session.ChannelMessageSend(channelID, sendContent)
 	if err != nil {
 		return err
@@ -327,7 +349,12 @@ func (a *discordDeliverActivity) DeliverInterim(ctx context.Context, requestID s
 		return err
 	}
 
-	send := &discordgo.MessageSend{Content: prompt}
+	// Superseded 2026-09-06 (delivery-in-the-loop): the approval prompt is a
+	// short, fixed instruction again (plan_workflow.go's runApprovalGate) —
+	// the plan itself is now delivered by a dedicated presentation turn via
+	// deliver_reply/deliver_attachment before the gate ever opens, so this
+	// prompt is never long enough to need its own overflow handling.
+	send := &discordgo.MessageSend{Content: discordSendableContent(prompt)}
 	if len(options) > 0 {
 		send.Components = discordui.BuildUserInputComponents(requestID, options)
 	}
@@ -351,6 +378,122 @@ func (a *discordDeliverActivity) DeliverInterim(ctx context.Context, requestID s
 	}
 	log.Printf("discord: pushed pending request %s prompt to channel %s via connection %s", requestID, channelID, a.connectionID)
 	return nil
+}
+
+// deliverToolResult writes a model-tool-call's outcome back to `tool_calls`,
+// the exact same contract activities/activities/tool_call.py's ToolCall
+// activity honors (status/result/completed_at) — so the model's NEXT
+// ModelCall sees a normal observation regardless of which language/process
+// actually ran the call. Mirrors that file's `_finish_error`/success UPDATEs
+// literally; kept here rather than shared since this is the only Go
+// activity that writes into this Python-owned table.
+func (a *discordDeliverActivity) deliverToolResult(ctx context.Context, toolCallID, status, result string) (types.ToolCallOutput, error) {
+	if _, err := a.pool.Exec(ctx,
+		"UPDATE tool_calls SET status = $2, result = $3, completed_at = now() WHERE tool_call_id = $1",
+		toolCallID, status, result,
+	); err != nil {
+		return types.ToolCallOutput{}, err
+	}
+	return types.ToolCallOutput{ToolCallID: toolCallID, Status: status}, nil
+}
+
+// deliverToolChannelAndPrompt resolves a deliver_reply/deliver_attachment
+// call's target channel + turn's session_key, the same join Deliver/
+// DeliverInterim already use — a tool call's channel is its owning turn's
+// session's channel, there is no per-call routing concept.
+func (a *discordDeliverActivity) deliverToolChannelAndPrompt(ctx context.Context, turnID string) (channelID, sessionKey string, err error) {
+	err = a.pool.QueryRow(ctx,
+		"SELECT s.channel_id, s.session_key FROM turns t JOIN sessions s ON s.session_key = t.parent_id WHERE t.turn_id = $1",
+		turnID,
+	).Scan(&channelID, &sessionKey)
+	return
+}
+
+// DeliverReply is the deliver_reply model tool (docs/components/
+// activities-outbound-delivery.md's model-driven retry philosophy, applied
+// to delivery itself — llm.py's _DELIVER_REPLY_SCHEMA). Dispatched by
+// turn.go straight to this connection's own embedded worker (same routing
+// as Deliver/DeliverChunk/DeliverInterim), never through the generic
+// tenant-worker ToolCall path — reads its own arguments from `tool_calls`
+// by tool_call_id, same reference-passing contract every other tool call
+// honors (tool_call.py's ToolCall is the reference implementation this
+// mirrors). A defensive backstop only: the model is expected to keep each
+// call under the limit itself (that's the whole point of offering the
+// tool), this just guarantees the failure is legible if it doesn't.
+func (a *discordDeliverActivity) DeliverReply(ctx context.Context, input types.ToolCallInput) (types.ToolCallOutput, error) {
+	var argumentsJSON []byte
+	var turnID string
+	if err := a.pool.QueryRow(ctx,
+		"SELECT arguments, parent_id FROM tool_calls WHERE tool_call_id = $1", input.ToolCallID,
+	).Scan(&argumentsJSON, &turnID); err != nil {
+		return types.ToolCallOutput{}, err
+	}
+	var args struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(argumentsJSON, &args); err != nil {
+		return a.deliverToolResult(ctx, input.ToolCallID, "error", fmt.Sprintf(`{"error":"invalid arguments: %s"}`, err))
+	}
+
+	channelID, sessionKey, err := a.deliverToolChannelAndPrompt(ctx, turnID)
+	if err != nil {
+		return types.ToolCallOutput{}, err
+	}
+
+	if n := len([]rune(args.Content)); n > discordMessageLengthLimit {
+		result := fmt.Sprintf(`{"error":"content_too_long","limit":%d,"actual":%d}`, discordMessageLengthLimit, n)
+		return a.deliverToolResult(ctx, input.ToolCallID, "error", result)
+	}
+
+	msg, err := a.session.ChannelMessageSend(channelID, discordSendableContent(args.Content))
+	if err != nil {
+		return a.deliverToolResult(ctx, input.ToolCallID, "error", fmt.Sprintf(`{"error":%q}`, err.Error()))
+	}
+	a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, args.Content)
+	return a.deliverToolResult(ctx, input.ToolCallID, "ok", `{"delivered":true}`)
+}
+
+// DeliverAttachment is the deliver_attachment model tool — same contract as
+// DeliverReply above, sends `content` as a file attachment instead of an
+// inline message. In-memory only (strings.NewReader): nothing downstream
+// needs the file to persist past this one send.
+func (a *discordDeliverActivity) DeliverAttachment(ctx context.Context, input types.ToolCallInput) (types.ToolCallOutput, error) {
+	var argumentsJSON []byte
+	var turnID string
+	if err := a.pool.QueryRow(ctx,
+		"SELECT arguments, parent_id FROM tool_calls WHERE tool_call_id = $1", input.ToolCallID,
+	).Scan(&argumentsJSON, &turnID); err != nil {
+		return types.ToolCallOutput{}, err
+	}
+	var args struct {
+		Content  string `json:"content"`
+		Filename string `json:"filename"`
+	}
+	if err := json.Unmarshal(argumentsJSON, &args); err != nil {
+		return a.deliverToolResult(ctx, input.ToolCallID, "error", fmt.Sprintf(`{"error":"invalid arguments: %s"}`, err))
+	}
+	filename := strings.TrimSpace(args.Filename)
+	if filename == "" {
+		filename = "attachment.txt"
+	}
+
+	channelID, sessionKey, err := a.deliverToolChannelAndPrompt(ctx, turnID)
+	if err != nil {
+		return types.ToolCallOutput{}, err
+	}
+
+	msg, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Content: fmt.Sprintf("Attached: %s", filename),
+		Files: []*discordgo.File{{
+			Name:   filename,
+			Reader: strings.NewReader(args.Content),
+		}},
+	})
+	if err != nil {
+		return a.deliverToolResult(ctx, input.ToolCallID, "error", fmt.Sprintf(`{"error":%q}`, err.Error()))
+	}
+	a.recordAmbientBotMessage(ctx, channelID, msg.ID, sessionKey, fmt.Sprintf("[attached %s]", filename))
+	return a.deliverToolResult(ctx, input.ToolCallID, "ok", `{"delivered":true}`)
 }
 
 // DiscordDeliverChunk delivers one streamed sentence-chunk (docs/components/

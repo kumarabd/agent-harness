@@ -201,6 +201,7 @@ class ModelCallActivity:
                     plan_handling=input.plan_handling,
                     checkpoint=is_checkpoint,
                     resolved=resolved,
+                    offer_delivery_tools=input.offer_delivery_tools,
                 )
 
                 # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —

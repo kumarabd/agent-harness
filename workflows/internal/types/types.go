@@ -98,6 +98,15 @@ type TurnInput struct {
 	PlanID string `json:"plan_id,omitempty"`
 	// Task: pre-resolved classification, passed through when PlanID is set.
 	Task *TaskRepresentation `json:"task,omitempty"`
+	// OfferDeliveryTools: this turn's ModelCall calls offer deliver_reply/
+	// deliver_attachment (docs/components/activities-outbound-delivery.md's
+	// model-driven retry philosophy applied to delivery itself) — set by
+	// plan_workflow.go's plan-presentation turn. Threaded into every
+	// ModelCallInput this turn builds, mirrored by Python's
+	// ModelCallInput.offer_delivery_tools. turn.go's own bounded
+	// post-Deliver-failure recovery round sets this directly on a raw
+	// ModelCallInput instead (not a new turn), so it doesn't need this field.
+	OfferDeliveryTools bool `json:"offer_delivery_tools,omitempty"`
 }
 
 // TurnResult is a Turn Workflow's return value. Deliberately holds no content
@@ -185,6 +194,10 @@ type ModelCallInput struct {
 	// planning system prompt, offers only `propose_plan`, and peels that call
 	// off to write PLAN.md. The turn ends after one such call.
 	PlanningMode bool `json:"planning_mode,omitempty"`
+	// OfferDeliveryTools — mirrors types.TurnInput's field of the same name;
+	// see there. Also set directly (without a TurnInput) by turn.go's local
+	// post-Deliver-failure recovery round.
+	OfferDeliveryTools bool `json:"offer_delivery_tools,omitempty"`
 }
 
 // ClassifyRequestInput is ClassifyRequest's only input
@@ -476,6 +489,15 @@ type UserInputRequestWorkflowInput struct {
 	SessionKey   string `json:"session_key,omitempty"`
 	ConnectionID string `json:"connection_id,omitempty"`
 }
+
+// ErrTypeContentTooLong — the Temporal ApplicationError type name Deliver
+// (deliver_discord.go) uses when a final answer doesn't fit in one platform
+// message, and turn.go's deliverConnectionBased checks for to decide whether
+// to run its delivery-recovery round (deliver_reply/deliver_attachment)
+// instead of just losing the response. Shared here (not a local const in
+// either package) since both sides of the activity/workflow boundary need
+// the exact same string.
+const ErrTypeContentTooLong = "ContentTooLong"
 
 type UserInputRequestWorkflowOutput struct {
 	Response UserInputResponse `json:"response"`
