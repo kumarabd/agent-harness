@@ -154,20 +154,12 @@ if [ "$STATUS" != "completed" ] && [ "$STATUS" != "failed" ] && [ "$STATUS" != "
 fi
 echo "root turn status: $STATUS"
 
-# Deliberate (PlanWorkflow) scenario: turn:1 above is just the *planning* turn —
-# it completes fast. The scenario isn't done until every checkpoint turn is
-# terminal (the PlanWorkflow ran them all) and RecordSkill (an ABANDON child)
-# has had a beat to fire. Detected by the checkpoint fixtures the starter wrote.
-if pg_query "SELECT 1 FROM _test_scripted_responses WHERE turn_id LIKE '${ROOT_TURN_ID}:cp:%' LIMIT 1" | grep -q 1; then
-  echo "--- plan detected, waiting for checkpoint turns to finish ---"
-  PLAN_TURNS="(parent_id = '$ROOT_TURN_ID' OR parent_id LIKE '${ROOT_TURN_ID}:%') AND parent_type = 'plan'"
-  for _ in $(seq 1 180); do
-    RUNNING="$(pg_query "SELECT count(*) FROM turns WHERE $PLAN_TURNS AND status = 'running'" || echo 1)"
-    ANY="$(pg_query "SELECT count(*) FROM turns WHERE $PLAN_TURNS" || echo 0)"
-    [ "${RUNNING:-1}" = "0" ] && [ "${ANY:-0}" != "0" ] && break
-    sleep 1
-  done
-  echo "--- checkpoint turns settled ($ANY total), giving RecordSkill a beat ---"
+# A Deliberate turn (top-level or subagent) opens its own task-run and
+# dispatches RecordSkill as an ABANDON child once it completes. If any turn
+# under this scenario carries a plan_id, give that child a beat to fire before
+# the expectations run.
+if pg_query "SELECT 1 FROM turns WHERE (turn_id = '$ROOT_TURN_ID' OR turn_id LIKE '${ROOT_TURN_ID}:%') AND plan_id IS NOT NULL LIMIT 1" | grep -q 1; then
+  echo "--- task-run detected, giving RecordSkill a beat ---"
   sleep 4
 fi
 

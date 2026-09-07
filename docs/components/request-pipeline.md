@@ -1,5 +1,14 @@
 # Component: Request Pipeline
 
+> **PARTIALLY SUPERSEDED (2026-09-07) — see [`turn-pipeline.md`](turn-pipeline.md).**
+> The turn workflow is being reduced to a model-steered reason-act loop. Phase 1
+> removed **step 8** (planning — `PlanWorkflow` / `CheckpointWorkflow` / PLAN.md /
+> `08-planning.md`, all deleted). Steps 2 (`ClassifyRequest`), 3
+> (`RoutingWorkflow`), 4/5/7 (retrieval), and 9 (`prompt.assemble`) still run
+> inside `TurnWorkflow` today but are slated for removal in later phases. Read
+> `turn-pipeline.md` for the target; this doc describes what still runs in the
+> interim.
+
 > STATUS: **BUILT** on branch `proactivity-substrate` (not deployed). The
 > pre-LLM pipeline is: **step 2** request understanding (`ClassifyRequest`),
 > **step 3** routing (`Route` + `RoutingWorkflow` retrieval fan-out), **steps

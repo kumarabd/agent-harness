@@ -22,7 +22,7 @@ import json
 import logging
 from dataclasses import dataclass
 
-from . import capabilities, ids, lcm, plan
+from . import capabilities, ids, lcm
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,6 @@ async def assemble(
     resolved_tools = capabilities.mint_resolved(staged["tool_rows"]) if not planning else []
     for name, text in (
         ("skills", staged["skills"]),
-        ("plan", await _plan_text(owner)),
         ("capabilities", staged["capabilities"] if planning else None),
         ("memory", staged["memory"]),
     ):
@@ -166,8 +165,3 @@ async def _staged_texts(conn, turn_id: str, plan_id: str) -> dict[str, object]:
         "capabilities": (_CAPABILITIES_HEADER + "\n".join(f"- {c}" for c in tools)) if tools else None,
         "memory": (_MEMORY_HEADER + "\n".join(f"- {c}" for c in memory)) if memory else None,
     }
-
-
-async def _plan_text(plan_id: str) -> str | None:
-    checkpoints = await plan.read(plan_id)
-    return plan.render_block(checkpoints) or None

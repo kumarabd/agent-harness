@@ -1,5 +1,5 @@
 {
-  "_comment": "REAL-LLM (spends money) — end-to-end plan-and-execute with a real provider. No scripted_model_responses, so dispatch.go classifies for real (a clearly-Deliberate task -> PlanWorkflow), the planning turn makes a real ModelCall that must call propose_plan, plan.seed writes PLAN.md, and the checkpoint turns run real ModelCalls too. Verifies SkillDiscover feeds the planning turn (kind='skill' rows under the plan_id), prompt.assemble builds a real prompt, and the plan drives to completion. Run manually: run_scenario.sh real-llm-pipeline. Expensive: 1 planning call + one call per checkpoint.",
+  "_comment": "REAL-LLM (spends money) — end-to-end flat reason-act loop with a real provider. No scripted_model_responses, so ClassifyRequest classifies for real (a clearly-Deliberate task), RoutingWorkflow stages real memory/skill/tool retrieval under the turn id, prompt.assemble builds a real prompt, and the turn runs a real multi-iteration ModelCall loop to completion. At turn end dispatchRecordSkill fires over the trajectory. Run manually: run_scenario.sh real-llm-pipeline.",
   "message": {
     "role": "user",
     "content": "There's a flaky integration test in this repo that fails about one run in five. Track down why it's flaky and make it deterministic."

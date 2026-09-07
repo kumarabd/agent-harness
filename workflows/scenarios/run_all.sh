@@ -89,8 +89,6 @@ SCENARIOS=(
   lcm-grep-nested-fold
   anthropic-basic
   lite-simple-task
-  plan-lifecycle
-  plan-checkpoint-revise
   subagent-spawn
   spawn-subagent-nested-valid
   spawn-subagent-nested-rejected

@@ -1,8 +1,15 @@
 # Component: Lane Model
 
+> **SUPERSEDED IN PROGRESS (2026-09-07) — see [`turn-pipeline.md`](turn-pipeline.md).**
+> Phase 1 removed `PlanWorkflow`: a Deliberate turn is now a flat `TurnWorkflow`
+> that opens a task-run against its own turn id (skill retrieval + `RecordSkill`
+> unchanged). `laneIsDeliberate` + `RoutingWorkflow` still run inside the turn;
+> both are slated for removal in a later phase, at which point this doc is
+> deleted.
+
 > STATUS: BUILT. `routing.go` `laneIsDeliberate(taskRep)` is the single source
-> of truth for the lane split — `Route()` delegates to it, and `dispatch.go`
-> uses it to decide `PlanWorkflow` vs plain `TurnWorkflow`. `record.py` gate is
+> of truth for the lane split — `Route()` delegates to it, and (post-Phase-1)
+> `turn.go` uses it to decide whether to open a task-run. `record.py` gate is
 > `intent ∈ {task, question}` + `complexity ∈ {moderate, complex}`.
 >
 > Names the two request lanes: **Lite** (memory-only retrieval, or nothing for
