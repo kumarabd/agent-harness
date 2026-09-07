@@ -304,12 +304,19 @@ type ToolCallRef struct {
 	Tool   string `json:"tool,omitempty"`
 }
 
-// ModelCallOutput is ModelCall's only output — refs and usage, never content
-// or arguments.
+// ModelCallOutput is ModelCall's only output — refs and control metadata, never
+// content or arguments.
 type ModelCallOutput struct {
-	HasToolCalls bool          `json:"has_tool_calls"`
-	ToolCalls    []ToolCallRef `json:"tool_calls"`
-	Usage        Usage         `json:"usage"`
+	// Status — docs/components/turn-pipeline.md's output schema. The model's
+	// declared turn lifecycle: "working" (the loop continues), "done" (deliver
+	// the final response + terminate), "blocked" (parked on a user-input
+	// request — handled in a later phase; for now runs as "working"). The one
+	// field turn.go branches on for termination. Synthesized by ModelCall from
+	// tool-call presence ("done" ⟺ no tool calls this step) until the model
+	// authors it directly in a later phase.
+	Status    string        `json:"status"`
+	ToolCalls []ToolCallRef `json:"tool_calls"`
+	Usage     Usage         `json:"usage"`
 	// docs/components/context-slot.md — the assembled context's estimated
 	// size, computed fresh in Python each call (lcm.py's estimate_tokens)
 	// since this workflow can't accumulate it itself across separate
@@ -320,11 +327,22 @@ type ModelCallOutput struct {
 	// letting the compression threshold below be a fraction of it instead
 	// of a fixed constant.
 	ContextWindow int `json:"context_window"`
-	// docs/components/model-registry.md, "Resolved: Selection Mechanism" —
-	// this step's self-declared hint for the next step, copied verbatim
-	// into the next ModelCallInput. This workflow never interprets these.
-	NextHintModality string `json:"next_hint_modality"`
-	NextHintTier     string `json:"next_hint_tier"`
+	// NextStep — docs/components/turn-pipeline.md. The model's note-to-self plus
+	// the model it wants for the next step. Advisory: turn.go copies
+	// Modality/Tier into the next ModelCallInput and logs the rest. nil is a
+	// valid value (no hint). Synthesized from the previous declare_next_step_hint
+	// mechanism until the model authors it directly.
+	NextStep *NextStep `json:"next_step,omitempty"`
+}
+
+// NextStep is ModelCallOutput.NextStep — the model's advisory hint about what its
+// next reasoning step needs. EstRemainingSteps feeds a later phase's
+// iteration-ceiling negotiation; unused for now.
+type NextStep struct {
+	Note              string `json:"note,omitempty"`
+	Modality          string `json:"modality,omitempty"`
+	Tier              string `json:"tier,omitempty"`
+	EstRemainingSteps int    `json:"est_remaining_steps,omitempty"`
 }
 
 // ToolCallInput is ToolCall's only input — it reads its own arguments from

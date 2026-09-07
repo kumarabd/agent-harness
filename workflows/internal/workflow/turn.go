@@ -365,7 +365,7 @@ func runDiscordDeliveryRecovery(ctx workflow.Context, turnID, connectionID strin
 			logger.Warn("delivery recovery: ModelCall failed", "turn_id", turnID, "round", round, "error", err)
 			return
 		}
-		if !mcOut.HasToolCalls {
+		if len(mcOut.ToolCalls) == 0 {
 			break
 		}
 		for _, tc := range mcOut.ToolCalls {
@@ -872,7 +872,9 @@ loop:
 			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, mcErr, interrupts, planID)
 		}
 		contextSeq++
-		hintModality, hintTier = mcOut.NextHintModality, mcOut.NextHintTier
+		if mcOut.NextStep != nil {
+			hintModality, hintTier = mcOut.NextStep.Modality, mcOut.NextStep.Tier
+		}
 		cumulativeTokens += mcOut.Usage.InputTokens + mcOut.Usage.OutputTokens
 		metrics.WithTags(map[string]string{"direction": "input"}).Counter("model_call_tokens_total").Inc(int64(mcOut.Usage.InputTokens))
 		metrics.WithTags(map[string]string{"direction": "output"}).Counter("model_call_tokens_total").Inc(int64(mcOut.Usage.OutputTokens))
@@ -939,10 +941,35 @@ loop:
 			_ = childFuture.GetChildWorkflowExecution().Get(cctx, nil)
 		}
 
-		if !mcOut.HasToolCalls {
+		// --- Stop / continue on the model's declared status
+		// (docs/components/turn-pipeline.md's output schema). This phase
+		// synthesizes status from tool-call presence; a later phase makes the
+		// model author it.
+		if mcOut.Status == "done" {
+			// A follow-up that landed before this boundary makes the model's
+			// "done" stale — fold it in and keep looping rather than ending on
+			// input the model hadn't seen.
+			if len(pendingMessages) > 0 {
+				nextMsg := pendingMessages[0]
+				pendingMessages = pendingMessages[1:]
+				ictx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
+				if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: input.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
+					cancel()
+					return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, planID)
+				}
+				cancel()
+				continue
+			}
 			stopReason = "no_tool_calls"
 			cancel()
 			break
+		}
+		// "working" (or "blocked", until a later phase handles parking): no tool
+		// calls this step means the model is still reasoning — loop again; the
+		// iteration / retry / budget ceilings bound it.
+		if len(mcOut.ToolCalls) == 0 {
+			cancel()
+			continue
 		}
 
 		// --- Act: parallel fan-out over this reasoning step's tool calls ---

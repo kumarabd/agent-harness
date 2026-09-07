@@ -194,8 +194,25 @@ class ToolCallRef:
 
 
 @dataclass
+class NextStep:
+    """docs/components/turn-pipeline.md — the model's advisory hint about what its
+    next reasoning step needs. `est_remaining_steps` feeds a later phase's
+    iteration-ceiling negotiation; unused for now."""
+
+    note: str = ""
+    modality: str = ""
+    tier: str = ""
+    est_remaining_steps: int = 0
+
+
+@dataclass
 class ModelCallOutput:
-    has_tool_calls: bool = False
+    # docs/components/turn-pipeline.md — the model's declared turn lifecycle:
+    # "working" (loop continues), "done" (deliver + terminate), "blocked"
+    # (parked — a later phase). The one field turn.go branches on for
+    # termination. Synthesized from tool-call presence until the model authors
+    # it directly.
+    status: str = "working"
     tool_calls: list[ToolCallRef] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     # docs/components/context-slot.md — the assembled context's estimated
@@ -208,11 +225,10 @@ class ModelCallOutput:
     # so the workflow can size the compression threshold as a fraction of
     # it instead of a fixed constant.
     context_window: int = 0
-    # docs/components/model-registry.md, "Resolved: Selection Mechanism" —
-    # this step's self-declared hint for the NEXT step. Threaded back into
-    # the next ModelCallInput unmodified by the workflow.
-    next_hint_modality: str = "language"
-    next_hint_tier: str = "medium"
+    # docs/components/turn-pipeline.md — the model's note-to-self + self-selected
+    # model for the next step. turn.go copies modality/tier into the next
+    # ModelCallInput. None is valid.
+    next_step: NextStep | None = None
 
 
 @dataclass
