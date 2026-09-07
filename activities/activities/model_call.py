@@ -28,7 +28,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from . import ids, llm, llm_client, model_registry, permissions
-from .types import ModelCallInput, ModelCallOutput, ToolCallRef, Usage
+from .types import ModelCallInput, ModelCallOutput, NextStep, ToolCallRef, Usage
 
 logger = logging.getLogger(__name__)
 
@@ -375,28 +375,20 @@ class ModelCallActivity:
                     )
 
             return ModelCallOutput(
-                # Deliberately len(raw_tool_calls), not len(refs) — turn.go's
-                # only consumer of this field stops the whole turn/subagent
-                # the moment it's False ("no_tool_calls" stop reason). A
-                # recursion-guard rejection (this file's own
-                # _validate_subagent_delegation branch above) removes a call
-                # from refs without the model ever attempting anything else,
-                # so len(refs) alone would have silently ended the turn right
-                # there — the model would never get to see the rejection
-                # message and react to it (e.g. "perform the work directly
-                # instead," the paper's own stated intent), even though the
-                # rejection is durably recorded in tool_calls either way. Any
-                # tool call the model attempted this step, dispatched or not,
-                # should keep the loop going for one more reasoning step;
-                # "no_tool_calls" should mean literally none were attempted,
-                # not "none survived validation."
-                has_tool_calls=len(raw_tool_calls) > 0,
+                # status is synthesized from tool-call presence until a later
+                # phase makes the model author it. Deliberately len(raw_tool_calls),
+                # not len(refs) — a recursion-guard rejection (this file's own
+                # _validate_subagent_delegation branch above) removes a call from
+                # refs while raw_tool_calls stays non-empty; that must keep the
+                # loop going ("working") so the model sees the rejection
+                # observation and reacts, not silently end the turn. "done"
+                # should mean literally no tool calls were attempted.
+                status="done" if not raw_tool_calls else "working",
                 tool_calls=refs,
                 usage=usage,
                 context_tokens=context_tokens,
                 context_window=context_window,
-                next_hint_modality=next_hint_modality,
-                next_hint_tier=next_hint_tier,
+                next_step=NextStep(modality=next_hint_modality, tier=next_hint_tier),
             )
 
     async def _call_model_streaming_with_delivery(self, turn_id: str, conversation: list[dict], provider, model: str, max_tokens: int, tools_schema: list[dict]):
