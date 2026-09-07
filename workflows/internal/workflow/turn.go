@@ -666,8 +666,7 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	iterations := 0
 	retries := 0
 	cumulativeTokens := 0
-	needsApproval := false // planning turn: propose_plan asked for user approval (rides out on TurnResult)
-	contextSeq := 0        // ModelCall's own call-index for fixture lookup — distinct from messages.seq, which activities compute themselves
+	contextSeq := 0 // ModelCall's own call-index for fixture lookup — distinct from messages.seq, which activities compute themselves
 	// docs/components/model-registry.md, "Resolved: Selection Mechanism" —
 	// empty on the first iteration for a plain turn (bootstrap default
 	// supplied Python-side by model_registry.default_hint(), not duplicated
@@ -768,36 +767,34 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, "")
 		}
 	}
-	logger.Info("request classified", "turn_id", input.TurnID, "parent_type", input.ParentType, "intent", taskRep.Intent, "complexity", taskRep.Complexity, "confidence", taskRep.Confidence, "planning", input.PlanningMode)
+	logger.Info("request classified", "turn_id", input.TurnID, "parent_type", input.ParentType, "intent", taskRep.Intent, "complexity", taskRep.Complexity, "confidence", taskRep.Confidence)
 
-	// --- Task-run resolution. The dispatch helper (dispatch.go) already ran the
-	// front-door router for a top-level message; a planning / checkpoint turn
-	// carries its plan id. Only a subagent reaches here unresolved: a Deliberate
-	// subagent becomes its own single-turn task-run (plan id == its turn id),
-	// recorded at turn end; a Lite one just runs the loop.
+	// --- Task-run resolution. A Deliberate turn (top-level or subagent) becomes
+	// its own single-turn task-run — plan id == its own turn id — which scopes
+	// skill retrieval and the end-of-turn RecordSkill. A Lite / conversational
+	// turn just runs the loop.
 	parentTurnID := ""
 	if input.ParentType == "turn" {
 		parentTurnID = input.ParentID
 	}
 	planID := input.PlanID
 	openedFresh := false
-	if planID == "" && input.ParentType == "turn" && laneIsDeliberate(taskRep) {
+	if planID == "" && laneIsDeliberate(taskRep) {
 		planID = input.TurnID
 		openedFresh = true
 	}
-	logger.Info("task-run resolved", "turn_id", input.TurnID, "plan_id", planID, "planning", input.PlanningMode)
+	logger.Info("task-run resolved", "turn_id", input.TurnID, "plan_id", planID)
 
 	// --- Step 3: routing + retrieval orchestration
 	// (docs/components/request-pipeline/03-routing.md). Every non-conversational
-	// turn runs memory + tool discovery fresh for THIS turn. A planning turn (or
-	// a Deliberate subagent's fresh run) additionally stages skills under the
-	// plan id: pass seedPlanID so RoutingWorkflow does that. A checkpoint turn,
-	// a continuation, or a Lite turn passes "" — memory + tools only.
+	// turn runs memory + tool discovery fresh for THIS turn. A Deliberate turn
+	// (openedFresh) additionally stages skills under its own turn id: pass
+	// seedPlanID so RoutingWorkflow does that. A Lite turn passes "" — memory +
+	// tools only.
 	if taskRep.Intent != "conversational" {
-		// seedPlanID != "" ⇒ RoutingWorkflow also runs SkillDiscover under it
-		// (feeds the planning turn's prompt).
+		// seedPlanID != "" ⇒ RoutingWorkflow also runs SkillDiscover under it.
 		seedPlanID := ""
-		if input.PlanningMode || openedFresh {
+		if openedFresh {
 			seedPlanID = planID
 		}
 		if _, err := startRouting(ctx, seedPlanID, input.TurnID, parentTurnID, taskRep, &pendingMessages); err != nil {
@@ -849,8 +846,6 @@ loop:
 			// first call's tier (when HintTier is empty). Zero value for
 			// subagents; harmless to pass every iteration.
 			Complexity:         taskRep.Complexity,
-			PlanningMode:       input.PlanningMode,
-			PlanHandling:       input.PlanHandling,
 			OfferDeliveryTools: input.OfferDeliveryTools,
 		}
 		mcFuture := workflow.ExecuteActivity(mctx, "ModelCall", modelInput)
@@ -878,11 +873,6 @@ loop:
 		}
 		contextSeq++
 		hintModality, hintTier = mcOut.NextHintModality, mcOut.NextHintTier
-		// A planning turn's one call carries propose_plan's needs_approval —
-		// ride it out on TurnResult for PlanWorkflow's approval gate.
-		if mcOut.NeedsApproval {
-			needsApproval = true
-		}
 		cumulativeTokens += mcOut.Usage.InputTokens + mcOut.Usage.OutputTokens
 		metrics.WithTags(map[string]string{"direction": "input"}).Counter("model_call_tokens_total").Inc(int64(mcOut.Usage.InputTokens))
 		metrics.WithTags(map[string]string{"direction": "output"}).Counter("model_call_tokens_total").Inc(int64(mcOut.Usage.OutputTokens))
@@ -947,15 +937,6 @@ loop:
 			cctx := workflow.WithChildOptions(ctx, cwo)
 			childFuture := workflow.ExecuteChildWorkflow(cctx, CompressContextWorkflow, input.TurnID)
 			_ = childFuture.GetChildWorkflowExecution().Get(cctx, nil)
-		}
-
-		// The planning turn is one shot: the model drafts the plan by calling
-		// `propose_plan` (peeled by ModelCall to write PLAN.md, so it doesn't
-		// count toward HasToolCalls). The PlanWorkflow reads PLAN.md next.
-		if input.PlanningMode {
-			stopReason = "planned"
-			cancel()
-			break
 		}
 
 		if !mcOut.HasToolCalls {
@@ -1180,23 +1161,11 @@ loop:
 		}
 	}
 
-	// A turn under a PlanWorkflow (planning / checkpoint / handling) never
-	// records — the PlanWorkflow owns that, once, at the end of the run. It also
-	// delivers the final answer itself.
-	if input.ParentType == "plan" {
-		logger.Info("turn workflow complete (under plan)", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "needs_approval", needsApproval)
-		return types.TurnResult{
-			TurnID: input.TurnID, StopReason: stopReason, Iterations: iterations, NeedsApproval: needsApproval,
-			NextHintModality: hintModality, NextHintTier: hintTier,
-		}, nil
-	}
-
-	// --- Recording. A Deliberate subagent is a single-turn task-run: record it
-	// now (record.py re-gates on intent/complexity). A top-level Deliberate task
-	// is a PlanWorkflow — it records itself after every checkpoint, so a plain
-	// TurnWorkflow reaching here (ParentType "session") is Lite and records
-	// nothing.
-	if planID != "" && input.ParentType == "turn" {
+	// --- Recording. A Deliberate turn (top-level or subagent) is its own
+	// single-turn task-run — record its trajectory now (record.py re-gates on
+	// intent/complexity + a clean stop). A Lite / conversational turn has no
+	// planID and records nothing.
+	if planID != "" {
 		dispatchRecordSkill(ctx, planID, taskRep, stopReason, "turn_end")
 	}
 

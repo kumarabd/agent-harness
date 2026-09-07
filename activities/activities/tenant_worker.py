@@ -86,12 +86,6 @@ from temporalio.worker import Worker
 from . import llm_client, shell_hub
 from .metrics import LATENCY_BUCKETS_SECONDS, SECONDS_LATENCY_METRICS
 from .classify import ClassifyRequestActivity
-from .plan_resolve import (
-    MarkCheckpointDoneActivity,
-    NextCheckpointActivity,
-    RenderPlanActivity,
-    ResolveOpenPlanActivity,
-)
 from .skills import seed as skill_seed
 from .skills.record import RecordSkillActivity
 from .compress_context import CompressContextActivity
@@ -174,10 +168,6 @@ async def main() -> None:
         activities=[
             ModelCallActivity(pool, client).__call__,
             ClassifyRequestActivity(pool).__call__,
-            ResolveOpenPlanActivity(pool, client).__call__,
-            NextCheckpointActivity(pool).__call__,
-            RenderPlanActivity(pool).__call__,
-            MarkCheckpointDoneActivity(pool).__call__,
             MemoryRetrieveActivity(pool).__call__,
             ToolDiscoverActivity(pool).__call__,
             SkillDiscoverActivity(pool).__call__,

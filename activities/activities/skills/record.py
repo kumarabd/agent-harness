@@ -29,7 +29,7 @@ import time
 
 from temporalio import activity
 
-from .. import ids, plan
+from .. import ids
 from ..types import RecordSkillInput
 from . import embedding, generalize, store
 from .vectors import cosine
@@ -46,11 +46,10 @@ _SCOPES = ("global",)
 # procedure has no learned cluster_radius yet. Numeric-tuning-deferred.
 _MATCH_RADIUS = 0.82
 
-# Every turn in the run (planning + checkpoints + mid-plan handling) carries
-# turns.plan_id. A nested PlanWorkflow's turn ids all sit under the root's
-# (`<root>:cp:N:sub:...`), so a prefix match sweeps the whole tree — nested
-# plans record nothing of their own (3C-iii, Option A). A Deliberate subagent:
-# its single turn, plan_id unset, so also match turn_id.
+# A Deliberate turn records against its own turn id as the task-run id, written
+# to turns.plan_id by Persist. Its subagent turns sit under it by id prefix
+# (`<turn>:sub:...`), so a prefix match sweeps them in. The final clause covers a
+# turn whose plan_id never got written (older rows / a race) by matching turn_id.
 _TRAJECTORY_FILTER = (
     "(t.plan_id = $1 OR starts_with(t.plan_id, $1 || ':') "
     "OR (t.plan_id IS NULL AND t.turn_id = $1))"
@@ -106,19 +105,18 @@ class RecordSkillActivity:
         total_started = time.monotonic()
 
         # --- 1. gather everything that only needs plan_id, concurrently. Each
-        # runs on its own pooled connection; plan.read is a file read. The
-        # store-wide procedure list is pulled here too so it no longer
-        # serializes behind the first embed inside _match_or_insert.
+        # runs on its own pooled connection. The store-wide procedure list is
+        # pulled here too so it no longer serializes behind the first embed
+        # inside _match_or_insert.
         async def _fetch(sql: str, *args):
             async with self._pool.acquire() as c:
                 return await c.fetch(sql, *args)
 
         reads_started = time.monotonic()
-        messages, tool_calls, skill_rows, checkpoints, procedures = await asyncio.gather(
+        messages, tool_calls, skill_rows, procedures = await asyncio.gather(
             _fetch(_MESSAGES_SQL, plan_id),
             _fetch(_TOOL_CALLS_SQL, plan_id),
             _fetch(_SKILL_ROWS_SQL, plan_id),
-            plan.read(plan_id),
             store.current_procedures(self._pool, _SCOPES),
         )
         _phase("gather_reads", reads_started)
@@ -153,9 +151,6 @@ class RecordSkillActivity:
         )
 
         transcript = _build_transcript(messages, tool_calls)
-        plan_final = plan.render_final(checkpoints)
-        if plan_final:
-            transcript = plan_final + "\n\n" + transcript
 
         embed_started = time.monotonic()
         task_embedding = await embedding.embed(task_text)

@@ -77,17 +77,13 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 		maxTurnSeq = 0
 	}
 	turnSeq := maxTurnSeq
-	// The active unit of work: a plain TurnWorkflow (Lite / conversational) or a
-	// PlanWorkflow (a Deliberate task-run) — dispatchWork decides. workHandle is
-	// nil when we're attached to a PlanWorkflow the coordinator didn't start
-	// (a restart mid-plan); completion then arrives via the PlanDone signal.
+	// The active unit of work: one TurnWorkflow (startTurn starts it, we hold its
+	// future). nil / not-active between turns.
 	var workHandle workflow.ChildWorkflowFuture
 	var workID string
-	var workKind WorkKind
 	workActive := false
 
 	signalChan := workflow.GetSignalChannel(ctx, NewMessageSignalName)
-	planDoneChan := workflow.GetSignalChannel(ctx, PlanDoneSignalName)
 	var pendingSignal *types.SignalPayload
 	haveSignal := false
 
@@ -123,46 +119,32 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			pendingWake = &w
 			haveWake = true
 		})
-		// PlanDone: a root PlanWorkflow finished its task-run. Clears the guard
-		// even when we hold no handle for it (attached after a restart).
-		sel.AddReceive(planDoneChan, func(c workflow.ReceiveChannel, _ bool) {
-			var planID string
-			c.Receive(ctx, &planID)
-			if workKind == WorkPlan {
-				logger.Info("plan workflow reported done", "plan_id", planID)
+		if workActive {
+			sel.AddFuture(workHandle, func(f workflow.Future) {
+				var result types.TurnResult
+				err := f.Get(ctx, &result)
+				if err != nil {
+					logger.Error("turn workflow ended with error", "turn_id", workID, "error", err)
+				} else {
+					logger.Info("turn workflow completed", "turn_id", workID, "stop_reason", result.StopReason)
+				}
 				workActive = false
 				workID = ""
 				workHandle = nil
-			}
-		})
-		if workActive {
-			if workHandle != nil {
-				sel.AddFuture(workHandle, func(f workflow.Future) {
-					var result types.TurnResult
-					err := f.Get(ctx, &result)
-					if err != nil {
-						logger.Error("work workflow ended with error", "work_id", workID, "kind", workKind, "error", err)
-					} else {
-						logger.Info("work workflow completed", "work_id", workID, "kind", workKind, "stop_reason", result.StopReason)
-					}
-					workActive = false
-					workID = ""
-					workHandle = nil
-					// docs/components/gateway/discord-voice.md's "Resolved:
-					// Overlapping Speech / Interrupts" gap, closed 2026-08-25:
-					// a signal that arrived while this turn's connection-based
-					// delivery was still in flight got cancelled and handed
-					// back here (TurnWorkflow's own signal-drain queue is
-					// gone along with that execution) rather than lost.
-					// Treated exactly like a freshly-arrived signal — the very
-					// next loop iteration starts a brand-new turn with it, the
-					// same path an ordinary NewMessage signal already takes.
-					if result.InterruptedDuringDelivery != nil {
-						pendingSignal = result.InterruptedDuringDelivery
-						haveSignal = true
-					}
-				})
-			}
+				// docs/components/gateway/discord-voice.md's "Resolved:
+				// Overlapping Speech / Interrupts" gap, closed 2026-08-25:
+				// a signal that arrived while this turn's connection-based
+				// delivery was still in flight got cancelled and handed
+				// back here (TurnWorkflow's own signal-drain queue is
+				// gone along with that execution) rather than lost.
+				// Treated exactly like a freshly-arrived signal — the very
+				// next loop iteration starts a brand-new turn with it, the
+				// same path an ordinary NewMessage signal already takes.
+				if result.InterruptedDuringDelivery != nil {
+					pendingSignal = result.InterruptedDuringDelivery
+					haveSignal = true
+				}
+			})
 		} else {
 			sel.AddFuture(idleTimer, func(f workflow.Future) {
 				// no-op callback; presence in the selector is what lets the
@@ -199,10 +181,6 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			wmFuture := workflow.ExecuteChildWorkflow(wcctx, WriteMemoryWorkflow, input.SessionKey)
 			_ = wmFuture.GetChildWorkflowExecution().Get(wcctx, nil)
 
-			// No episode-close sweep any more (decision B — no `episodes` table):
-			// a PlanWorkflow that's still running when the coordinator idles
-			// keeps going under ABANDON and records itself when it finishes.
-
 			return nil
 		}
 
@@ -230,12 +208,12 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			}
 
 			turnSeq++
-			res, err := dispatchWork(ctx, input.SessionKey, input.ConnectionID, turnSeq, payload.Message, "user")
+			h, id, err := startTurn(ctx, input.SessionKey, input.ConnectionID, turnSeq, payload.Message, "user")
 			if err != nil {
-				logger.Error("dispatchWork failed", "session_key", input.SessionKey, "error", err)
+				logger.Error("startTurn failed", "session_key", input.SessionKey, "error", err)
 				continue
 			}
-			workHandle, workID, workKind = applyWork(ctx, res, &payload)
+			workHandle, workID = h, id
 			workActive = true
 			continue
 		}
@@ -257,29 +235,15 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 		}
 
 		turnSeq++
-		res, err := dispatchWork(ctx, input.SessionKey, input.ConnectionID, turnSeq,
+		h, id, err := startTurn(ctx, input.SessionKey, input.ConnectionID, turnSeq,
 			types.Message{Role: "user", Content: proactiveSeedText(wake)}, "intn:"+wake.IntentionID)
 		if err != nil {
-			logger.Error("dispatchWork (proactive) failed", "intention_id", wake.IntentionID, "error", err)
+			logger.Error("startTurn (proactive) failed", "intention_id", wake.IntentionID, "error", err)
 			continue
 		}
-		workHandle, workID, workKind = applyWork(ctx, res, nil)
+		workHandle, workID = h, id
 		workActive = true
 	}
-}
-
-// applyWork maps a dispatchWork decision onto the coordinator's tracking vars.
-// For WorkAttach (a follow-up to a PlanWorkflow the coordinator isn't holding a
-// handle for — e.g. after a mid-plan restart), it forwards the message and
-// returns a nil handle: completion then arrives via the PlanDone signal.
-func applyWork(ctx workflow.Context, res WorkResult, payload *types.SignalPayload) (workflow.ChildWorkflowFuture, string, WorkKind) {
-	if res.Kind == WorkAttach {
-		if payload != nil {
-			_ = workflow.SignalExternalWorkflow(ctx, res.WorkflowID, "", NewMessageSignalName, *payload).Get(ctx, nil)
-		}
-		return nil, res.WorkflowID, WorkPlan
-	}
-	return res.Handle, res.WorkflowID, res.Kind
 }
 
 // proactiveSeedText builds the seed "user" message (ClassifyRequest requires

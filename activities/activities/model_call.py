@@ -27,7 +27,7 @@ import time
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from . import ids, llm, llm_client, model_registry, permissions, plan
+from . import ids, llm, llm_client, model_registry, permissions
 from .types import ModelCallInput, ModelCallOutput, ToolCallRef, Usage
 
 logger = logging.getLogger(__name__)
@@ -152,15 +152,7 @@ class ModelCallActivity:
                     "SELECT system_prompt, platform FROM sessions WHERE session_key = $1",
                     ids.session_key_of(input.turn_id),
                 )
-                # docs/components/request-pipeline/08-planning.md — a planning
-                # turn under a PlanWorkflow drafts the checkpoint plan and does
-                # nothing else, so it gets its own system prompt (and, below, a
-                # propose_plan-only tool schema) regardless of the session's
-                # configured prompt.
-                if input.planning_mode:
-                    system_prompt = llm.PLANNING_SYSTEM_PROMPT
-                else:
-                    system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
+                system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
                 platform = session_row["platform"] if session_row else None
                 # prompt_assemble_latency_seconds — step 9 (docs/components/
                 # request-pipeline/09-prompt-assembly.md). Only the real path
@@ -169,52 +161,20 @@ class ModelCallActivity:
                 # near-zero ModelCall and this cost stayed invisible. Bucketed
                 # in seconds (metrics.SECONDS_LATENCY_METRICS).
                 assemble_started = time.monotonic()
-                # `resolved` (docs/components/tool-registry.md, "Resolved:
-                # Three-Layer Tool Taxonomy & Per-Task Resolution") is always
-                # [] when planning_mode — that turn gets a reference catalog
-                # in-prompt instead of callable schemas (prompt.assemble).
                 conversation, context_tokens, resolved = await llm.build_conversation(
                     conn, input.turn_id, input.plan_id, system_prompt, context_window,
-                    planning=input.planning_mode,
+                    planning=False,
                 )
                 resolved_by_name = {c.name: c for c in resolved}
                 activity.metric_meter().create_histogram_float(
                     "prompt_assemble_latency_seconds", unit="s"
                 ).record(time.monotonic() - assemble_started)
 
-                # docs/components/context-slot.md's Memory-Access Tools —
-                # lcm_expand's schema-level subagent-only restriction needs
-                # to know which kind of turn this is; caller_is_subagent
-                # (computed once, above, shared with the fixture path and
-                # the recursion-termination guard) already answers that.
-                # A checkpoint turn: under a plan, not planning / handling, not a
-                # subagent — it's the one turn kind that should see checkpoint_done.
-                #
-                # Real bug found 2026-09-06: plan_workflow.go's plan-presentation
-                # turn (runPlanPresentationTurn) sets plan_id (so prompt.assemble
-                # splices in the current PLAN.md) but is NOT executing a
-                # checkpoint — before this fix it still satisfied every other
-                # condition here and got misclassified as TurnKind.CHECKPOINT,
-                # wrongly offered checkpoint_done, and — since may_plan is False
-                # for a non-planning/non-plan_handling turn — a stray
-                # checkpoint_done call from it would have been applied straight
-                # against the real plan ledger below. offer_delivery_tools is
-                # only ever set on a turn built specifically to deliver
-                # something (this presentation turn, turn.go's delivery-recovery
-                # round), never a real checkpoint execution, so it's the correct
-                # signal to exclude on here rather than adding a new flag.
-                is_checkpoint = bool(
-                    input.plan_id
-                    and not input.planning_mode
-                    and not input.plan_handling
-                    and not input.offer_delivery_tools
-                    and not caller_is_subagent
-                )
                 tools_schema = llm.tools_schema_for(
                     caller_is_subagent,
-                    planning=input.planning_mode,
-                    plan_handling=input.plan_handling,
-                    checkpoint=is_checkpoint,
+                    planning=False,
+                    plan_handling=False,
+                    checkpoint=False,
                     resolved=resolved,
                     offer_delivery_tools=input.offer_delivery_tools,
                 )
@@ -263,70 +223,12 @@ class ModelCallActivity:
                 content, raw_tool_calls, usage = real.content, real.raw_tool_calls, real.usage
                 next_hint_modality, next_hint_tier = real.next_hint_modality, real.next_hint_tier
 
-            # docs/components/request-pipeline/08-planning.md (Phase 3C,
-            # plan-and-execute) — peel the plan meta-tools out of the response
-            # the same way the providers already strip declare_next_step_hint:
-            # they carry no work of their own, never become tool_calls rows, and
-            # don't count toward has_tool_calls. Applied in their own
-            # transaction, before the message/tool_calls write below, so a
-            # plan-bookkeeping failure can't poison that write.
-            #
-            # Both meta-tools are peeled whenever a plan is in play, regardless
-            # of turn mode — so a stray call never falls through to become a
-            # real tool_calls row that turn.go would try to dispatch. What's
-            # *applied* is mode-gated:
-            #   - planning turn (planning_mode) or mid-plan follow-up
-            #     (plan_handling): apply `propose_plan` → seed PLAN.md (seed()
-            #     merges, so a re-plan keeps completed checkpoints). A
-            #     propose_plan-only planning response ends the turn
-            #     ("no_tool_calls") and PlanWorkflow walks the ledger. On the
-            #     planning turn, propose_plan's `needs_approval` rides back out
-            #     on ModelCallOutput → TurnResult → PlanWorkflow's approval gate.
-            #   - checkpoint turn (neither flag): apply `checkpoint_done` → mark
-            #     that checkpoint (and optionally replace the pending tail).
-            plan_meta_n = 0
-            needs_approval_out = False
-            if input.plan_id:
-                proposal, raw_tool_calls = plan.split_propose_plan(raw_tool_calls)
-                done_calls, raw_tool_calls = plan.split_checkpoint_done(raw_tool_calls)
-                may_plan = input.planning_mode or input.plan_handling
-                if proposal and may_plan:
-                    plan_meta_n += len(proposal["checkpoints"])
-                    needs_approval_out = proposal["needs_approval"] and input.planning_mode
-                    try:
-                        async with conn.transaction():
-                            seeded = await plan.seed(input.plan_id, proposal["checkpoints"])
-                        logger.info(
-                            "ModelCall[%s:%d]: seeded plan with %d checkpoint(s) (needs_approval=%s)",
-                            input.turn_id, input.context_seq, seeded, needs_approval_out,
-                        )
-                    except Exception:  # noqa: BLE001 - best-effort plan bookkeeping
-                        logger.warning(
-                            "ModelCall[%s:%d]: propose_plan seed failed",
-                            input.turn_id, input.context_seq, exc_info=True,
-                        )
-                if done_calls and not may_plan:
-                    plan_meta_n += len(done_calls)
-                    try:
-                        async with conn.transaction():
-                            applied = await plan.apply_checkpoint_done(input.plan_id, done_calls)
-                        logger.info(
-                            "ModelCall[%s:%d]: applied %d/%d checkpoint_done call(s)",
-                            input.turn_id, input.context_seq, applied, len(done_calls),
-                        )
-                    except Exception:  # noqa: BLE001 - best-effort plan bookkeeping
-                        logger.warning(
-                            "ModelCall[%s:%d]: checkpoint_done apply failed",
-                            input.turn_id, input.context_seq, exc_info=True,
-                        )
-
             logger.info(
-                "ModelCall[%s:%d] -> %r (tool_calls=%d, plan_meta=%d)",
+                "ModelCall[%s:%d] -> %r (tool_calls=%d)",
                 input.turn_id,
                 input.context_seq,
                 content[:60],
                 len(raw_tool_calls),
-                plan_meta_n,
             )
 
             async with conn.transaction():
@@ -495,7 +397,6 @@ class ModelCallActivity:
                 context_window=context_window,
                 next_hint_modality=next_hint_modality,
                 next_hint_tier=next_hint_tier,
-                needs_approval=needs_approval_out,
             )
 
     async def _call_model_streaming_with_delivery(self, turn_id: str, conversation: list[dict], provider, model: str, max_tokens: int, tools_schema: list[dict]):

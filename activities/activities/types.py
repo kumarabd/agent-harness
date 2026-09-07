@@ -59,11 +59,6 @@ class ModelCallInput:
     # turn's FIRST tier from it (empty hint_tier only). Empty for subagents
     # and when step 2 fell back.
     complexity: str = ""
-    planning_mode: bool = False
-    # docs/components/request-pipeline/08-planning.md — a mid-plan follow-up turn:
-    # normal reason-act, but `propose_plan` is offered alongside the regular
-    # tools and peeled the same way planning_mode peels it.
-    plan_handling: bool = False
     # Delivery-in-the-loop (2026-09-06) — offers deliver_reply/deliver_attachment
     # for this one call: turn.go's bounded post-Deliver-failure recovery round,
     # or a plan-presentation turn (plan_workflow.go). Mirrored in types.go's
@@ -166,38 +161,6 @@ class RecordSkillInput:
 
 
 @dataclass
-class ResolveOpenPlanInput:
-    """docs/components/request-pipeline/08-planning.md — dispatch.go asks whether
-    a Deliberate task-run is already in progress for this session and whether
-    this new message continues it."""
-
-    session_key: str = ""
-    turn_id: str = ""
-    task: TaskRepresentation = field(default_factory=TaskRepresentation)
-
-
-@dataclass
-class ResolveOpenPlanResult:
-    plan_id: str = ""
-    should_continue: bool = False
-    supersede: bool = False
-
-
-@dataclass
-class NextCheckpointResult:
-    """The NextCheckpoint activity reads PLAN.md and returns the next
-    non-terminal checkpoint, formatted as the seed message for a checkpoint
-    TurnWorkflow. has_next is False when every checkpoint is terminal."""
-
-    has_next: bool = False
-    checkpoint_id: str = ""
-    seed_text: str = ""
-    # 3C-iii — the planning model flagged this checkpoint as a multi-step
-    # subtask; PlanWorkflow runs it as a nested PlanWorkflow.
-    complex: bool = False
-
-
-@dataclass
 class SubsystemResult:
     """What each retrieval-phase activity returns to RoutingWorkflow — a
     status and the count of rows it staged to turn_retrieval. No content: the
@@ -250,11 +213,6 @@ class ModelCallOutput:
     # the next ModelCallInput unmodified by the workflow.
     next_hint_modality: str = "language"
     next_hint_tier: str = "medium"
-    # docs/components/request-pipeline/08-planning.md — set on a planning turn's
-    # one call when the model's `propose_plan` asked for approval before
-    # execution. A control bool, same category as next_hint_tier; TurnWorkflow
-    # copies it into TurnResult and PlanWorkflow gates on it.
-    needs_approval: bool = False
 
 
 @dataclass
