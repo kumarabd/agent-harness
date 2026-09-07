@@ -135,6 +135,7 @@ func runForNamespace(ctx context.Context, address, namespace, taskQueue string, 
 	w.RegisterWorkflow(wf.UserInputRequestWorkflow)
 	w.RegisterWorkflow(wf.IntentionWorkflow)
 	w.RegisterWorkflow(wf.PlanWorkflow)
+	w.RegisterWorkflow(wf.CheckpointWorkflow)
 
 	log.Printf("loop worker starting: temporal=%q namespace=%q task_queue=%q", address, namespace, taskQueue)
 

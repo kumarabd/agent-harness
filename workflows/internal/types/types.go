@@ -98,6 +98,25 @@ type TurnInput struct {
 	PlanID string `json:"plan_id,omitempty"`
 	// Task: pre-resolved classification, passed through when PlanID is set.
 	Task *TaskRepresentation `json:"task,omitempty"`
+	// HintModality/HintTier seed this turn's FIRST ModelCall hint — normally
+	// every turn starts blank (model_registry.default_hint() picks the
+	// bootstrap tier from Complexity instead). plan_workflow.go's checkpoint
+	// dispatch is the one caller that sets these: propagating the PREVIOUS
+	// turn's own declare_next_step_hint call (planning turn -> cp1, cp1 ->
+	// cp2, ...) forward as the next checkpoint's starting hint. Real, live
+	// bug found 2026-09-07 this replaces: a checkpoint turn's own fresh
+	// ClassifyRequest routinely reads its narrow seed text as "simple"
+	// regardless of what the root task actually was (confirmed live: a
+	// "moderate" task's checkpoint — full tool schema, real conversation
+	// history — kept bootstrapping to the fast tier off that
+	// misclassification and returned genuinely empty completions, 21 rounds
+	// straight). Reusing declare_next_step_hint — a mechanism that already
+	// exists for exactly "what does the next step need" — means no new
+	// ranking/ordering concept has to be invented or kept in sync anywhere;
+	// the model re-assesses this fresh at every step, same as it always has
+	// within one turn's own loop.
+	HintModality string `json:"hint_modality,omitempty"`
+	HintTier     string `json:"hint_tier,omitempty"`
 	// OfferDeliveryTools: this turn's ModelCall calls offer deliver_reply/
 	// deliver_attachment (docs/components/activities-outbound-delivery.md's
 	// model-driven retry philosophy applied to delivery itself) — set by
@@ -130,6 +149,14 @@ type TurnResult struct {
 	// freshly-arrived signal once this turn's future resolves, starting a
 	// new turn with it rather than discarding it.
 	InterruptedDuringDelivery *SignalPayload `json:"interrupted_during_delivery,omitempty"`
+	// NextHintModality/NextHintTier — the turn's own last declare_next_step_hint
+	// call, same "small derived routing signal" category as NeedsApproval, not
+	// content. plan_workflow.go's checkpoint dispatch reads this off the
+	// planning turn's (or the previous checkpoint's) TurnResult and seeds it
+	// forward as the next checkpoint's TurnInput.HintTier — see that field's
+	// own doc comment for the real bug this closes.
+	NextHintModality string `json:"next_hint_modality,omitempty"`
+	NextHintTier     string `json:"next_hint_tier,omitempty"`
 	// NeedsApproval — docs/components/request-pipeline/08-planning.md. Only a
 	// planning turn sets it (from its one ModelCall's propose_plan). PlanWorkflow
 	// reads it off the planning turn's result to decide whether to run the
@@ -603,6 +630,46 @@ type NextCheckpointResult struct {
 	Complex bool `json:"complex,omitempty"`
 }
 
+// CheckpointWorkflowInput/Output — checkpoint_workflow.go. Extracted
+// 2026-09-07 from PlanWorkflow's own loop (real, live bug: a checkpoint
+// turn that ends with no content and no checkpoint_done left the same
+// checkpoint pending forever — NextCheckpoint just re-selected it,
+// identically, until the blunt overall iteration cap gave up and delivered
+// that same empty turn as the plan's final answer; confirmed live, 21
+// identical rounds). CheckpointWorkflow owns "reliably get ONE checkpoint
+// done" as its own unit — sequencing (what's next) stays PlanWorkflow's
+// job, this is retry/escalation policy only, kept out of PlanWorkflow's own
+// loop rather than hand-rolled bookkeeping there. Flat (non-recurse)
+// checkpoints only — a complex checkpoint's nested-PlanWorkflow path has no
+// analogous "made no progress" failure mode (a nested plan's own merge-back
+// always marks its checkpoint done), so PlanWorkflow dispatches that path
+// itself, unchanged.
+type CheckpointWorkflowInput struct {
+	PlanID       string `json:"plan_id"`
+	SessionKey   string `json:"session_key"`
+	ConnectionID string `json:"connection_id,omitempty"`
+	InitiatedBy  string `json:"initiated_by,omitempty"`
+	CpN          int    `json:"cp_n"`            // this checkpoint's ordinal, for turn-id construction only
+	CheckpointID string `json:"checkpoint_id"`   // PLAN.md's own cp id (e.g. "cp1") — verifies progress
+	SeedText     string `json:"seed_text"`
+	// HintModality/HintTier — the starting hint for this checkpoint's first
+	// attempt, normally the previous checkpoint's (or the planning turn's)
+	// own declare_next_step_hint call, propagated forward by PlanWorkflow.
+	// See types.TurnInput.HintTier's own doc comment.
+	HintModality string `json:"hint_modality,omitempty"`
+	HintTier     string `json:"hint_tier,omitempty"`
+}
+
+type CheckpointWorkflowOutput struct {
+	// NextHintModality/NextHintTier — this checkpoint's own final
+	// declare_next_step_hint, for the caller to seed the next checkpoint's
+	// CheckpointWorkflowInput with. Empty if this checkpoint was skipped.
+	NextHintModality string `json:"next_hint_modality,omitempty"`
+	NextHintTier     string `json:"next_hint_tier,omitempty"`
+	// Skipped — every attempt made no progress; the checkpoint was marked
+	// "skipped" (with a note) rather than left pending forever.
+	Skipped bool `json:"skipped,omitempty"`
+}
 
 // FireIntentionInput — FireIntention SignalWithStarts the session coordinator
 // with a WakePayload built from this.

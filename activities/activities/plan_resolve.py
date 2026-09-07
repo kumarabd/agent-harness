@@ -143,10 +143,16 @@ class MarkCheckpointDoneActivity:
         self._pool = pool  # unused (PLAN.md is on the PV)
 
     @activity.defn(name="MarkCheckpointDone")
-    async def __call__(self, plan_id: str, checkpoint_id: str) -> int:
-        """3C-iii merge-back: a nested PlanWorkflow finished the checkpoint that
-        spawned it, so mark it done on the *parent* ledger. The nested plan does
-        no checkpoint_done of its own."""
-        return await plan.apply_checkpoint_done(
-            plan_id, [{"checkpoint_id": checkpoint_id, "status": "done"}]
-        )
+    async def __call__(self, plan_id: str, checkpoint_id: str, status: str = "done", note: str = "") -> int:
+        """3C-iii merge-back (status="done", the default): a nested PlanWorkflow
+        finished the checkpoint that spawned it, so mark it done on the *parent*
+        ledger — the nested plan does no checkpoint_done of its own.
+
+        Also used by checkpoint_workflow.go with status="skipped" when a
+        checkpoint made no progress after a retry — same terminal-mark
+        mechanism, just called directly by the workflow instead of peeled out
+        of a model's own checkpoint_done tool call."""
+        call = {"checkpoint_id": checkpoint_id, "status": status}
+        if note:
+            call["note"] = note
+        return await plan.apply_checkpoint_done(plan_id, [call])

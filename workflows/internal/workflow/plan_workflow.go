@@ -41,11 +41,13 @@ const maxPlanDepth = 2
 //  2. Approval gate (root only) — if the planning turn's result carries
 //     NeedsApproval, park on a UserInputRequestWorkflow until the user approves
 //     / revises / rejects. Auto-proceed otherwise.
-//  3. Execution loop — at each checkpoint boundary: fold in any mid-plan
-//     follow-up, then NextCheckpoint → a flat checkpoint TurnWorkflow (marks
-//     itself terminal via `checkpoint_done`) OR, for a `complex` checkpoint, a
-//     nested PlanWorkflow (this workflow marks the checkpoint done on its
-//     return). Repeat until all terminal, `abandon`, or the checkpoint cap.
+//  3. Execution loop — pure sequencing: fold in any mid-plan follow-up, then
+//     NextCheckpoint → dispatchCheckpoint, either a CheckpointWorkflow child
+//     (flat checkpoint — owns reliably getting it done, retry/escalation
+//     included, as its own unit; see that workflow's doc comment) or, for a
+//     `complex` checkpoint, a nested PlanWorkflow (this workflow marks the
+//     checkpoint done on its return). Repeat until all terminal, `abandon`,
+//     or the checkpoint cap.
 //  4. Close — root: dispatch RecordSkill over the whole tree + signal the
 //     coordinator (PlanDone). Nested: just return (the parent is waiting).
 func PlanWorkflow(ctx workflow.Context, input types.PlanWorkflowInput) error {
@@ -133,6 +135,13 @@ func PlanWorkflow(ctx workflow.Context, input types.PlanWorkflowInput) error {
 	// --- 3. execution loop ---------------------------------------------
 	cpN := 0
 	handlingN := 0
+	// lastHintModality/lastHintTier — the planning turn's own
+	// declare_next_step_hint call already declared what its next step (cp1)
+	// needs; each checkpoint after that does the same for the one following
+	// it (CheckpointWorkflow's own output). Retry/escalation policy for a
+	// checkpoint that makes no progress lives entirely in CheckpointWorkflow
+	// now — see its own doc comment; this loop stays pure sequencing.
+	lastHintModality, lastHintTier := planRes.NextHintModality, planRes.NextHintTier
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -157,9 +166,11 @@ func PlanWorkflow(ctx workflow.Context, input types.PlanWorkflowInput) error {
 		}
 
 		cpN++
-		if err := runCheckpoint(ctx, input, cpN, next, task, pending, &abandoned, wakeCh); err != nil {
+		nextHintModality, nextHintTier, err := dispatchCheckpoint(ctx, input, cpN, next, task, lastHintModality, lastHintTier, pending, &abandoned, wakeCh)
+		if err != nil {
 			return err
 		}
+		lastHintModality, lastHintTier = nextHintModality, nextHintTier
 
 		if cpN > maxIterations {
 			logger.Error("plan exceeded checkpoint cap", "plan_id", input.PlanID)
@@ -174,39 +185,60 @@ func PlanWorkflow(ctx workflow.Context, input types.PlanWorkflowInput) error {
 	return nil
 }
 
-// runCheckpoint runs one checkpoint — a flat TurnWorkflow, or (if the planning
-// model flagged it `complex` and we're under the depth cap) a nested
-// PlanWorkflow whose completion this function marks the checkpoint done for.
-func runCheckpoint(
+// dispatchCheckpoint runs one checkpoint — a CheckpointWorkflow child (flat
+// case: reliably gets it done, retrying/escalating/giving-up as its own
+// concern, see that workflow's doc comment), or, if the planning model
+// flagged it `complex` and we're under the depth cap, a nested PlanWorkflow
+// whose completion this function marks the checkpoint done for. Returns this
+// checkpoint's own final hint for the caller to carry to the next one — the
+// nested-plan path returns empty hints deliberately (a nested plan's own
+// merge-back has no single TurnResult to read one from, so the chain resets
+// there rather than carrying a stale value across an unrelated checkpoint).
+func dispatchCheckpoint(
 	ctx workflow.Context,
 	input types.PlanWorkflowInput,
 	cpN int,
 	next types.NextCheckpointResult,
 	task types.TaskRepresentation,
+	hintModality, hintTier string,
 	pending *[]types.SignalPayload,
 	abandoned *bool,
 	wakeCh workflow.Channel,
-) error {
+) (nextHintModality, nextHintTier string, err error) {
 	logger := workflow.GetLogger(ctx)
 	recurse := next.Complex && input.Depth+1 <= maxPlanDepth
 
 	if !recurse {
-		cpTurnID := fmt.Sprintf("%s:cp:%d", input.PlanID, cpN)
-		cpInput := types.TurnInput{
-			SessionKey:     input.SessionKey,
-			TurnID:         cpTurnID,
-			ParentType:     "plan",
-			ParentID:       input.PlanID,
-			ConnectionID:   input.ConnectionID,
-			InitiatedBy:    "plan",
-			InitialMessage: types.Message{Role: "user", Content: next.SeedText},
-			PlanID:         input.PlanID,
+		cwo := workflow.ChildWorkflowOptions{
+			WorkflowID: fmt.Sprintf("%s:cp:%d", input.PlanID, cpN),
+			// ABANDON, same reasoning as runChildTurn's own doc comment: a
+			// coordinator idle-exit shouldn't tear down an in-progress
+			// checkpoint.
+			ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
+			// Genuine infra failures (the child workflow itself erroring,
+			// not "made no progress" — CheckpointWorkflow's own internal
+			// retry loop handles that case, it's not a workflow error at
+			// all) get Temporal's own bounded retry here, same ceiling this
+			// codebase uses elsewhere for a dispatch-level retry.
+			RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 2},
 		}
-		if _, err := runChildTurn(ctx, cpTurnID, cpInput); err != nil {
-			return fmt.Errorf("checkpoint turn %s: %w", cpTurnID, err)
+		var out types.CheckpointWorkflowOutput
+		err := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(ctx, cwo), CheckpointWorkflow, types.CheckpointWorkflowInput{
+			PlanID:       input.PlanID,
+			SessionKey:   input.SessionKey,
+			ConnectionID: input.ConnectionID,
+			InitiatedBy:  "plan",
+			CpN:          cpN,
+			CheckpointID: next.CheckpointID,
+			SeedText:     next.SeedText,
+			HintModality: hintModality,
+			HintTier:     hintTier,
+		}).Get(ctx, &out)
+		if err != nil {
+			return "", "", fmt.Errorf("checkpoint %s: %w", next.CheckpointID, err)
 		}
-		logger.Info("checkpoint executed (flat)", "plan_id", input.PlanID, "cp", next.CheckpointID, "turn", cpTurnID)
-		return nil // the flat turn marked itself via checkpoint_done
+		logger.Info("checkpoint executed (flat)", "plan_id", input.PlanID, "cp", next.CheckpointID, "skipped", out.Skipped)
+		return out.NextHintModality, out.NextHintTier, nil
 	}
 
 	// Nested plan for a complex checkpoint (3C-iii).
@@ -223,19 +255,19 @@ func runCheckpoint(
 	}
 	interrupted, err := runNestedPlan(ctx, subPlanID, subInput, pending, abandoned, wakeCh)
 	if err != nil {
-		return fmt.Errorf("nested plan %s: %w", subPlanID, err)
+		return "", "", fmt.Errorf("nested plan %s: %w", subPlanID, err)
 	}
 	if interrupted {
 		// Left the checkpoint pending on purpose — the loop folds in the
 		// follow-up (or breaks on abandon) and re-reads the ledger.
 		logger.Info("nested plan interrupted", "plan_id", input.PlanID, "cp", next.CheckpointID)
-		return nil
+		return "", "", nil
 	}
 	// Merge-back: the nested plan has no checkpoint_done of its own.
 	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 3}}
 	_ = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, ao), "MarkCheckpointDone", input.PlanID, next.CheckpointID).Get(ctx, nil)
 	logger.Info("checkpoint executed (nested plan)", "plan_id", input.PlanID, "cp", next.CheckpointID, "sub", subPlanID)
-	return nil
+	return "", "", nil
 }
 
 // runNestedPlan starts a child PlanWorkflow and waits for it, but stays

@@ -669,11 +669,15 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	needsApproval := false // planning turn: propose_plan asked for user approval (rides out on TurnResult)
 	contextSeq := 0        // ModelCall's own call-index for fixture lookup — distinct from messages.seq, which activities compute themselves
 	// docs/components/model-registry.md, "Resolved: Selection Mechanism" —
-	// empty on the first iteration (bootstrap default supplied Python-side
-	// by model_registry.default_hint(), not duplicated here), then copied
-	// verbatim from each ModelCallOutput's own next-step hint. This
-	// workflow never interprets these values, just passes them through.
-	hintModality, hintTier := "", ""
+	// empty on the first iteration for a plain turn (bootstrap default
+	// supplied Python-side by model_registry.default_hint(), not duplicated
+	// here), then copied verbatim from each ModelCallOutput's own next-step
+	// hint. This workflow never interprets these values, just passes them
+	// through. Seeded from input.HintModality/HintTier when the caller set
+	// one (plan_workflow.go's checkpoint dispatch, propagating the previous
+	// turn's own declare_next_step_hint forward — see TurnInput.HintTier's
+	// doc comment) — empty for every other caller, unchanged behavior.
+	hintModality, hintTier := input.HintModality, input.HintTier
 
 	// --- Start-of-turn: write the inbound message (or, for a subagent, let
 	// InsertMessage derive its kickoff content from its own tool_calls row)
@@ -1181,7 +1185,10 @@ loop:
 	// delivers the final answer itself.
 	if input.ParentType == "plan" {
 		logger.Info("turn workflow complete (under plan)", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "needs_approval", needsApproval)
-		return types.TurnResult{TurnID: input.TurnID, StopReason: stopReason, Iterations: iterations, NeedsApproval: needsApproval}, nil
+		return types.TurnResult{
+			TurnID: input.TurnID, StopReason: stopReason, Iterations: iterations, NeedsApproval: needsApproval,
+			NextHintModality: hintModality, NextHintTier: hintTier,
+		}, nil
 	}
 
 	// --- Recording. A Deliberate subagent is a single-turn task-run: record it
