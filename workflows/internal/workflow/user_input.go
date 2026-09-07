@@ -151,7 +151,7 @@ func UserInputRequestWorkflow(ctx workflow.Context, input types.UserInputRequest
 	return out, nil
 }
 
-// connectionInterimDeliveryActivity mirrors connectionDeliveryActivity/
+// connectionInterimDeliveryActivity mirrors deliveryTaskQueue/
 // connectionDeliveryChunkActivity (turn.go) — same literal-lookup-not-a-
 // registry reasoning (two platforms exist today, a third is a one-line
 // addition). A separate lookup, not folded into either existing one:

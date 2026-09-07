@@ -4,7 +4,7 @@ package core
 // Log, "responses aren't conversation-friendly" (real user report: TTS
 // reading "asterisk asterisk" and emoji names aloud). A literal per-platform
 // lookup, not a registry or a flag threaded through the reasoning path —
-// same idiom turn.go's connectionDeliveryActivity already uses for exactly
+// same idiom turn.go's deliveryTaskQueue already uses for exactly
 // this shape of problem ("a literal lookup... adding a third is a one-line
 // change, not a reason to build an abstraction for cases that don't exist
 // yet"). A platform absent from this map (every platform today except

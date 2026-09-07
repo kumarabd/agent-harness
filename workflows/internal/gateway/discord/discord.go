@@ -140,14 +140,22 @@ func (b *Bot) runConnection(ctx context.Context, dg *discordgo.Session, connecti
 	log.Printf("discord: connected as %s, holding connection lease as %s", connectionID, holderID)
 
 	deliverActivity := &discordDeliverActivity{session: dg, pool: b.pool, connectionID: connectionID}
-	// DisableWorkflowWorker: this queue only ever serves DiscordDeliver — no
-	// workflow is ever dispatched to it, so there's nothing for a workflow
+	// DisableWorkflowWorker: this queue only ever serves delivery activities —
+	// no workflow is ever dispatched to it, so there's nothing for a workflow
 	// poller to do here.
+	//
+	// Real design fix 2026-09-06: registered as literal "Deliver" (was
+	// "DiscordDeliver") — turn.go/plan_workflow.go's deliveryTaskQueue now
+	// picks the queue, every caller calls the SAME activity name regardless
+	// of platform, no per-platform name branching needed. Safe: this is the
+	// only "Deliver" registered on this queue, and Temporal activity names
+	// only need to be unique within one queue's worker, never globally — the
+	// voice platform's own Deliver lives on its own separate queue.
 	deliverWorker := worker.New(b.temporal, "deliver:discord:"+connectionID, worker.Options{DisableWorkflowWorker: true})
-	deliverWorker.RegisterActivityWithOptions(deliverActivity.Deliver, activity.RegisterOptions{Name: "DiscordDeliver"})
+	deliverWorker.RegisterActivityWithOptions(deliverActivity.Deliver, activity.RegisterOptions{Name: "Deliver"})
 	// docs/components/gateway.md's "Resolved: ModelCall Streaming" —
 	// same worker/connection, same live session, registered alongside
-	// DiscordDeliver rather than a separate embedded worker.
+	// Deliver rather than a separate embedded worker.
 	deliverWorker.RegisterActivityWithOptions(deliverActivity.DeliverChunk, activity.RegisterOptions{Name: "DiscordDeliverChunk"})
 	// docs/components/user-input.md's "Mid-turn interim delivery" (push
 	// half, A+B) — same embedded worker, same connection, since pushing a

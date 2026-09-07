@@ -1,10 +1,20 @@
 """Tenant worker entrypoint. Registers ModelCall, ToolCall, InsertMessage,
-Persist, Deliver, WriteMemory, and CompressContext on the configured task
-queue and polls a Temporal server for activity tasks. Run alongside the
+Persist, WriteMemory, and CompressContext on the configured task queue and
+polls a Temporal server for activity tasks. Run alongside the
 shared loop-worker
 (workflows/cmd/loop-worker), which registers the Session Coordinator and Turn
 Workflow on the same task queue and dispatches activities to this process by
 name.
+
+"Deliver" is NOT registered here — real design fix 2026-09-06, see
+turn.go's deliveryTaskQueue: a generic "Deliver" used to be a stub here
+(deliver.py, deleted — its own docstring admitted it "just logs what it
+would have delivered"), and every plan-owned turn's delivery silently went
+nowhere because of it. The real per-platform implementations
+(deliver_discord.go, deliver_voice.go) are registered as literal "Deliver"
+each on their own connection-specific queue, in the gateway process, not
+here — only the worker holding a platform's live connection can actually
+deliver over it.
 
 Configured via env vars (not hardcoded) so this process is deployable — see
 deploy/docker/tenant-worker.Dockerfile and deploy/helm/agent-harness-tenant:
@@ -86,7 +96,6 @@ from .skills import seed as skill_seed
 from .skills.record import RecordSkillActivity
 from .compress_context import CompressContextActivity
 from .db import create_pool
-from .deliver import DeliverActivity
 from .get_max_turn_seq import GetMaxTurnSeqActivity
 from .insert_message import InsertMessageActivity
 from .intention import CheckConditionActivity, FireIntentionActivity
@@ -177,7 +186,6 @@ async def main() -> None:
             InsertMessageActivity(pool).__call__,
             GetMaxTurnSeqActivity(pool).__call__,
             PersistActivity(pool).__call__,
-            DeliverActivity(pool).__call__,
             WriteMemoryActivity(pool).__call__,
             CompressContextActivity(pool).__call__,
             DenyToolCallActivity(pool).__call__,

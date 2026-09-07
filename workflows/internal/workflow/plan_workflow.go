@@ -120,13 +120,14 @@ func PlanWorkflow(ctx workflow.Context, input types.PlanWorkflowInput) error {
 			return nil
 		}
 	}
-	// Show the plan. When approval was required, the last approval-gate round
-	// already showed it (the rendered plan rides inline in that prompt —
-	// propose_plan never writes to the planning turn's own messages row, so a
-	// generic Deliver(input.PlanID) here would show nothing); only the
-	// auto-proceed path (no approval needed) still needs an explicit Deliver.
+	// Show the plan. When approval was required, deliverPlanForApproval
+	// already showed it inside runApprovalGate; only the auto-proceed path
+	// (no approval needed) still needs an explicit delivery here.
 	if isRoot && !planRes.NeedsApproval {
-		_ = workflow.ExecuteActivity(actx, "Deliver", input.PlanID).Get(ctx, nil)
+		if queue, timeout, ok := deliveryTaskQueue(input.SessionKey, input.ConnectionID); ok {
+			dao := workflow.ActivityOptions{StartToCloseTimeout: timeout, TaskQueue: queue}
+			_ = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, dao), "Deliver", input.PlanID).Get(ctx, nil)
+		}
 	}
 
 	// --- 3. execution loop ---------------------------------------------
@@ -331,7 +332,11 @@ func deliverPlanForApproval(ctx workflow.Context, input types.PlanWorkflowInput,
 		return
 	}
 
-	err := workflow.ExecuteActivity(actx, "Deliver", turnID).Get(ctx, nil)
+	var err error
+	if queue, timeout, ok := deliveryTaskQueue(input.SessionKey, input.ConnectionID); ok {
+		dao := workflow.ActivityOptions{StartToCloseTimeout: timeout, TaskQueue: queue}
+		err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, dao), "Deliver", turnID).Get(ctx, nil)
+	}
 	if err == nil {
 		return
 	}
@@ -553,8 +558,10 @@ func foldInFollowups(ctx workflow.Context, input types.PlanWorkflowInput, task t
 		logger.Warn("mid-plan follow-up turn failed — continuing the plan", "plan_id", input.PlanID, "error", err)
 		return
 	}
-	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
-	_ = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, ao), "Deliver", handlingID).Get(ctx, nil)
+	if queue, timeout, ok := deliveryTaskQueue(input.SessionKey, input.ConnectionID); ok {
+		dao := workflow.ActivityOptions{StartToCloseTimeout: timeout, TaskQueue: queue}
+		_ = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, dao), "Deliver", handlingID).Get(ctx, nil)
+	}
 	logger.Info("folded in mid-plan follow-up", "plan_id", input.PlanID, "turn", handlingID, "messages", len(msgs))
 }
 
@@ -568,7 +575,10 @@ func finishPlan(ctx workflow.Context, input types.PlanWorkflowInput, task types.
 	actx := workflow.WithActivityOptions(ctx, ao)
 
 	if cpN > 0 {
-		_ = workflow.ExecuteActivity(actx, "Deliver", fmt.Sprintf("%s:cp:%d", input.PlanID, cpN)).Get(ctx, nil)
+		if queue, timeout, ok := deliveryTaskQueue(input.SessionKey, input.ConnectionID); ok {
+			dao := workflow.ActivityOptions{StartToCloseTimeout: timeout, TaskQueue: queue}
+			_ = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, dao), "Deliver", fmt.Sprintf("%s:cp:%d", input.PlanID, cpN)).Get(ctx, nil)
+		}
 	}
 
 	// Bug 2 (approval-gate outcomes): the gate's three non-proceed reasons
@@ -587,7 +597,7 @@ func finishPlan(ctx workflow.Context, input types.PlanWorkflowInput, task types.
 	case "rejected":
 		runRejectionNoticeTurn(ctx, input, task)
 	case "expired":
-		deliverPlanNotice(actx, input.PlanID, "Plan cancelled — I didn't hear back in time. Send me another message whenever you'd like to pick this back up.")
+		deliverPlanNotice(actx, input.SessionKey, input.ConnectionID, input.PlanID, "Plan cancelled — I didn't hear back in time. Send me another message whenever you'd like to pick this back up.")
 	}
 
 	if input.ParentPlanID != "" {
@@ -600,6 +610,40 @@ func finishPlan(ctx workflow.Context, input types.PlanWorkflowInput, task types.
 	}
 }
 
+// Delivery in this file (2026-09-06, two real bugs in sequence):
+//
+// First found: every plan-owned delivery site here called a generic
+// "Deliver" activity that was, historically, a leftover stub from before the
+// real gateway existed (activities/activities/deliver.py's own docstring:
+// "No gateway exists in this slice — this just logs what it would have
+// delivered") — the actual platform-specific send only ever happened via
+// deliverConnectionBased (turn.go), which turn.go's own two end-of-turn call
+// sites always paired with the stub call, but nothing plan-owned here ever
+// did. Confirmed live against a real trip-planning session: RenderPlan +
+// InsertMessage wrote the plan text into Postgres correctly, the stub
+// "succeeded" (it always does — it just logs), and nothing ever reached
+// Discord. This meant NOTHING plan-owned had ever actually been delivered
+// through this file, historically — checkpoint output, mid-plan follow-up
+// answers, rejection notices, none of it, only a top-level turn's own final
+// answer ever worked.
+//
+// Fixed properly (not by adding a second wrapper function to remember to
+// call): the stub is deleted outright, and deliverConnectionBased's real
+// per-platform implementations (deliver_discord.go, deliver_voice.go) are
+// now registered under the SAME literal activity name, "Deliver" — see
+// turn.go's deliveryTaskQueue for the full reasoning. Every call site below
+// is now the same, ordinary, visible activity call:
+//
+//	if queue, timeout, ok := deliveryTaskQueue(sessionKey, connectionID); ok {
+//		dao := workflow.ActivityOptions{StartToCloseTimeout: timeout, TaskQueue: queue}
+//		_ = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, dao), "Deliver", turnID).Get(ctx, nil)
+//	}
+//
+// No shared dispatch function stands between a caller and the activity —
+// deliveryTaskQueue is a pure lookup (never calls ExecuteActivity itself),
+// so there's nothing to forget to pair it with. ok=false (Web, or an empty
+// connectionID) means correctly nothing to call, not a stub to fall back to.
+
 // deliverPlanNotice inserts a synthetic assistant message onto the planning
 // turn (turn_id == plan_id — that turns row already exists by the time this
 // is ever called) and delivers it, same InsertMessage+Deliver shape turn.go's
@@ -607,13 +651,16 @@ func finishPlan(ctx workflow.Context, input types.PlanWorkflowInput, task types.
 // way the user ever sees a plan-approval outcome that isn't "approved": the
 // planning turn's own messages row otherwise stays empty forever (propose_plan
 // writes to PLAN.md, not to messages).
-func deliverPlanNotice(actx workflow.Context, planID, content string) {
+func deliverPlanNotice(actx workflow.Context, sessionKey, connectionID, planID, content string) {
 	insert := types.InsertMessageInput{
 		TurnID:  planID,
 		Message: types.Message{Role: "assistant", Content: content},
 	}
 	_ = workflow.ExecuteActivity(actx, "InsertMessage", insert).Get(actx, nil)
-	_ = workflow.ExecuteActivity(actx, "Deliver", planID).Get(actx, nil)
+	if queue, timeout, ok := deliveryTaskQueue(sessionKey, connectionID); ok {
+		dao := workflow.ActivityOptions{StartToCloseTimeout: timeout, TaskQueue: queue}
+		_ = workflow.ExecuteActivity(workflow.WithActivityOptions(actx, dao), "Deliver", planID).Get(actx, nil)
+	}
 }
 
 // runRejectionNoticeTurn seeds a normal reason-act turn after an explicit
@@ -649,8 +696,10 @@ func runRejectionNoticeTurn(ctx workflow.Context, input types.PlanWorkflowInput,
 		logger.Warn("plan-rejection follow-up turn failed", "plan_id", input.PlanID, "error", err)
 		return
 	}
-	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
-	_ = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, ao), "Deliver", turnID).Get(ctx, nil)
+	if queue, timeout, ok := deliveryTaskQueue(input.SessionKey, input.ConnectionID); ok {
+		dao := workflow.ActivityOptions{StartToCloseTimeout: timeout, TaskQueue: queue}
+		_ = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, dao), "Deliver", turnID).Get(ctx, nil)
+	}
 }
 
 // runChildTurn runs a child TurnWorkflow under this plan and waits for it,

@@ -254,8 +254,11 @@ func (v *Voice) voiceJoin(ctx context.Context, dg *discordgo.Session, ic *discor
 		session: dg, voiceChannelID: channelID,
 		bargeIn: bargeIn, lifecycle: lifecycle, latency: latency,
 	}
+	// Real design fix 2026-09-06: registered as literal "Deliver" (was
+	// "VoiceDeliver") — see discord.go's own comment on this same change;
+	// safe since this queue is separate from the text-Discord one.
 	deliverWkr := worker.New(v.temporal, "deliver:discord-voice:"+connectionID, worker.Options{DisableWorkflowWorker: true})
-	deliverWkr.RegisterActivityWithOptions(deliverActivity.Deliver, activity.RegisterOptions{Name: "VoiceDeliver"})
+	deliverWkr.RegisterActivityWithOptions(deliverActivity.Deliver, activity.RegisterOptions{Name: "Deliver"})
 	deliverWkr.RegisterActivityWithOptions(deliverActivity.DeliverChunk, activity.RegisterOptions{Name: "VoiceDeliverChunk"})
 	// docs/components/user-input.md's "Mid-turn interim delivery" (push
 	// half, A+B) — same embedded worker, same live voice connection.

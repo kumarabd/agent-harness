@@ -140,8 +140,8 @@ const (
 	// for VoiceDeliverChunk: one sentence's worth of TTS synthesis plus
 	// real-time playback of it, not activityTimeoutTierA's near-instant
 	// text-edit assumption. Generous relative to how long one sentence
-	// actually takes to speak, well under VoiceDeliver's own whole-turn
-	// 5-minute budget (turn.go's connectionDeliveryActivity) since this is
+	// actually takes to speak, well under the voice platform's own
+	// whole-turn 5-minute budget (turn.go's deliveryTaskQueue) since this is
 	// deliberately a much smaller unit of work.
 	voiceChunkDeliveryTimeout = 90 * time.Second
 )
@@ -199,7 +199,6 @@ func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, par
 	_ = workflow.ExecuteActivity(actx, "InsertMessage", errInsert).Get(actx, nil)
 	_ = workflow.ExecuteActivity(actx, "Persist", turnID, "failed", planID).Get(actx, nil)
 	if parentType == "session" {
-		_ = workflow.ExecuteActivity(actx, "Deliver", turnID).Get(actx, nil)
 		// The failure-notice text is short and fixed — no recovery needed
 		// here even on a ContentTooLong error, unlike the normal end-of-turn
 		// site below.
@@ -232,16 +231,19 @@ type deliveryInterruptSource struct {
 	messages *[]types.SignalPayload // TurnWorkflow's own pendingMessages, read (not drained) once interrupted
 }
 
-// deliverToConnectionBasedPlatform — gateway.md's "Resolved: Outbound Flow"
-// (2026-08-25 correction). Purely additive to the "Deliver" activity call
-// above, which stays exactly as-is for every platform (a harmless no-op stub
-// for Web — gateway/web.md's "delivery collapses" finding, Web gets
-// responses via polling Postgres directly and never needed a real send
-// here). Only a connection-based platform (Discord today) needs this: routed
-// to that specific connection's own task queue, addressed by connectionID
-// (never platform alone — a tenant can run more than one connection of the
-// same platform kind, e.g. two Discord bots, so platform alone would be
-// ambiguous about which live socket to send over).
+// deliverConnectionBased — gateway.md's "Resolved: Outbound Flow" (2026-08-25
+// correction), and the single call site every plan-owned turn's own delivery
+// also routes through as of 2026-09-06 (see deliveryTaskQueue's own doc
+// comment on why the old separate no-op-stub-plus-this-function split was
+// removed: nothing calls a generic "Deliver" on the default queue anymore —
+// this IS the delivery, for every platform that has a live connection to
+// deliver over). Web correctly gets a no-op here (deliveryTaskQueue's
+// ok=false) — gateway/web.md's "delivery collapses" finding, Web gets
+// responses via polling Postgres directly and never needed a real send.
+// Routed to the specific connection's own task queue, addressed by
+// connectionID (never platform alone — a tenant can run more than one
+// connection of the same platform kind, e.g. two Discord bots, so platform
+// alone would be ambiguous about which live socket to send over).
 //
 // Races the delivery activity against interrupts.notify (docs/components/
 // gateway/discord-voice.md's "Resolved: Overlapping Speech / Interrupts" gap,
@@ -249,21 +251,19 @@ type deliveryInterruptSource struct {
 // cancels it rather than being silently discarded once this call returns.
 // Returns the interrupting payload (non-nil) if that happened — the caller
 // is responsible for handing it back to the Coordinator via TurnResult,
-// since only the caller has a real return path there.
+// since only the caller has a real return path there. interrupts is nil for
+// every plan-owned call site (plan_workflow.go) — none of them have (or
+// need) an interrupt-racing source; nil degrades to a plain,
+// uninterruptible send.
 //
 // Also returns the delivery activity's own error — but ONLY when it's the
-// deliver_discord.go errTypeContentTooLong case (real, live bug found
-// 2026-09-06: every other error here was, and still is, silently discarded,
-// same tolerance Persist/other best-effort bookkeeping calls already get
-// elsewhere in this file; deliberately not widening that now). The caller
-// uses this one case to run a model-driven recovery round instead of simply
-// losing the response.
+// types.ErrTypeContentTooLong case (real, live bug found 2026-09-06: every
+// other error here was, and still is, silently discarded, same tolerance
+// Persist/other best-effort bookkeeping calls already get elsewhere in this
+// file; deliberately not widening that now). The caller uses this one case
+// to run a model-driven recovery round instead of simply losing the response.
 func deliverConnectionBased(ctx workflow.Context, interrupts *deliveryInterruptSource, sessionKey, connectionID, turnID string) (*types.SignalPayload, error) {
-	if connectionID == "" {
-		return nil, nil
-	}
-	platform := platformFromSessionKey(sessionKey)
-	activityName, timeout, ok := connectionDeliveryActivity(platform)
+	queue, timeout, ok := deliveryTaskQueue(sessionKey, connectionID)
 	if !ok {
 		return nil, nil
 	}
@@ -272,10 +272,10 @@ func deliverConnectionBased(ctx workflow.Context, interrupts *deliveryInterruptS
 	defer deliverCancel()
 	ao := workflow.ActivityOptions{
 		StartToCloseTimeout: timeout,
-		TaskQueue:           "deliver:" + platform + ":" + connectionID,
+		TaskQueue:           queue,
 	}
 	actx := workflow.WithActivityOptions(deliverCtx, ao)
-	future := workflow.ExecuteActivity(actx, activityName, turnID)
+	future := workflow.ExecuteActivity(actx, "Deliver", turnID)
 
 	deliverErr := func(err error) error {
 		var appErr *temporal.ApplicationError
@@ -402,28 +402,39 @@ func platformFromSessionKey(sessionKey string) string {
 	return parts[2]
 }
 
-// connectionDeliveryActivity — gateway.md's "Resolved: Outbound Flow": only a
-// connection-based platform needs the embedded-worker delivery path at all,
-// and which activity to dispatch (and how long to allow it) is genuinely
-// per-platform, not a single shared constant — DiscordDeliver
-// (deliver_discord.go) is a near-instant text send, activityTimeoutTierA is
-// plenty; VoiceDeliver (deliver_voice.go) synthesizes and streams real
-// audio, which can run well past 30s for a multi-sentence response, so it
-// gets its own, longer budget. A literal lookup, not a registry — two
-// platforms exist today, and adding a third is a one-line change, not a
-// reason to build an abstraction for cases that don't exist yet.
-func connectionDeliveryActivity(platform string) (activityName string, timeout time.Duration, ok bool) {
-	switch platform {
+// deliveryTaskQueue — gateway.md's "Resolved: Outbound Flow": only a
+// connection-based platform needs the embedded-worker delivery path at all
+// (Web has no live connection — it delivers via polling, gateway/web.md's
+// "delivery collapses" finding — so it correctly gets ok=false, no call at
+// all, not a separate stub activity to remember to also invoke). Every
+// connection-based platform's real Deliver implementation (deliver_discord.go,
+// deliver_voice.go) is registered under the SAME literal activity name,
+// "Deliver" — no per-platform name branching needed, since each is on its
+// own task queue and Temporal activity names only need to be unique within
+// one queue's worker, never globally. This function's only job is picking
+// that queue (and the per-platform timeout — VoiceDeliver synthesizes and
+// streams real audio, which can run well past 30s for a multi-sentence
+// response, so it gets its own longer budget; DiscordDeliver is a near-
+// instant text send). A literal lookup, not a registry or a dispatching
+// function — it never calls ExecuteActivity itself, every caller does that
+// the same, ordinary way. Two platforms exist today; adding a third is a
+// one-line change here, not a reason to build an abstraction for cases that
+// don't exist yet.
+func deliveryTaskQueue(sessionKey, connectionID string) (queue string, timeout time.Duration, ok bool) {
+	if connectionID == "" {
+		return "", 0, false
+	}
+	switch platformFromSessionKey(sessionKey) {
 	case "discord":
-		return "DiscordDeliver", activityTimeoutTierA, true
+		return "deliver:discord:" + connectionID, activityTimeoutTierA, true
 	case "discord-voice":
-		return "VoiceDeliver", 5 * time.Minute, true
+		return "deliver:discord-voice:" + connectionID, 5 * time.Minute, true
 	default:
 		return "", 0, false
 	}
 }
 
-// connectionDeliveryChunkActivity mirrors connectionDeliveryActivity above,
+// connectionDeliveryChunkActivity mirrors deliveryTaskQueue above,
 // for the per-chunk streaming path (awaitModelCallWithStreaming below) —
 // deliberately not unified into one lookup shared with it: VoiceDeliverChunk
 // returns (interrupted bool, error) so the caller can stop delivering
@@ -448,7 +459,7 @@ func connectionDeliveryChunkActivity(platform string) (activityName string, time
 // retry philosophy, applied to delivery itself), but unlike an ordinary tool
 // they need the owning gateway connection's own live session, so the Act
 // dispatch loop below routes them here instead of through the generic
-// "ToolCall" tenant-worker path — same connectionDeliveryActivity/
+// "ToolCall" tenant-worker path — same deliveryTaskQueue/
 // connectionDeliveryChunkActivity literal-lookup idiom, just keyed on tool
 // name instead of a fixed per-platform pair. Discord only for now (delivery-
 // in-the-loop landed Discord-first); ok=false elsewhere falls through to the
@@ -1158,9 +1169,6 @@ loop:
 	// fix for the gap that correction named; nothing replaces it here.
 	var interruptedPayload *types.SignalPayload
 	if input.ParentType == "session" {
-		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
-		actx := workflow.WithActivityOptions(ctx, ao)
-		_ = workflow.ExecuteActivity(actx, "Deliver", input.TurnID).Get(actx, nil)
 		var deliverErr error
 		interruptedPayload, deliverErr = deliverConnectionBased(ctx, interrupts, input.SessionKey, input.ConnectionID, input.TurnID)
 		if deliverErr != nil {
