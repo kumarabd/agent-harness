@@ -84,9 +84,13 @@ That's the whole process — no other registration needed.
   money. Run manually (`run_scenario.sh real-llm-basic`, with the real
   provider env vars set) when verifying real-provider integration
   specifically, not part of the free regression run.
-- **Chained pairs** — `interrupt-*` and `subagent-merge-cancelled-*`. Each is
-  two scripted runs against the *same* still-running session — run manually, two
-  calls back to back against one explicit session key.
+- **Chained pairs** — `interrupt-*`, `subagent-merge-cancelled-*`, and
+  `ask-user-*`. Each is two scripted runs against the *same* still-running
+  session — run manually, two calls back to back against one explicit session
+  key. `ask-user-*` verifies `ask_user` park/resume: the initial run parks the
+  turn on an `ask_user` call, the follow-up run sends a message that pre-empts
+  the wait (the `ask_user` `tool_calls` row → `cancelled`, the message folded in
+  as the answer). See `ask-user-followup.expect.sh` for the exact invocation.
 - **`deep-conversation/`** — a separate, heavier real-LLM validation suite
   (memory writes, real context compression, tier escalation, mcp-hub
   discovery) with its own `run.sh` that scales cluster Deployments to 0

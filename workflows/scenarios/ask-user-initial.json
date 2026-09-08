@@ -1,0 +1,18 @@
+{
+  "_comment": "ask_user park/resume (docs/components/turn-pipeline.md, Phase 5) — chained pair, run manually (like interrupt-*). turn:1 scripts an ask_user call; the turn parks on a UserInputRequestWorkflow child. Run ask-user-followup against the same session while it's parked: the follow-up message pre-empts the wait, turn.go cancels the ask_user child (its tool_calls row -> status='cancelled'), folds the message in, and the next scripted response acts on the answer.",
+  "message": { "role": "user", "content": "Delete the old logs in this repo." },
+  "scripted_model_responses": [
+    {
+      "content": "Which logs should I remove?",
+      "tool_calls": [
+        { "name": "ask_user", "is_subagent": false, "arguments": { "question": "Delete everything under ./logs, or only files older than 30 days?", "options": ["everything under ./logs", "only files older than 30 days"] } }
+      ],
+      "usage": { "input_tokens": 60, "output_tokens": 20 }
+    },
+    {
+      "content": "Understood — removing only the log files older than 30 days.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 90, "output_tokens": 25 }
+    }
+  ]
+}
