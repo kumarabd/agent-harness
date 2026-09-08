@@ -95,6 +95,7 @@ SCENARIOS=(
   subagent-full-agent
   real-assembly
   resolved-tool-dispatch
+  load-skill
 )
 
 PASSED=()
