@@ -283,6 +283,11 @@ type ToolCallRef struct {
 	ToolCallID string `json:"tool_call_id"`
 	ToolName   string `json:"tool_name"`
 	IsSubagent bool   `json:"is_subagent"`
+	// IsAskUser — docs/components/turn-pipeline.md. The model called `ask_user`;
+	// turn.go dispatches a UserInputRequestWorkflow child (Kind "question") and
+	// parks the loop on it, same as a subagent child. Minted by ModelCall the
+	// same way IsSubagent is. Never true alongside IsSubagent.
+	IsAskUser bool `json:"is_ask_user,omitempty"`
 	// docs/components/user-input.md — computed by ModelCall at mint time,
 	// since that's the one place in this call chain that has the real
 	// arguments in memory (workflow code never does, under the
@@ -408,7 +413,7 @@ type UserInputOption struct {
 type UserInputRequest struct {
 	RequestID     string            `json:"request_id"`
 	TurnID        string            `json:"turn_id"`
-	Kind          string            `json:"kind"` // "permission" | "decision" | ...
+	Kind          string            `json:"kind"` // "permission" | "question" (ask_user) | "decision" | ...
 	Prompt        string            `json:"prompt"`
 	Options       []UserInputOption `json:"options"`
 	AllowFreeText bool              `json:"allow_free_text"`

@@ -981,6 +981,7 @@ loop:
 			future          workflow.Future
 			isSubagent      bool
 			isApprovalGated bool
+			isAskUser       bool
 		}
 		var calls []pendingCall
 
@@ -1030,6 +1031,31 @@ loop:
 				cctx := workflow.WithChildOptions(cancelCtx, cwo)
 				fut := workflow.ExecuteChildWorkflow(cctx, TurnWorkflow, childInput)
 				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isSubagent: true})
+			} else if tc.IsAskUser {
+				// docs/components/turn-pipeline.md — a child UserInputRequestWorkflow
+				// (Kind "question"), parked on the same way an approval request is.
+				// The loop then awaits it against a follow-up message just like any
+				// other call: a real answer resolves the child (RequestUserInput
+				// reads the question from tool_calls.arguments, CloseUserInput
+				// writes the answer back into tool_calls.result); a message
+				// arriving instead cancels it and folds the message in as the
+				// answer. Never a bare .Get().
+				cwo := workflow.ChildWorkflowOptions{
+					WorkflowID:        tc.ToolCallID + ":ask",
+					ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
+				}
+				cctx := workflow.WithChildOptions(cancelCtx, cwo)
+				fut := workflow.ExecuteChildWorkflow(cctx, UserInputRequestWorkflow, types.UserInputRequestWorkflowInput{
+					Request: types.UserInputRequest{
+						RequestID:     tc.ToolCallID,
+						TurnID:        input.TurnID,
+						Kind:          "question",
+						AllowFreeText: true,
+					},
+					SessionKey:   input.SessionKey,
+					ConnectionID: input.ConnectionID,
+				})
+				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isAskUser: true})
 			} else if deliveryActivityName, ok := deliveryToolActivity(platformFromSessionKey(input.SessionKey), tc.ToolName); ok {
 				// deliver_reply/deliver_attachment — routed to the owning
 				// gateway connection's own embedded worker, same task-queue
@@ -1093,7 +1119,7 @@ loop:
 			// is already durably recorded in tool_calls by the activities
 			// themselves — nothing to fold into workflow memory).
 			for _, c := range calls {
-				drainResult(ctx, c.toolCallID, c.future, c.isSubagent, c.isApprovalGated)
+				drainResult(ctx, c.toolCallID, c.future, c.isSubagent, c.isApprovalGated, c.isAskUser)
 			}
 			// Even a cancelled subagent may have written files before its
 			// interrupt landed — surface those to the parent's next
@@ -1131,7 +1157,7 @@ loop:
 
 		cancel()
 		for _, c := range calls {
-			status := drainResult(ctx, c.toolCallID, c.future, c.isSubagent, c.isApprovalGated)
+			status := drainResult(ctx, c.toolCallID, c.future, c.isSubagent, c.isApprovalGated, c.isAskUser)
 			if status == "error" {
 				retries++
 			}
@@ -1272,11 +1298,23 @@ func dispatchSubagentManifests(ctx workflow.Context, subagentIDs []string) {
 // tool_calls row, written by the ToolCall activity itself. For a subagent,
 // status is inferred the same way from TurnResult/error — its actual content
 // lives in Postgres under its own turn_id, same as any other turn.
-func drainResult(ctx workflow.Context, toolCallID string, f workflow.Future, isSubagent bool, isApprovalGated bool) string {
+func drainResult(ctx workflow.Context, toolCallID string, f workflow.Future, isSubagent bool, isApprovalGated bool, isAskUser bool) string {
 	if isSubagent {
 		var subResult types.TurnResult
 		if err := f.Get(ctx, &subResult); err != nil {
 			return statusFromError(err)
+		}
+		return "ok"
+	}
+	if isAskUser {
+		// The child UserInputRequestWorkflow already wrote the ask_user
+		// tool_calls row (answer, or cancelled) via CloseUserInput — its own
+		// return value carries no ToolCallOutput. A workflow-level error here
+		// is just its cancellation (a follow-up message pre-empted the wait);
+		// that's a resolution, not a turn retry.
+		var out types.UserInputRequestWorkflowOutput
+		if err := f.Get(ctx, &out); err != nil {
+			return "cancelled"
 		}
 		return "ok"
 	}

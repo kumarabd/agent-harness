@@ -181,6 +181,10 @@ class ToolCallRef:
     tool_call_id: str = ""
     tool_name: str = ""
     is_subagent: bool = False
+    # docs/components/turn-pipeline.md — the model called `ask_user`; turn.go
+    # dispatches a UserInputRequestWorkflow child and parks the loop. Minted
+    # like is_subagent. Never true alongside is_subagent.
+    is_ask_user: bool = False
     # docs/components/user-input.md — computed here, at mint time, since
     # this is the one place with the real arguments in memory (workflow code
     # never has them). Never true alongside is_subagent in this first pass.

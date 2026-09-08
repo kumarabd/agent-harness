@@ -123,6 +123,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "own name on your NEXT step, not the response that found it.\n"
     "- load_skill — pull in a step-by-step procedure from a past successful run of a similar task.\n"
     "- spawn_subagent — delegate a self-contained slice of work to its own focused turn.\n"
+    "- ask_user — put a question to the user and wait for their answer (the turn pauses; they "
+    "may also just send a new message, which is the answer).\n"
     "When you need more than one of these, request them together in a single step rather than "
     "one per turn, and take your first real action in the same response wherever you can.\n\n"
     "INFORMATION — three rules:\n"
@@ -600,6 +602,32 @@ _DELIVER_ATTACHMENT_SCHEMA = {
 }
 
 
+_ASK_USER_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "ask_user",
+        "description": (
+            "Ask the user a question and wait for their answer before continuing. Use when the "
+            "request is ambiguous, the decision is theirs to make, or you're missing something "
+            "required that you can't look up. The turn pauses until they respond — or they may "
+            "reply with a new message, which you should treat as the answer."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "The question to put to the user."},
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional. If the answer is a choice among a few options, list them — they render as buttons.",
+                },
+            },
+            "required": ["question"],
+        },
+    },
+}
+
+
 _LOAD_SKILL_SCHEMA = {
     "type": "function",
     "function": {
@@ -629,6 +657,7 @@ _SCHEMA_BY_NAME: dict[str, dict] = {
     t["function"]["name"]: t
     for t in [
         *TOOLS_SCHEMA,
+        _ASK_USER_SCHEMA,
         _LOAD_SKILL_SCHEMA,
         _DELIVER_REPLY_SCHEMA,
         _DELIVER_ATTACHMENT_SCHEMA,

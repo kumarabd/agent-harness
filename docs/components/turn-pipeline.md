@@ -304,14 +304,24 @@ flight, not a queue-after.
 | Final delivery | voice: barge-in cancels TTS; text: let it finish. Turn is terminal → the message starts a **new turn** at the coordinator | platform-dependent |
 | Watchdog `StatusPing` | no interaction — independent, best-effort | — |
 
-### Blocked on `ask_user`
+### `ask_user`
 
-The parked turn selects on **both** the `UserInputResponse` signal (structured
-answers, button clicks) **and** the follow-up message channel (the user types the
-answer as free text instead of clicking). Either resolves the block: cancel the
-pending user-input request, fold the content in as the answer, continue. The
-parked wait is a `Selector` over child-future + message-channel — never a bare
-`.Get()`.
+`ask_user` is dispatched as a `UserInputRequestWorkflow` child (`Kind:
+"question"`) and joins the turn's normal tool-call fan-out — so the existing
+`workflow.Await(all-settled OR a follow-up message)` already races it two ways,
+never a bare `.Get()`:
+
+- **A real answer** (button click → `UserInputResponse` signal, or web `/respond`)
+  resolves the child. `RequestUserInput` reads the question + options from
+  `tool_calls.arguments` (the workflow never holds them); `CloseUserInput` writes
+  the answer back into the `ask_user` `tool_calls` row (`status: ok`,
+  `{"answer": …}`), so the next `ModelCall` sees it as an observation.
+- **A follow-up message** arriving instead pre-empts the wait: the loop cancels
+  the child (its row → `cancelled`) and folds the message in as the next user
+  turn. The model connects it to the question from context.
+
+Implemented in Phase 5 — the `blocked` status branch itself lands with Phase 7
+(the model doesn't author `status` yet).
 
 ---
 

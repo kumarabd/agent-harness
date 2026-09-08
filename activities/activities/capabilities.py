@@ -103,6 +103,9 @@ CAPABILITIES: list[Capability] = [
     # directly using that profile, not a schema-driven model call.
     Capability("call_tool", Layer.INTERFACE, frozenset(), handler_ref="call_tool"),
     Capability("spawn_subagent", Layer.CONTROL, _MAIN, has_subagent_variant=True, meta=True),
+    # No handler_ref — turn.go dispatches a UserInputRequestWorkflow child and
+    # parks the loop on it, same as spawn_subagent is a child workflow.
+    Capability("ask_user", Layer.CONTROL, _MAIN, meta=True),
     Capability("create_intention", Layer.CONTROL, _MAIN, handler_ref="create_intention"),
     # 5 CRUD ops -> 1 dispatcher (list/inspect/revise/snooze/cancel) —
     # tool-registry.md, "Resolved: Three-Layer Tool Taxonomy".

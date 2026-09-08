@@ -269,6 +269,7 @@ class ModelCallActivity:
                     n = n_offset + i
                     tool_name = tc["name"]
                     is_subagent = bool(tc.get("is_subagent", False))
+                    is_ask_user = tool_name == "ask_user"
                     arguments = tc.get("arguments", {})
 
                     # docs/components/temporal-workflow.md's recursion-
@@ -327,7 +328,7 @@ class ModelCallActivity:
                     # call_tool's own explicit arguments). Gating reuses the same
                     # identity when it's known; falls back to _resolve_gating's
                     # shell_exec/call_tool cases otherwise.
-                    resolved_cap = None if is_subagent else resolved_by_name.get(tool_name)
+                    resolved_cap = None if (is_subagent or is_ask_user) else resolved_by_name.get(tool_name)
                     if resolved_cap is not None:
                         resolved_server, resolved_tool = resolved_cap.resolved_target
                         gate_server, gate_tool = resolved_server, resolved_tool
@@ -335,7 +336,7 @@ class ModelCallActivity:
                     else:
                         resolved_server = resolved_tool = None
                         approval_needed, gate_server, gate_tool = (
-                            _resolve_gating(tool_name, arguments) if not is_subagent else (False, "", "")
+                            _resolve_gating(tool_name, arguments) if not (is_subagent or is_ask_user) else (False, "", "")
                         )
 
                     # status left at its 'pending' default — ToolCall (or the
@@ -361,6 +362,7 @@ class ModelCallActivity:
                             tool_call_id=tool_call_id,
                             tool_name=tool_name,
                             is_subagent=is_subagent,
+                            is_ask_user=is_ask_user,
                             requires_approval=approval_needed,
                             server=gate_server,
                             tool=gate_tool,

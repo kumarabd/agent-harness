@@ -1,0 +1,4 @@
+{
+  "_comment": "Second half of the ask_user park/resume pair. Run against the same -session while ask-user-initial's turn is parked on its ask_user call. The coordinator forwards this straight to the parked turn.",
+  "message": { "role": "user", "content": "just the ones older than 30 days" }
+}
