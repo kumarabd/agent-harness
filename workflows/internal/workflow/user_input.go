@@ -58,6 +58,20 @@ func UserInputRequestWorkflow(ctx workflow.Context, input types.UserInputRequest
 	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 	actx := workflow.WithActivityOptions(ctx, ao)
 	if err := workflow.ExecuteActivity(actx, "RequestUserInput", req, workflowID).Get(actx, nil); err != nil {
+		// Cancelled (a follow-up message pre-empted the parked turn) or failed
+		// before the request was even durably recorded — the CloseUserInput
+		// close-out path below never runs, so nothing would transition a row
+		// ModelCall minted 'pending'. Close both possible rows here, on a
+		// disconnected context (ctx is already done on the cancel path).
+		bg, cancelBg := workflow.NewDisconnectedContext(ctx)
+		defer cancelBg()
+		if req.Kind == "question" {
+			// ask_user: request_id == the ask_user tool_calls id.
+			_ = markDenied(bg, req.RequestID, "superseded_by_message")
+		}
+		if input.ApprovalGatedCall != nil {
+			_ = markDenied(bg, input.ApprovalGatedCall.ToolCallID, "cancelled")
+		}
 		return types.UserInputRequestWorkflowOutput{}, err
 	}
 	dispatchInterimDelivery(ctx, input, logger)

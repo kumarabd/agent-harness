@@ -1051,6 +1051,15 @@ loop:
 						TurnID:        input.TurnID,
 						Kind:          "question",
 						AllowFreeText: true,
+						// Explicit non-nil — the model's real question/options
+						// live in the ask_user tool_calls.arguments row and are
+						// read there by RequestUserInput. These fields must still
+						// serialize as [] / {}, never null: the Python activity's
+						// UserInputRequest dataclass rejects a null for a
+						// list[UserInputOption] / dict field ("Failed decoding
+						// arguments").
+						Options: []types.UserInputOption{},
+						Context: map[string]any{},
 					},
 					SessionKey:   input.SessionKey,
 					ConnectionID: input.ConnectionID,
