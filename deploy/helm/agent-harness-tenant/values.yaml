@@ -241,6 +241,21 @@ agentWeb:
 # instead (mirrors ../../../infra/postgres's own init-roles Job, trimmed to
 # the one extra role this chart needs).
 postgresql:
+  # -- Custom Postgres image: a Bitnami-postgresql-compatible build with the
+  # pgvector and timescaledb extensions baked in. Because it is not one of
+  # Bitnami's own published images, the subchart's image-verification guard
+  # (charts/postgresql NOTES.txt) rejects it unless we also opt in via
+  # global.security.allowInsecureImages below.
+  image:
+    registry: "ghcr.io"
+    repository: "realnighthawk/infra/postgres"
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  # -- Acknowledge the non-Bitnami image above. Scoped under `postgresql:` so
+  # it only reaches the postgresql subchart, not the other subcharts.
+  global:
+    security:
+      allowInsecureImages: true
   auth:
     # -- Do NOT commit real passwords here — this is the chart's own tracked
     # default values file. Set real values per tenant in

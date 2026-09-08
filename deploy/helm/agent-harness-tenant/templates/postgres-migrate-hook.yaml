@@ -59,6 +59,11 @@ spec:
       containers:
         - name: migrate
           image: "{{ .Values.postgresql.image.registry }}/{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          # Without this, a `:latest` tag defaults to imagePullPolicy: Always,
+          # so this hook Job re-pulls the (large, custom) image from the
+          # registry on every install/upgrade even when it is already on the
+          # node. Honour the subchart's own image.pullPolicy instead.
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy | default "IfNotPresent" }}
           env:
             - name: PGPASSWORD
               valueFrom:

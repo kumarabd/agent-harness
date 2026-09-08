@@ -31,6 +31,10 @@ spec:
       containers:
         - name: init-roles
           image: "{{ .Values.postgresql.image.registry }}/{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          # See postgres-migrate-hook.yaml: pin the pull policy so a `:latest`
+          # tag does not force a registry re-pull of the custom image on every
+          # install/upgrade.
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy | default "IfNotPresent" }}
           env:
             {{- if .Values.agentBrain.enabled }}
             - name: PGPASSWORD
