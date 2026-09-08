@@ -11,7 +11,7 @@ Everything between "a user message arrives" and "the response is delivered" — 
 durable `TurnWorkflow` running a reason-act loop in which **the model decides how
 to solve the task**, and the harness supplies primitives (memory, skills, tools,
 subagents, a scratchpad, delivery) and safety rails (approval gating, budget
-ceilings, compaction, an ambient memory digest).
+ceilings, compaction).
 
 ### Core principle
 
@@ -161,10 +161,16 @@ search / list) is always present so exploration and coding tasks start without a
 discovery round-trip; `discover_tools` adds exotic capabilities (a weather API, a
 maps service) for the rest of the turn, read from the per-turn discovered set.
 
-**Ambient memory digest** — a thin, always-on block (a short profile digest +
-recent-salience summary) injected every turn regardless of what the model asks
-for. This is the one piece of speculative retrieval kept, because recall must not
-depend on the model choosing to look (see *Deterministic rails*).
+**No ambient memory digest.** An earlier draft of this design added a thin
+always-on profile/memory block injected every turn. `memory-slot.md` ("Resolved:
+Entity Facts as a Task-Matched Procedure — No First-Class Digest", 2026-09-05)
+had already examined and rejected exactly that — no genesis population, no
+staleness cache, no non-shed section. Recall instead rests on: the `search_memory`
+meta-tool, the "retrieve before answering" rule, the "don't guess — ask or
+`create_intention`" rule, and (over time) a learned entity-lookup procedure the
+model pulls via `load_skill`. The completeness risk (a turn that needs a fact
+never triggering the lookup) is consciously accepted; a well-authored procedure
+is the mitigation, not a structural guarantee.
 
 The result tailors itself: turn 1 is lean; turn 6 of a research task carries
 skills, discovered tools, a scratchpad, and memory hits — the prompt grows with
@@ -322,8 +328,6 @@ model:
   estimate it may request an extension with a one-line justification, granted up
   to the cap. Estimate-vs-actual is logged as a calibration signal.
 - **Token / cost budget** — a per-turn ceiling, checked each iteration.
-- **Ambient memory digest** — injected every turn so recall never depends on the
-  model choosing to look.
 - **Compaction ceiling** — a hard, blocking compaction at the context-window
   limit, regardless of what the model wants (see *Safety mechanisms*).
 - **Thrash detector** *(deferred)* — the same tool with near-identical arguments

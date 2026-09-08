@@ -128,14 +128,11 @@ class ModelCallActivity:
                 # starting at medium, bootstrap the tier from step 2's
                 # complexity estimate (request-pipeline/02-request-understanding.md):
                 # trivial/simple -> fast, moderate -> medium, complex -> expert.
-                # Empty/unknown complexity (subagents, a step-2 fallback) still
-                # lands on the medium default. Only consulted when hint_tier is
-                # empty, so later steps' self-declared hints always win.
-                #
-                # Resolved BEFORE build_conversation (moved 2026-09-01,
-                # request-pipeline/09-prompt-assembly.md) so its context_window
-                # can bound how much of it prompt assembly's enrichment sections
-                # may consume before shedding.
+                # Empty/unknown complexity (subagents) still lands on the medium
+                # default. Only consulted when hint_tier is empty, so later steps'
+                # self-declared hints always win. context_window (from the
+                # resolved model_config) rides out on ModelCallOutput for the
+                # compression gate.
                 hint_modality = input.hint_modality or model_registry.default_hint()[0]
                 hint_tier = (
                     input.hint_tier
@@ -162,8 +159,7 @@ class ModelCallActivity:
                 # in seconds (metrics.SECONDS_LATENCY_METRICS).
                 assemble_started = time.monotonic()
                 conversation, context_tokens, resolved = await llm.build_conversation(
-                    conn, input.turn_id, input.plan_id, system_prompt, context_window,
-                    planning=False,
+                    conn, input.turn_id, system_prompt,
                 )
                 resolved_by_name = {c.name: c for c in resolved}
                 activity.metric_meter().create_histogram_float(
@@ -172,9 +168,6 @@ class ModelCallActivity:
 
                 tools_schema = llm.tools_schema_for(
                     caller_is_subagent,
-                    planning=False,
-                    plan_handling=False,
-                    checkpoint=False,
                     resolved=resolved,
                     offer_delivery_tools=input.offer_delivery_tools,
                 )

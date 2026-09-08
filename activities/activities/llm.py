@@ -97,28 +97,24 @@ _SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"
 # skills.md's mcp-hub-document-store design. Reverted the same day, at the
 # user's direction: skills are being reconsidered as a memory-layer concept
 # (components/memory-slot.md) rather than a separate mcp-hub-backed
-# document store — see skills.md's own "Superseded" section. This constant
-# no longer mentions either tool.)
-# The final sentence is unchanged in substance from the original —
-# declare_next_step_hint being called every response is a real,
-# functionally-required mechanism (model_registry's escalate-on-retry /
-# tier hinting depends on it), and platform_prompts.go's own
-# voiceSystemPromptText copies this exact sentence verbatim, so it has to
-# keep matching byte-for-byte.
-# 2026-09-04 revision (tool-registry.md, "Resolved: Three-Layer Tool
-# Taxonomy & Per-Task Resolution") — call_tool left the model-facing schema
-# (a resolved tool is offered under its own name, callable directly), and the
-# prior wording ("search_tools/call_tool to discover and invoke") went stale
-# alongside it: a real run against this exact instruction produced a model
-# stuck calling lcm_grep a dozen times with empty content and no answer,
-# hunting for a call_tool it could never validly select from its own tool
-# list. Rewritten to match what's actually offered: shell_exec + whatever
-# tools are already directly callable this turn, plus search_tools for
-# anything not already offered — found results become callable by name on
-# the NEXT step, not this one.
+# docs/components/turn-pipeline.md — the static core. Deliberately compact: the
+# same prompt is in front of the model on every reasoning step, including the
+# ones that are just "read this tool result and continue", so task-shape
+# guidance stays light (illustrative, not a decision procedure) and there is no
+# planning/lane machinery to describe.
+#
+# The final declare_next_step_hint sentence is load-bearing (model_registry's
+# escalate-on-retry / tier hinting depends on it) and platform_prompts.go's
+# voiceSystemPromptText copies it verbatim — keep it byte-for-byte.
 DEFAULT_SYSTEM_PROMPT = (
     "You are a capable, general-purpose personal assistant with real tools — not limited to "
     "coding. You have direct shell access (shell_exec) for local and system tasks.\n\n"
+    "HOW YOU WORK. Let the shape of your work follow the task, and don't announce it: answer "
+    "directly when you already can; look things up or explore the environment first when you "
+    "can't; break large or multi-part work into pieces — a running checklist in your scratchpad, "
+    "or subagents for parts that are self-contained. For anything that takes more than a couple "
+    "of steps, keep a plan-and-progress note at ./scratchpad.md in your working directory; it "
+    "stays in front of you every step and is never compacted away.\n\n"
     "PROVISIONING. Some capabilities are already offered to you directly this turn — call them "
     "by name like any other tool. To reach beyond what you have:\n"
     "- search_memory — recall context about the user, people, or past decisions from long-term "
@@ -138,33 +134,13 @@ DEFAULT_SYSTEM_PROMPT = (
     "what's missing.\n"
     "2. When you do answer from your own training knowledge, say so explicitly, every time: "
     "\"I don't have current data on this — from general knowledge, ...\".\n"
-    "3. If the request is ambiguous, the target unclear, or a choice has real consequences, ask "
-    "the user rather than assuming. If something is missing but not blocking what you're doing "
-    "right now, note it or call create_intention to follow up later.\n\n"
+    "3. If the request is ambiguous, the target unclear, or an action is destructive or hard to "
+    "undo, ask the user before proceeding rather than assuming. If something is missing but not "
+    "blocking what you're doing right now, note it or call create_intention to follow up later.\n\n"
     "After using a tool, summarize the result in plain text for the user rather than leaving it "
     "as raw output. "
     f"Every response, also call {_NEXT_STEP_HINT_TOOL_NAME} alongside anything else you call, "
     "declaring what the next step needs."
-)
-
-# docs/components/request-pipeline/08-planning.md (Phase 3C, plan-and-execute) —
-# the planning turn's system prompt. This turn does NOT execute anything: it
-# reads the task (and any composed skill / retrieved procedures already in the
-# prompt), decides the shape of the work, and emits a checkpoint plan via
-# propose_plan. PlanWorkflow then runs one checkpoint turn per checkpoint, and
-# each of those may re-plan the remainder — so the plan is a first draft, not a
-# contract. Keep checkpoints coarse (a handful, each a meaningful unit of
-# progress with an observable 'done when'), not a keystroke-level script.
-PLANNING_SYSTEM_PROMPT = (
-    "You are planning a task, not executing it. Think through what the task requires, draw on any "
-    "procedure or skill already shown in your context, and lay out a short ordered list of "
-    "checkpoints — each a meaningful unit of progress with an observable condition that means it's "
-    "done. Aim for a handful of coarse steps, not a line-by-line script; the agent executing each "
-    "checkpoint can re-plan the rest as it learns more. Mark a checkpoint complex=true when it is "
-    "itself a multi-step subtask worth its own plan. Call propose_plan with your checkpoints "
-    "and nothing else — set needs_approval=true when the work is risky, expensive, or hard to "
-    "reverse and the user should see the plan before it runs; leave it off for routine work. "
-    f"Also call {_NEXT_STEP_HINT_TOOL_NAME}, declaring what the first checkpoint needs."
 )
 
 TOOLS_SCHEMA = [
@@ -573,54 +549,6 @@ _SPAWN_SUBAGENT_NESTED_SCHEMA = {
 }
 
 
-# docs/components/request-pipeline/08-planning.md (Phase 3C) — the checkpoint
-# turn's completion report. A meta-tool like declare_next_step_hint: it rides
-# the response's existing round-trip, carries no work of its own, and ModelCall
-# peels it to apply against PLAN.md rather than minting a tool_calls row. Only
-# offered to a checkpoint turn (the seed message names the checkpoint).
-_CHECKPOINT_DONE_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "checkpoint_done",
-        "description": (
-            "You are executing one checkpoint of a plan. Call this once the checkpoint's "
-            "'done when' condition is met: status \"done\", or \"skipped\" if you deliberately "
-            "bypassed it, or \"revised\" (with a note) if the task diverged from what the step "
-            "assumed. If what you found means the REST of the plan should change, pass "
-            "revised_tail — an ordered list of the remaining checkpoints, which replaces every "
-            "still-pending step after this one."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "checkpoint_id": {
-                    "type": "string",
-                    "description": "The cp id from the seed message (e.g. \"cp2\").",
-                },
-                "status": {"type": "string", "enum": ["done", "skipped", "revised"]},
-                "note": {
-                    "type": "string",
-                    "description": "Why the step was revised or skipped, or anything the next checkpoint needs to know.",
-                },
-                "revised_tail": {
-                    "type": "array",
-                    "description": "Optional. The remaining plan, re-planned: replaces all still-pending checkpoints after this one.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "intent": {"type": "string", "description": "What this step accomplishes."},
-                            "done_when": {"type": "string", "description": "The observable condition that means it's complete."},
-                        },
-                        "required": ["intent"],
-                    },
-                },
-            },
-            "required": ["checkpoint_id", "status"],
-        },
-    },
-}
-
-
 # Delivery-in-the-loop (2026-09-06, docs/components/activities-outbound-delivery.md's
 # already-resolved "Retry Policy: Model-Driven, Not a Static Playbook" applied
 # to delivery itself): never in a turn's default schema (capabilities.py's
@@ -694,53 +622,14 @@ _LOAD_SKILL_SCHEMA = {
 }
 
 
-_PROPOSE_PLAN_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "propose_plan",
-        "description": (
-            "Emit the checkpoint plan for this task: an ordered list of coarse steps, each with an "
-            "intent and an observable 'done_when'. This is the only tool you call on a planning turn."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "checkpoints": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "intent": {"type": "string", "description": "What this step accomplishes."},
-                            "done_when": {"type": "string", "description": "The observable condition that means it's complete."},
-                            "complex": {
-                                "type": "boolean",
-                                "description": "True if this step is itself a multi-step subtask that deserves its own plan (it will be run as a nested planning+execution pass). Leave off for ordinary steps.",
-                            },
-                        },
-                        "required": ["intent"],
-                    },
-                },
-                "needs_approval": {
-                    "type": "boolean",
-                    "description": "True if the plan should be shown to the user for approval before execution begins.",
-                },
-            },
-            "required": ["checkpoints"],
-        },
-    },
-}
-
-
-# name -> schema dict, over every model-facing schema this module defines
-# (the base list plus the two plan meta-tools). `capabilities.schema_for`
-# reads this back; the nested spawn_subagent variant is passed separately.
+# name -> schema dict, over every model-facing schema this module defines.
+# `capabilities.schema_for` reads this back; the nested spawn_subagent variant
+# is passed separately.
 _SCHEMA_BY_NAME: dict[str, dict] = {
     t["function"]["name"]: t
     for t in [
         *TOOLS_SCHEMA,
         _LOAD_SKILL_SCHEMA,
-        _PROPOSE_PLAN_SCHEMA,
-        _CHECKPOINT_DONE_SCHEMA,
         _DELIVER_REPLY_SCHEMA,
         _DELIVER_ATTACHMENT_SCHEMA,
     ]
@@ -749,29 +638,20 @@ _SCHEMA_BY_NAME: dict[str, dict] = {
 
 def tools_schema_for(
     is_subagent: bool,
-    planning: bool = False,
-    plan_handling: bool = False,
-    checkpoint: bool = False,
     resolved: "list | tuple" = (),
     offer_delivery_tools: bool = False,
 ) -> list[dict]:
-    """`model_call.py`'s one call site for the model-facing tool schema.
+    """`model_call.py`'s one call site for the model-facing tool schema. Thin
+    adapter to `capabilities.schema_for`. `resolved` is the per-turn list of
+    `Capability` objects `discover_tools` produced.
 
-    The turn-kind rules — lcm_expand being subagent-only, the spawn_subagent
-    nested-variant swap, which turns see propose_plan / checkpoint_done — now
-    live as data in `capabilities.CAPABILITIES` (tool-registry.md, "Resolved:
-    Three-Layer Tool Taxonomy"). This is a thin adapter from the historical
-    boolean flags to `capabilities.schema_for`. `resolved` is the per-turn
-    list of `Capability` objects `ToolDiscover` produced (empty until Phase 3).
-
-    `offer_delivery_tools` — turn.go's delivery-recovery round, or
-    plan_workflow.go's plan-presentation turn — force-includes
+    `offer_delivery_tools` — turn.go's delivery-recovery round — force-includes
     deliver_reply/deliver_attachment via `schema_for`'s `also`, since those two
-    are never in any turn kind's default set (situational, not standing).
+    are never in a turn kind's default set (situational, not standing).
     """
     from . import capabilities
 
-    kind = capabilities.turn_kind_of(is_subagent, planning, plan_handling, checkpoint)
+    kind = capabilities.turn_kind_of(is_subagent)
     also = frozenset({"deliver_reply", "deliver_attachment"}) if offer_delivery_tools else frozenset()
     return capabilities.schema_for(kind, resolved, also)
 
@@ -791,23 +671,16 @@ class RealModelResult:
 
 
 async def build_conversation(
-    conn, turn_id: str, plan_id: str, system_prompt: str, context_window: int = 0, *, planning: bool = False,
+    conn, turn_id: str, system_prompt: str,
 ) -> tuple[list[dict], int, list]:
-    """Thin call-through to `prompt.assemble` — request pipeline step 9
-    (docs/components/request-pipeline/09-prompt-assembly.md) owns the section
-    model, ordering, and budget arbitration; this stays the stable call site
-    model_call.py already uses. `plan_id` (docs/components/episode-lifecycle.md)
-    keys the enrichment sections; empty for a conversational fast-path turn.
-    `context_window` (0 if unknown, e.g. the fixture path) bounds how much of it
-    enrichment may consume before `prompt.assemble` starts shedding sections.
-
-    Returns `(conversation, context_tokens, resolved_tools)` — `resolved_tools`
-    (docs/components/tool-registry.md, "Resolved: Three-Layer Tool Taxonomy &
-    Per-Task Resolution") is the per-task set of directly-callable `Capability`
-    objects `model_call.py` hands to `tools_schema_for`; always empty when
-    `planning=True` (that turn gets a reference catalog in-prompt instead).
+    """Thin call-through to `prompt.assemble` (docs/components/turn-pipeline.md's
+    prompt-assembly section — static core + pinned scratchpad + LCM conversation;
+    the stable call site model_call.py uses). Returns
+    `(conversation, context_tokens, resolved_tools)` — `resolved_tools` is the
+    per-turn set of directly-callable `Capability` objects `discover_tools`
+    produced, handed to `tools_schema_for`.
     """
-    return await prompt.assemble(conn, turn_id, plan_id, system_prompt, context_window, planning=planning)
+    return await prompt.assemble(conn, turn_id, system_prompt)
 
 
 # call_model / call_model_streaming moved to

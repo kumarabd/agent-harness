@@ -13,12 +13,11 @@ Everything the model can emit in a response falls into one of three layers:
                  (tier), spawn_subagent (subagent tree), the intention tools.
 
 This module is the single declarative source for *which* capabilities exist,
-*which turn kinds* expose each one, whether it is *peeled* (a control signal the
-harness applies rather than dispatches), its native-activity timing, and its
-handler wiring key. It replaces four things that were kept in sync by hand:
-`llm.py`'s `tools_schema_for` branch cascade, its `_SUBAGENT_ONLY_TOOL_NAMES`
-set, the split between `TOOLS_SCHEMA` and `tools.py`'s `TOOL_REGISTRY`, and the
-per-tool timing scattered through `TOOL_REGISTRY`.
+*which turn kinds* (REASONING / SUBAGENT) expose each one, whether it is *peeled*
+(a control signal the harness applies rather than dispatches), its
+native-activity timing, and its handler wiring key. It replaces the hand-synced
+`tools_schema_for` branch cascade, the subagent-only tool set, the
+`TOOLS_SCHEMA` / `TOOL_REGISTRY` split, and the scattered per-tool timing.
 
 Kept pure at module load (no imports from `llm` / `tools`) so `tools.py` can
 build `TOOL_REGISTRY` from `CAPABILITIES` without a cycle; `schema_for` reaches
@@ -39,11 +38,8 @@ class Layer(str, Enum):
 
 
 class TurnKind(str, Enum):
-    REASONING = "reasoning"          # a plain / Lite reason-act iteration
-    PLANNING = "planning"            # the planning turn — invokes nothing
-    CHECKPOINT = "checkpoint"        # executing one plan checkpoint
-    PLAN_HANDLING = "plan_handling"  # a mid-plan follow-up turn
-    SUBAGENT = "subagent"            # a subagent turn — some schemas swap
+    REASONING = "reasoning"  # a top-level reason-act iteration
+    SUBAGENT = "subagent"    # a subagent turn — some schemas swap (nested spawn_subagent, lcm_expand)
 
 
 @dataclass(frozen=True)
@@ -87,22 +83,17 @@ class Capability:
     resolved_target: tuple[str, str] | None = field(default=None, compare=False)
 
 
-_ALL = frozenset(TurnKind)
-_NONPLAN = frozenset({TurnKind.REASONING, TurnKind.CHECKPOINT, TurnKind.PLAN_HANDLING, TurnKind.SUBAGENT})
+# Both turn kinds see every capability by default; SUBAGENT additionally sees
+# lcm_expand and gets the nested spawn_subagent variant (schema_for handles both).
+_MAIN = frozenset(TurnKind)
 
-# Order mirrors the historical TOOLS_SCHEMA; the plan meta-tools and the
-# next-step hint sit at the end. Turn-kind sets reproduce today's
-# `tools_schema_for` exactly (the only per-kind filter that ever mattered was
-# lcm_expand being subagent-only); the one deliberate normalisation is that
-# `propose_plan` / `checkpoint_done` now sit in list position rather than always
-# being appended last — order is not load-bearing for any provider.
 CAPABILITIES: list[Capability] = [
-    Capability("shell_exec", Layer.INTERFACE, _NONPLAN, handler_ref="shell_exec", timing=HEAVY),
-    Capability("merge_subagent_output", Layer.CONTROL, _NONPLAN, handler_ref="merge_subagent_output", timing=HEAVY),
-    Capability("search_memory", Layer.COGNITION, _NONPLAN, handler_ref="search_memory", meta=True),
-    Capability("memory_expand", Layer.COGNITION, _NONPLAN, handler_ref="memory_expand"),
-    Capability("discover_tools", Layer.INTERFACE, _NONPLAN, handler_ref="discover_tools", meta=True),
-    Capability("load_skill", Layer.COGNITION, _NONPLAN, handler_ref="load_skill", meta=True),
+    Capability("shell_exec", Layer.INTERFACE, _MAIN, handler_ref="shell_exec", timing=HEAVY),
+    Capability("merge_subagent_output", Layer.CONTROL, _MAIN, handler_ref="merge_subagent_output", timing=HEAVY),
+    Capability("search_memory", Layer.COGNITION, _MAIN, handler_ref="search_memory", meta=True),
+    Capability("memory_expand", Layer.COGNITION, _MAIN, handler_ref="memory_expand"),
+    Capability("discover_tools", Layer.INTERFACE, _MAIN, handler_ref="discover_tools", meta=True),
+    Capability("load_skill", Layer.COGNITION, _MAIN, handler_ref="load_skill", meta=True),
     # call_tool is internal-only since the 2026-09-04 per-task-resolution
     # revision (tool-registry.md, "Resolved: Three-Layer Tool Taxonomy") —
     # turn_kinds=() means schema_for never offers it to the model. It keeps a
@@ -111,17 +102,15 @@ CAPABILITIES: list[Capability] = [
     # 3, tool_call.py) proxies a resolved dispatch through `tools.call_tool`
     # directly using that profile, not a schema-driven model call.
     Capability("call_tool", Layer.INTERFACE, frozenset(), handler_ref="call_tool"),
-    Capability("spawn_subagent", Layer.CONTROL, _NONPLAN, has_subagent_variant=True, meta=True),
-    Capability("create_intention", Layer.CONTROL, _NONPLAN, handler_ref="create_intention"),
+    Capability("spawn_subagent", Layer.CONTROL, _MAIN, has_subagent_variant=True, meta=True),
+    Capability("create_intention", Layer.CONTROL, _MAIN, handler_ref="create_intention"),
     # 5 CRUD ops -> 1 dispatcher (list/inspect/revise/snooze/cancel) —
     # tool-registry.md, "Resolved: Three-Layer Tool Taxonomy".
-    Capability("manage_intention", Layer.CONTROL, _NONPLAN, handler_ref="manage_intention"),
-    Capability("lcm_grep", Layer.COGNITION, _NONPLAN, handler_ref="lcm_grep", timing=LOCAL),
-    Capability("lcm_describe", Layer.COGNITION, _NONPLAN, handler_ref="lcm_describe", timing=LOCAL),
+    Capability("manage_intention", Layer.CONTROL, _MAIN, handler_ref="manage_intention"),
+    Capability("lcm_grep", Layer.COGNITION, _MAIN, handler_ref="lcm_grep", timing=LOCAL),
+    Capability("lcm_describe", Layer.COGNITION, _MAIN, handler_ref="lcm_describe", timing=LOCAL),
     Capability("lcm_expand", Layer.COGNITION, frozenset({TurnKind.SUBAGENT}), handler_ref="lcm_expand", timing=LOCAL),
-    Capability("propose_plan", Layer.CONTROL, frozenset({TurnKind.PLANNING, TurnKind.PLAN_HANDLING}), peel=True),
-    Capability("checkpoint_done", Layer.CONTROL, frozenset({TurnKind.CHECKPOINT}), peel=True),
-    Capability("declare_next_step_hint", Layer.CONTROL, _ALL, peel=True),
+    Capability("declare_next_step_hint", Layer.CONTROL, _MAIN, peel=True),
     # Delivery-in-the-loop (2026-09-06): content that won't fit in one platform
     # message is the model's own judgment call (split at natural boundaries vs.
     # attach as a file — see skills/seeds/deliver-long-content.json), not a
@@ -143,19 +132,8 @@ BY_NAME: dict[str, Capability] = {c.name: c for c in CAPABILITIES}
 HANDLER_REFS: dict[str, str] = {c.name: c.handler_ref for c in CAPABILITIES if c.handler_ref}
 
 
-def turn_kind_of(is_subagent: bool, planning: bool, plan_handling: bool, checkpoint: bool) -> TurnKind:
-    """Map `model_call.py`'s existing boolean flags to a single `TurnKind`.
-    Mutually exclusive by construction — `model_call.py` computes `is_checkpoint`
-    as false whenever `is_subagent`/`planning_mode`/`plan_handling` is set."""
-    if planning:
-        return TurnKind.PLANNING
-    if is_subagent:
-        return TurnKind.SUBAGENT
-    if plan_handling:
-        return TurnKind.PLAN_HANDLING
-    if checkpoint:
-        return TurnKind.CHECKPOINT
-    return TurnKind.REASONING
+def turn_kind_of(is_subagent: bool) -> TurnKind:
+    return TurnKind.SUBAGENT if is_subagent else TurnKind.REASONING
 
 
 def schema_for(
@@ -239,21 +217,3 @@ def mint_resolved(rows: "list[tuple[str, dict | None]]") -> list[Capability]:
             resolved_target=(server, tool),
         ))
     return out[-MAX_RESOLVED:]
-
-
-def route(tool_call_names: "list[str]", active: dict[str, Capability]) -> tuple[list[str], list[str]]:
-    """Split a response's tool-call names into (peeled control signals,
-    dispatchable). `active` = the static `BY_NAME` table plus any per-turn
-    resolved tools.
-
-    NOT yet wired (Phase 3). Today `model_call.py` peels the plan meta-tools
-    inline (`plan.split_propose_plan` / `plan.split_checkpoint_done`) and the
-    providers strip `declare_next_step_hint` while parsing its tier value; this
-    is the shape those converge on once resolved tools are in play.
-    """
-    peeled: list[str] = []
-    dispatch: list[str] = []
-    for name in tool_call_names:
-        cap = active.get(name)
-        (peeled if (cap is not None and cap.peel) else dispatch).append(name)
-    return peeled, dispatch
