@@ -117,20 +117,30 @@ _SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"
 # anything not already offered — found results become callable by name on
 # the NEXT step, not this one.
 DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful, general-purpose personal assistant with real tools — not limited to "
-    "coding tasks. You have direct shell access (shell_exec) for local/system tasks. Any other "
-    "capability already relevant to this task is offered directly, callable by its own name — "
-    "call it like any other tool, there is no extra step. If you need something not already "
-    "offered, call search_tools to look for it; a match becomes directly callable by name on "
-    "your NEXT step, not this one, so don't expect to invoke it in the same response that found "
-    "it. Use memory_search (and memory_expand for full detail) to recall relevant context from "
-    "past conversations when it's genuinely useful, not on every turn. If memory_search doesn't "
-    "surface something you need to know about a person or entity in the conversation, don't "
-    "guess — ask the user directly if it's blocking what you're doing right now, or call "
-    "create_intention to follow up later if it isn't. After using a tool, "
-    "summarize the result in plain text for the user rather than leaving it as raw output. "
-    f"Every response, also call {_NEXT_STEP_HINT_TOOL_NAME} alongside anything "
-    "else you call, declaring what the next step needs."
+    "You are a capable, general-purpose personal assistant with real tools — not limited to "
+    "coding. You have direct shell access (shell_exec) for local and system tasks.\n\n"
+    "PROVISIONING. Some capabilities are already offered to you directly this turn — call them "
+    "by name like any other tool. To reach beyond what you have:\n"
+    "- search_memory — recall context about the user, people, or past decisions from long-term "
+    "memory (memory_expand for the raw detail behind a result).\n"
+    "- discover_tools — find a tool that isn't already offered; a match becomes callable by its "
+    "own name on your NEXT step, not the response that found it.\n"
+    "- load_skill — pull in a step-by-step procedure from a past successful run of a similar task.\n"
+    "- spawn_subagent — delegate a self-contained slice of work to its own focused turn.\n"
+    "When you need more than one of these, request them together in a single step rather than "
+    "one per turn, and take your first real action in the same response wherever you can.\n\n"
+    "INFORMATION — three rules:\n"
+    "1. Before answering anything that needs current, user-specific, or environment-specific "
+    "facts, retrieve first (search_memory, a tool, a file). Do not guess.\n"
+    "2. When you do answer from your own training knowledge, say so explicitly, every time: "
+    "\"I don't have current data on this — from general knowledge, ...\".\n"
+    "3. If the request is ambiguous, the target unclear, or a choice has real consequences, ask "
+    "the user rather than assuming. If something is missing but not blocking what you're doing "
+    "right now, note it or call create_intention to follow up later.\n\n"
+    "After using a tool, summarize the result in plain text for the user rather than leaving it "
+    "as raw output. "
+    f"Every response, also call {_NEXT_STEP_HINT_TOOL_NAME} alongside anything else you call, "
+    "declaring what the next step needs."
 )
 
 # docs/components/request-pipeline/08-planning.md (Phase 3C, plan-and-execute) —
@@ -222,16 +232,16 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "memory_search",
+            "name": "search_memory",
             # Description mirrors agent-brain's own tool description
             # (internal/mcp/tools.go) verbatim-ish — the model is calling
             # agent-brain directly, not a paraphrased wrapper.
             "description": (
-                "Search across the full semantic layer at once: episodic memory units, "
-                "promoted generalized facts and relationships, raw asserted facts and "
-                "relationships, rules/constraints, and concept definitions. Results are "
-                "fused into one ranked list. Use memory_expand on a result's id to recover "
-                "the raw episodes behind it."
+                "Recall relevant context from past conversations and long-term memory. "
+                "Searches the full semantic layer at once: episodic memory units, promoted "
+                "generalized facts and relationships, raw asserted facts and relationships, "
+                "rules/constraints, and concept definitions, fused into one ranked list. "
+                "Use memory_expand on a result's id to recover the raw episodes behind it."
             ),
             "parameters": {
                 "type": "object",
@@ -248,9 +258,9 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "memory_expand",
             "description": (
-                "Recover raw, verbatim episodes backing a memory_search result. Always "
+                "Recover raw, verbatim episodes backing a search_memory result. Always "
                 "full-depth — the raw events and facts, in chronological order. Use when the "
-                "content already attached to a memory_search result isn't specific enough."
+                "content already attached to a search_memory result isn't specific enough."
             ),
             "parameters": {
                 "type": "object",
@@ -269,21 +279,14 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "search_tools",
-            # Rewritten 2026-09-04 alongside DEFAULT_SYSTEM_PROMPT — call_tool
-            # is no longer a tool the model can select at all (tool-registry.md,
-            # "Resolved: Three-Layer Tool Taxonomy & Per-Task Resolution");
-            # telling it to "use call_tool" here left it with no valid way to
-            # act on its own search results. A match this call surfaces is
-            # bound (tools._persist_discovered) and offered directly, by its
-            # own name, starting the turn's NEXT step.
+            "name": "discover_tools",
             "description": (
                 "Semantically search the tools available across all registered MCP "
                 "backends, plus locally-available shell/CLI capabilities, for something not "
                 "already offered to you directly. Returns candidates with a server, tool name, "
-                "description, and input schema — for your own awareness of what exists. A match "
-                "becomes directly callable by its own tool name (or shell_exec, for a shell "
-                "result) starting your NEXT step, not this one."
+                "description, and input schema. A match becomes directly callable by its own "
+                "tool name (or shell_exec, for a shell result) starting your NEXT step, not "
+                "this one — so don't expect to invoke it in the same response that found it."
             ),
             "parameters": {
                 "type": "object",
@@ -299,7 +302,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "call_tool",
-            "description": "Invoke a tool discovered via search_tools, on the backend that owns it.",
+            "description": "Invoke a tool discovered via discover_tools, on the backend that owns it.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -665,6 +668,28 @@ _DELIVER_ATTACHMENT_SCHEMA = {
 }
 
 
+_LOAD_SKILL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "load_skill",
+        "description": (
+            "Pull a procedure from past successful runs into your context — a step-by-step "
+            "guide for a kind of task. Describe the task you're about to do; the closest "
+            "matching procedure is returned as an observation to follow (adapt or ignore it "
+            "where the situation differs). If several match, you get their titles to pick "
+            "from; if none do, you get the titles of what exists."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Natural-language description of the task you're about to do."},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
 _PROPOSE_PLAN_SCHEMA = {
     "type": "function",
     "function": {
@@ -709,6 +734,7 @@ _SCHEMA_BY_NAME: dict[str, dict] = {
     t["function"]["name"]: t
     for t in [
         *TOOLS_SCHEMA,
+        _LOAD_SKILL_SCHEMA,
         _PROPOSE_PLAN_SCHEMA,
         _CHECKPOINT_DONE_SCHEMA,
         _DELIVER_REPLY_SCHEMA,

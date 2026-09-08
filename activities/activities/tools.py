@@ -405,6 +405,56 @@ async def memory_expand(arguments: dict, ctx: ToolContext) -> dict:
     return await agent_brain.call_tool("memory_expand", arguments)
 
 
+# load_skill — docs/components/turn-pipeline.md. The model asks for a procedure
+# by describing the task it's about to do; return the closest matching rendered
+# procedure as an observation (lcm.assemble folds tool_calls.result into the
+# next prompt as context — exactly "the procedure text appended as an
+# observation"). Ambiguous → the candidate titles to pick from; nothing over the
+# floor → the titles of what exists, so the model at least knows the catalog.
+_LOAD_SKILL_FLOOR = 0.30          # cosine; skill trigger texts are short, so matches run lower than doc-doc
+_LOAD_SKILL_AMBIGUOUS_GAP = 0.05  # 2nd-best within this of the best → present both rather than guess
+_LOAD_SKILL_SCOPES = ("global",)
+
+
+async def load_skill(arguments: dict, ctx: ToolContext) -> dict:
+    from .skills import embedding as _emb, store as _store
+    from .skills.vectors import cosine
+
+    query = str(arguments.get("query", "")).strip()
+    if not query:
+        return {"error": "load_skill needs a 'query' describing the task you're about to do."}
+
+    procedures = await _store.current_procedures(ctx.pool, _LOAD_SKILL_SCOPES)
+    if not procedures:
+        return {"note": "No procedures have been recorded yet."}
+
+    q_vec = await _emb.embed(query)
+    if q_vec is None:
+        return {"note": "Skill similarity search is unavailable (no embedding backend configured)."}
+
+    scored = sorted(
+        ((cosine(q_vec, p.trigger_embedding), p) for p in procedures if p.trigger_embedding),
+        key=lambda t: t[0],
+        reverse=True,
+    )
+    if not scored or scored[0][0] < _LOAD_SKILL_FLOOR:
+        return {
+            "note": "No recorded procedure matches that closely.",
+            "available": [p.title for _, p in scored[:8]] or [p.title for p in procedures[:8]],
+        }
+
+    best_sim, best = scored[0]
+    if len(scored) > 1 and best_sim - scored[1][0] < _LOAD_SKILL_AMBIGUOUS_GAP:
+        near = [p for s, p in scored if best_sim - s < _LOAD_SKILL_AMBIGUOUS_GAP][:4]
+        return {
+            "ambiguous": [{"id": p.id, "title": p.title} for p in near],
+            "hint": "Several procedures match — call load_skill again with a more specific query.",
+        }
+
+    logger.info("load_skill: matched %s (%r, sim=%.2f) for %r", best.id, best.title, best_sim, query[:60])
+    return {"procedure_id": best.id, "title": best.title, "procedure": best.render()}
+
+
 async def discover_tools(query: str, top_k: int = 5) -> list[dict]:
     """The core of search_tools, ctx-free so both the model-facing tool
     handler below AND the request pipeline's ToolDiscover activity
@@ -609,12 +659,16 @@ from . import capabilities as _cap  # noqa: E402
 # only hand-maintained tool list left, and it carries nothing but the wiring —
 # the schema lives in llm.py, the turn-kind / peel / timing metadata in
 # capabilities.py (docs/components/tool-registry.md, "Implementation shape").
+# key = capabilities.Capability.handler_ref. The renamed meta-tools
+# (search_memory / discover_tools, docs/components/turn-pipeline.md) keep their
+# original handler function names here — only the model-facing name changed.
 _HANDLERS: dict[str, Any] = {
     "shell_exec": shell_exec,
     "merge_subagent_output": merge_subagent_output,
-    "memory_search": memory_search,
+    "search_memory": memory_search,
     "memory_expand": memory_expand,
-    "search_tools": search_tools,
+    "discover_tools": search_tools,
+    "load_skill": load_skill,
     "call_tool": call_tool,
     "lcm_grep": lcm_grep,
     "lcm_describe": lcm_describe,
@@ -642,6 +696,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
 # not model-facing, so not in the capability table; still needed by scenario
 # fixtures that script tool calls.
 TOOL_REGISTRY.update({"search": _DEMO_TOOL_SPEC, "slow_tool": _DEMO_TOOL_SPEC, "noop_tool": _DEMO_TOOL_SPEC})
+
+# One-phase back-compat: a stray call to a meta-tool's old name (from an
+# already-recorded skill procedure, or a stale fixture) still dispatches instead
+# of failing "unknown tool". Removed once the store has re-recorded under the
+# new names (docs/components/turn-pipeline.md, Phase 9).
+TOOL_REGISTRY.update({
+    "memory_search": TOOL_REGISTRY["search_memory"],
+    "search_tools": TOOL_REGISTRY["discover_tools"],
+})
 
 assert set(_HANDLERS) == set(_cap.HANDLER_REFS), (
     "tools._HANDLERS and capabilities.CAPABILITIES handler_refs have drifted: "

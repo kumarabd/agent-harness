@@ -1,0 +1,21 @@
+{
+  "_comment": "Plumbing check for the load_skill meta-tool (docs/components/turn-pipeline.md, Phase 3). Fixtures script the model's response but the handler runs for real: load_skill embeds the query, ranks the current skill_procedures (the authored seeds loaded at worker startup are always present), and writes an observation into tool_calls.result — a matched procedure, an ambiguous-candidates list, or the available titles. This asserts the handler runs cleanly and produces a non-null result; match quality is an eval concern, not this scenario's.",
+  "message": {
+    "role": "user",
+    "content": "Walk me through the right way to do a thorough code review."
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Let me pull up the procedure for this.",
+      "tool_calls": [
+        { "name": "load_skill", "is_subagent": false, "arguments": { "query": "review a code change thoroughly for correctness and quality" } }
+      ],
+      "usage": { "input_tokens": 50, "output_tokens": 15 }
+    },
+    {
+      "content": "Here's how I'd approach a thorough code review.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 90, "output_tokens": 40 }
+    }
+  ]
+}

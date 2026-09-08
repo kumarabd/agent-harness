@@ -3,15 +3,14 @@ Three-Layer Tool Taxonomy & Per-Task Resolution" and its "Implementation shape".
 
 Everything the model can emit in a response falls into one of three layers:
 
-  - INTERFACE  — open-ended external reach: shell_exec, search_tools, and the
+  - INTERFACE  — open-ended external reach: shell_exec, discover_tools, and the
                  per-task *resolved* tools (built per turn from ToolDiscover's
                  rows, not listed here).
-  - COGNITION  — reading the agent's own substrate: memory_search / memory_expand
-                 (agent-brain), lcm_grep / lcm_describe / lcm_expand (this
-                 session's history + compaction DAG).
+  - COGNITION  — reading the agent's own substrate: search_memory / memory_expand
+                 (agent-brain), load_skill (the procedure store), lcm_grep /
+                 lcm_describe / lcm_expand (this session's history + compaction DAG).
   - CONTROL    — steering the constructs the agent lives inside: declare_next_step_hint
-                 (tier), propose_plan / checkpoint_done (plan), spawn_subagent
-                 (subagent tree), the intention tools.
+                 (tier), spawn_subagent (subagent tree), the intention tools.
 
 This module is the single declarative source for *which* capabilities exist,
 *which turn kinds* expose each one, whether it is *peeled* (a control signal the
@@ -70,6 +69,11 @@ class Capability:
     layer: Layer
     turn_kinds: frozenset[TurnKind]
     peel: bool = False
+    # docs/components/turn-pipeline.md — a provisioning action (search_memory,
+    # discover_tools, load_skill, spawn_subagent, ask_user). Flagged so later
+    # phases can exclude these from approval gating / the user-visible stream /
+    # the iteration budget. No behavioural effect yet.
+    meta: bool = False
     # key into tools.py's handler map; None for a peeled control signal or for
     # spawn_subagent (dispatched as a child workflow by turn.go, not an activity)
     handler_ref: str | None = None
@@ -95,9 +99,10 @@ _NONPLAN = frozenset({TurnKind.REASONING, TurnKind.CHECKPOINT, TurnKind.PLAN_HAN
 CAPABILITIES: list[Capability] = [
     Capability("shell_exec", Layer.INTERFACE, _NONPLAN, handler_ref="shell_exec", timing=HEAVY),
     Capability("merge_subagent_output", Layer.CONTROL, _NONPLAN, handler_ref="merge_subagent_output", timing=HEAVY),
-    Capability("memory_search", Layer.COGNITION, _NONPLAN, handler_ref="memory_search"),
+    Capability("search_memory", Layer.COGNITION, _NONPLAN, handler_ref="search_memory", meta=True),
     Capability("memory_expand", Layer.COGNITION, _NONPLAN, handler_ref="memory_expand"),
-    Capability("search_tools", Layer.INTERFACE, _NONPLAN, handler_ref="search_tools"),
+    Capability("discover_tools", Layer.INTERFACE, _NONPLAN, handler_ref="discover_tools", meta=True),
+    Capability("load_skill", Layer.COGNITION, _NONPLAN, handler_ref="load_skill", meta=True),
     # call_tool is internal-only since the 2026-09-04 per-task-resolution
     # revision (tool-registry.md, "Resolved: Three-Layer Tool Taxonomy") —
     # turn_kinds=() means schema_for never offers it to the model. It keeps a
@@ -106,7 +111,7 @@ CAPABILITIES: list[Capability] = [
     # 3, tool_call.py) proxies a resolved dispatch through `tools.call_tool`
     # directly using that profile, not a schema-driven model call.
     Capability("call_tool", Layer.INTERFACE, frozenset(), handler_ref="call_tool"),
-    Capability("spawn_subagent", Layer.CONTROL, _NONPLAN, has_subagent_variant=True),
+    Capability("spawn_subagent", Layer.CONTROL, _NONPLAN, has_subagent_variant=True, meta=True),
     Capability("create_intention", Layer.CONTROL, _NONPLAN, handler_ref="create_intention"),
     # 5 CRUD ops -> 1 dispatcher (list/inspect/revise/snooze/cancel) —
     # tool-registry.md, "Resolved: Three-Layer Tool Taxonomy".
