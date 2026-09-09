@@ -1,13 +1,11 @@
 {
-  "message": {
-    "role": "user",
-    "content": "run a long tool call"
-  },
+  "_comment": "First half of the interrupt-* pair. turn:1 starts a long shell_exec (sleep 15, gated -> the runner auto-approves it). Run interrupt-followup against the same -session while the sleep is still running: turn.go cancels the in-flight tool, folds the follow-up in as a user message, and the next scripted response (added by interrupt-followup) acts on it. See interrupt-followup.expect.sh.",
+  "message": { "role": "user", "content": "run a long tool call" },
   "scripted_model_responses": [
     {
-      "content": "Starting a long-running tool call.",
+      "content": "Starting a long-running command.",
       "tool_calls": [
-        { "name": "slow_tool", "arguments": { "duration": "long" }, "is_subagent": false }
+        { "name": "shell_exec", "arguments": { "command": "sleep 15" }, "is_subagent": false }
       ],
       "usage": { "input_tokens": 100, "output_tokens": 30 }
     }

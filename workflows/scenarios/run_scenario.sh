@@ -138,13 +138,16 @@ if [ "${AUTO_APPROVE:-1}" = "1" ]; then
   (
     seen=""
     for _ in $(seq 1 300); do
-      ids="$(pg_query "SELECT request_id FROM user_input_requests WHERE kind='permission' AND status='pending' AND turn_id LIKE '${ROOT_TURN_ID}%'" 2>/dev/null || true)"
-      for rid in $ids; do
-        case " $seen " in *" $rid "*) continue ;; esac
-        seen="$seen $rid"
-        echo "  --- auto-approving permission request $rid ---"
+      # request_id == the tool_call_id; the UserInputRequestWorkflow's own id
+      # is <request_id>:approval — signal THAT, read straight from the row.
+      rows="$(pg_query "SELECT request_id || '@' || workflow_id FROM user_input_requests WHERE kind='permission' AND status='pending' AND turn_id LIKE '${ROOT_TURN_ID}%'" 2>/dev/null || true)"
+      for row in $rows; do
+        rid="${row%%@*}"; wid="${row##*@}"
+        case " $seen " in *" $wid "*) continue ;; esac
+        seen="$seen $wid"
+        echo "  --- auto-approving permission request $rid (wf $wid) ---"
         TEMPORAL_ADDRESS=localhost:17233 temporal workflow signal \
-          --namespace "$TEMPORAL_NAMESPACE" --workflow-id "$rid" \
+          --namespace "$TEMPORAL_NAMESPACE" --workflow-id "$wid" \
           --name UserInputResponse \
           --input "{\"request_id\":\"$rid\",\"selected_option_id\":\"approve\"}" >/dev/null 2>&1 || true
       done

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Second half of the interrupt-* pair (run manually or via run_all.sh's
-# chained-pair mode). interrupt-initial's turn is mid slow_tool when this
+# chained-pair mode). interrupt-initial's turn is mid `shell_exec sleep 15` when this
 # follow-up arrives: turn.go must cancel the in-flight tool, fold the message
 # into the SAME turn, and let the model act on it.
 #
@@ -19,9 +19,9 @@ ok() { echo "  ok: $1"; }
   || fail "root turn not completed after the follow-up"
 ok "the interrupted turn resumed and completed (one turn, not two)"
 
-# the in-flight slow_tool was cancelled by the interrupt
-tc="$(pg "SELECT tool_name || '|' || status FROM tool_calls WHERE parent_id = '$ROOT_TURN_ID' AND tool_name = 'slow_tool'")"
-[ "$tc" = "slow_tool|cancelled" ] || fail "slow_tool tool_call is '$tc', expected 'slow_tool|cancelled'"
+# the in-flight shell_exec was cancelled by the interrupt
+tc="$(pg "SELECT tool_name || '|' || status FROM tool_calls WHERE parent_id = '$ROOT_TURN_ID' AND tool_name = 'shell_exec'")"
+[ "$tc" = "shell_exec|cancelled" ] || fail "shell_exec tool_call is '$tc', expected 'shell_exec|cancelled'"
 ok "the in-flight tool call was cancelled by the follow-up"
 
 # the follow-up landed in THIS turn as a user message
