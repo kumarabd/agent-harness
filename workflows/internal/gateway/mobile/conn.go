@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
@@ -213,14 +212,7 @@ func (c *conn) coldStartCursor(ctx context.Context) int {
 		"SELECT max(turn_seq) FROM turns WHERE parent_id = $1 AND parent_type = 'session'",
 		c.sessionKey,
 	).Scan(&maxSeq)
-	if maxSeq == nil {
-		return 0
-	}
-	s := *maxSeq - coldStartTurns
-	if s < 0 {
-		s = 0
-	}
-	return s
+	return trailingCursor(maxSeq, coldStartTurns)
 }
 
 func (c *conn) catchup(ctx context.Context) {
@@ -266,8 +258,7 @@ func (c *conn) catchup(ctx context.Context) {
 		c.emitDeltas(ctx, t.seq, t.id)
 		c.emitStatus(ctx, t.seq, t.id)
 
-		terminal := t.status == "completed" || t.status == "failed" || t.status == "cancelled"
-		if terminal {
+		if isTerminal(t.status) {
 			c.send(turnEndFrame{Type: "turn_end", TurnSeq: t.seq, Status: t.status})
 			c.sentThrough = t.seq
 			c.curTurnSeq = -1
@@ -317,14 +308,8 @@ func (c *conn) emitDeltas(ctx context.Context, turnSeq int, turnID string) {
 		if rows.Scan(&seq, &cum) != nil {
 			return
 		}
-		var f deltaFrame
-		if c.lastCum == "" || !strings.HasPrefix(cum, c.lastCum) {
-			// first chunk after (re)connect, or a provider backtrack → snapshot
-			f = deltaFrame{Type: "delta", TurnSeq: turnSeq, Seq: seq, Text: cum, Replace: true}
-		} else {
-			f = deltaFrame{Type: "delta", TurnSeq: turnSeq, Seq: seq, Text: cum[len(c.lastCum):]}
-		}
-		c.send(f)
+		text, replace := deltaFor(c.lastCum, cum)
+		c.send(deltaFrame{Type: "delta", TurnSeq: turnSeq, Seq: seq, Text: text, Replace: replace})
 		c.lastCum = cum
 		c.sentDelSeq = seq
 	}

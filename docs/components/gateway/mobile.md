@@ -86,7 +86,8 @@ derived from it, never trusted from the client.
 
 `internal/gateway/mobile/`: `mobile.go` (Handler, `GET /ws`), `conn.go`
 (per-connection: auth, read pump, tail/catchup), `hub.go` (per-replica LISTEN +
-registry), `frames.go` (wire types). `internal/gateway/clerkauth/` (shared JWT
+registry), `frames.go` (wire types), `tail.go` (pure cursor/diff helpers,
+unit-tested in `tail_test.go`). `internal/gateway/clerkauth/` (shared JWT
 verification). Migration `032` (`messages.client_msg_id` + the NOTIFY triggers).
 
 ## Deferred
