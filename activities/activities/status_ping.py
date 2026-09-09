@@ -57,8 +57,10 @@ class StatusPingActivity:
             turn_id,
         )
         latest = await self._pool.fetchrow(
-            "SELECT tool_name, status FROM tool_calls WHERE parent_id = $1 "
-            "ORDER BY created_at DESC, tool_call_id DESC LIMIT 1",
+            "SELECT tc.tool_name, tc.status FROM tool_calls tc "
+            "JOIN messages m ON m.message_id = tc.message_id "
+            "WHERE tc.parent_id = $1 "
+            "ORDER BY m.seq DESC, tc.tool_call_id DESC LIMIT 1",
             turn_id,
         )
         if latest is None:
