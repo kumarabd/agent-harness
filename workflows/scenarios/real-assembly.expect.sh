@@ -15,8 +15,12 @@
 #      the batched tool_calls fetch + tool-result reconstruction worked.
 #
 # Assertions 3/4 depend on a cooperative fast-tier model; the context makes
-# both facts unambiguous. If this flakes on model quality rather than an
-# assembly regression, loosen to 1/2 only.
+# both facts unambiguous. Acted on 2026-09-08 (they were flaking on model
+# quality — the fast-tier model either answers incompletely or thrashes
+# lcm_grep to max_iterations, while a direct build_conversation check confirms
+# the assembled context DOES carry both facts): 3/4 now WARN, not fail. 1/2
+# (assembly ran without crashing, ModelCall produced output) stay hard — those
+# are the real regression signal for step 9.
 #
 # Called by run_scenario.sh as: expect.sh <session_key> <root_turn_id>
 set -euo pipefail
@@ -40,12 +44,16 @@ n_assistant="$(pg_query "SELECT count(*) FROM messages WHERE parent_id = '$ROOT_
 ok "real ModelCall produced an assistant response"
 
 answer="$(pg_query "SELECT string_agg(content, ' ') FROM messages WHERE parent_id = '$ROOT_TURN_ID' AND role = 'assistant'")"
-echo "$answer" | grep -q "14:12" \
-  || fail "answer missing '14:12' (only in verbatim window messages) — the session-message window may not have assembled: '$answer'"
-ok "answer cites a fact only present in the verbatim message window"
+if echo "$answer" | grep -q "14:12"; then
+  ok "answer cites a fact only present in the verbatim message window"
+else
+  echo "  WARN: answer missing '14:12' (verbatim window) — model quality, not an assembly regression (see header): '$answer'"
+fi
 
-echo "$answer" | grep -Eq "0\.4|0,4" \
-  || fail "answer missing the '0.4%' error rate (only in tool_calls.result) — tool-result reconstruction may be broken: '$answer'"
-ok "answer cites a fact only present in a reconstructed tool result"
+if echo "$answer" | grep -Eq "0\.4|0,4"; then
+  ok "answer cites a fact only present in a reconstructed tool result"
+else
+  echo "  WARN: answer missing the '0.4%' error rate (reconstructed tool result) — model quality, not an assembly regression (see header): '$answer'"
+fi
 
 exit 0

@@ -130,13 +130,15 @@ POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
 
 echo "--- waiting for root turn ($ROOT_TURN_ID) to reach a terminal status ---"
 STATUS=""
-# 180 iterations, not 60 — found live 2026-08-29: max-iterations.json alone
+# 300 iterations, not 60 — found live 2026-08-29: max-iterations.json alone
 # needs ~80s of real activity time (20 iterations x ~4s each), before this
 # loop's own per-poll kubectl-exec overhead (~1-2s/iteration) is even
 # added — a 60s budget genuinely wasn't enough for a real multi-step
-# scenario, not a hung workflow. 180 iterations gives real headroom without
-# hiding an actually-hung workflow forever (still bounded, just generous).
-for _ in $(seq 1 180); do
+# scenario, not a hung workflow. Bumped 180 -> 300 on 2026-09-08: real-assembly
+# runs a real fast-tier model that can thrash the full 20-iteration ceiling
+# with real per-iteration compaction, occasionally overrunning 180. Still
+# bounded — an actually-hung workflow is caught, just with generous headroom.
+for _ in $(seq 1 300); do
   STATUS="$(pg_query "SELECT status FROM turns WHERE turn_id = '$ROOT_TURN_ID'" || true)"
   case "$STATUS" in
     completed|failed|cancelled) break ;;
