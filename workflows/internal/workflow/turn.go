@@ -178,7 +178,7 @@ func compressionState(contextTokens, contextWindow int) string {
 // synthetic error message insert fails its FK against turns(turn_id) and the
 // Persist/Deliver calls become harmless no-ops — there's nothing more
 // meaningful to do when the turn never existed in the first place.
-func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, parentType string, cause error, interrupts *deliveryInterruptSource, planID string) (types.TurnResult, error) {
+func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, parentType string, cause error, interrupts *deliveryInterruptSource) (types.TurnResult, error) {
 	logger := workflow.GetLogger(ctx)
 	logger.Error("turn failed", "turn_id", turnID, "error", cause)
 
@@ -190,7 +190,7 @@ func failTurn(ctx workflow.Context, turnID, sessionKey, connectionID string, par
 		Message: types.Message{Role: "assistant", Content: "Something went wrong processing this turn."},
 	}
 	_ = workflow.ExecuteActivity(actx, "InsertMessage", errInsert).Get(actx, nil)
-	_ = workflow.ExecuteActivity(actx, "Persist", turnID, "failed", planID).Get(actx, nil)
+	_ = workflow.ExecuteActivity(actx, "Persist", turnID, "failed").Get(actx, nil)
 	if parentType == "session" {
 		// The failure-notice text is short and fixed — no recovery needed
 		// here even on a ContentTooLong error, unlike the normal end-of-turn
@@ -806,7 +806,7 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 			InitiatedBy: input.InitiatedBy,
 		}
 		if err := workflow.ExecuteActivity(actx, "InsertMessage", insertInput).Get(actx, nil); err != nil {
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, nil, "")
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, nil)
 		}
 	}
 
@@ -933,7 +933,7 @@ loop:
 		}
 		if mcErr != nil {
 			cancel()
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, mcErr, interrupts, "")
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, mcErr, interrupts)
 		}
 		contextSeq++
 		if mcOut.NextStep != nil {
@@ -1047,7 +1047,7 @@ loop:
 				ictx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
 				if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: input.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
 					cancel()
-					return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, "")
+					return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
 				}
 				cancel()
 				continue
@@ -1069,7 +1069,7 @@ loop:
 				ictx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
 				if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: input.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
 					cancel()
-					return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, "")
+					return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
 				}
 				cancel()
 				continue
@@ -1270,7 +1270,7 @@ loop:
 			iactx := workflow.WithActivityOptions(ctx, iao)
 			insertInput := types.InsertMessageInput{TurnID: input.TurnID, Message: next.Message}
 			if err := workflow.ExecuteActivity(iactx, "InsertMessage", insertInput).Get(iactx, nil); err != nil {
-				return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, "")
+				return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
 			}
 
 			// A mid-turn follow-up lands in the conversation (InsertMessage
@@ -1332,7 +1332,7 @@ loop:
 	{
 		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 		actx := workflow.WithActivityOptions(ctx, ao)
-		_ = workflow.ExecuteActivity(actx, "Persist", input.TurnID, "completed", "").Get(actx, nil)
+		_ = workflow.ExecuteActivity(actx, "Persist", input.TurnID, "completed").Get(actx, nil)
 	}
 	// docs/components/memory-slot.md's "Resolved: Write-Path Construction"
 	// correction (2026-08-29): WriteMemory no longer dispatches here, once

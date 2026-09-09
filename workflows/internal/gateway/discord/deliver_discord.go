@@ -171,7 +171,7 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 	// turn's plan_id points at its planning turn, and the planning turn
 	// itself is always top-level (parent_id IS the session_key, and it
 	// self-references its own plan_id — confirmed live) — so joining through
-	// COALESCE(t.plan_id, t.turn_id) resolves the right root for both a
+	// t.turn_id resolves the right root for both a
 	// plain top-level turn (plan_id NULL, root = itself) and any plan-owned
 	// turn (root = its planning turn). Same fix applied to DeliverChunk and
 	// DeliverReply/DeliverAttachment's deliverToolChannelAndPrompt below.
@@ -180,7 +180,7 @@ func (a *discordDeliverActivity) Deliver(ctx context.Context, turnID string) err
 	err := a.pool.QueryRow(ctx, `
 		SELECT s.channel_id, s.session_key, m.content, t.streamed_message_ref
 		FROM turns t
-		JOIN turns root ON root.turn_id = COALESCE(t.plan_id, t.turn_id)
+		JOIN turns root ON root.turn_id = t.turn_id
 		JOIN sessions s ON s.session_key = root.parent_id
 		JOIN LATERAL (
 			SELECT content FROM messages
@@ -380,7 +380,7 @@ func (a *discordDeliverActivity) DeliverInterim(ctx context.Context, requestID s
 
 	var channelID, sessionKey, prompt string
 	var optionsJSON []byte
-	// COALESCE(t.plan_id, t.turn_id) — same fix as Deliver's own query above;
+	// t.turn_id — same fix as Deliver's own query above;
 	// every plan-approval request today is keyed on the planning turn itself
 	// (always top-level, so this was harmless in practice so far), but a
 	// permission/decision UserInputRequest keyed on a plan-owned turn would
@@ -389,7 +389,7 @@ func (a *discordDeliverActivity) DeliverInterim(ctx context.Context, requestID s
 		SELECT s.channel_id, s.session_key, r.prompt, r.options
 		FROM user_input_requests r
 		JOIN turns t ON t.turn_id = r.turn_id
-		JOIN turns root ON root.turn_id = COALESCE(t.plan_id, t.turn_id)
+		JOIN turns root ON root.turn_id = t.turn_id
 		JOIN sessions s ON s.session_key = root.parent_id
 		WHERE r.request_id = $1
 	`, requestID).Scan(&channelID, &sessionKey, &prompt, &optionsJSON)
@@ -459,11 +459,11 @@ func (a *discordDeliverActivity) DeliverStatus(ctx context.Context, turnID strin
 	}
 
 	var channelID string
-	// Same COALESCE(t.plan_id, t.turn_id) root resolution as Deliver above.
+	// Same t.turn_id root resolution as Deliver above.
 	if err := a.pool.QueryRow(ctx, `
 		SELECT s.channel_id
 		FROM turns t
-		JOIN turns root ON root.turn_id = COALESCE(t.plan_id, t.turn_id)
+		JOIN turns root ON root.turn_id = t.turn_id
 		JOIN sessions s ON s.session_key = root.parent_id
 		WHERE t.turn_id = $1
 	`, turnID).Scan(&channelID); err != nil {
@@ -496,7 +496,7 @@ func (a *discordDeliverActivity) deliverToolResult(ctx context.Context, toolCall
 
 // deliverToolChannelAndPrompt resolves a deliver_reply/deliver_attachment
 // call's target channel + turn's session_key, the same join Deliver/
-// DeliverInterim already use (and the same COALESCE(t.plan_id, t.turn_id)
+// DeliverInterim already use (and the same t.turn_id
 // fix — deliver_reply/deliver_attachment are dispatched from plan-owned
 // turns at least as often as top-level ones, so this one would have hit the
 // zero-row bug immediately, not just in theory).
@@ -504,7 +504,7 @@ func (a *discordDeliverActivity) deliverToolChannelAndPrompt(ctx context.Context
 	err = a.pool.QueryRow(ctx,
 		`SELECT s.channel_id, s.session_key
 		 FROM turns t
-		 JOIN turns root ON root.turn_id = COALESCE(t.plan_id, t.turn_id)
+		 JOIN turns root ON root.turn_id = t.turn_id
 		 JOIN sessions s ON s.session_key = root.parent_id
 		 WHERE t.turn_id = $1`,
 		turnID,
@@ -659,13 +659,13 @@ func (a *discordDeliverActivity) DeliverChunk(ctx context.Context, turnID string
 	var channelID, sessionKey string
 	var streamedMessageRef *string
 	var streamedMessageOffset int
-	// Same COALESCE(t.plan_id, t.turn_id) fix as Deliver's own query above —
+	// Same t.turn_id fix as Deliver's own query above —
 	// streamingEligible (turn.go) doesn't check ParentType, so a plan-owned
 	// turn's streaming-eligible first iteration hit this same zero-row join.
 	err = a.pool.QueryRow(ctx, `
 		SELECT s.channel_id, s.session_key, t.streamed_message_ref, t.streamed_message_offset
 		FROM turns t
-		JOIN turns root ON root.turn_id = COALESCE(t.plan_id, t.turn_id)
+		JOIN turns root ON root.turn_id = t.turn_id
 		JOIN sessions s ON s.session_key = root.parent_id
 		WHERE t.turn_id = $1
 	`, turnID).Scan(&channelID, &sessionKey, &streamedMessageRef, &streamedMessageOffset)
