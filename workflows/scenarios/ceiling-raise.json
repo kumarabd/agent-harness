@@ -1,0 +1,460 @@
+{
+  "_comment": "turn-pipeline.md iteration ceiling raise (turn.go). The base ceiling is baseIterations=20. On the 20th step the model's report_status carries est_remaining_steps=4, so the ceiling rises to iterations+est*2 = 28 (< hardIterationCap 50). The fixture keeps calling noop_tool; the turn must run to exactly 28 iterations, not stop at 20. ceiling-raise.expect.sh counts the assistant messages.",
+  "message": {
+    "role": "user",
+    "content": "grind through this"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 0
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 1
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 2
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 3
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 4
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 5
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 6
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 7
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 8
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 9
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 10
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 11
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 12
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 13
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 14
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 15
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 16
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 17
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 18
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "this is going to take a while longer",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 19
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      },
+      "next_step": {
+        "est_remaining_steps": 4
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 20
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 21
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 22
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 23
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 24
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 25
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 26
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    {
+      "content": "step",
+      "tool_calls": [
+        {
+          "name": "noop_tool",
+          "arguments": {
+            "i": 27
+          },
+          "is_subagent": false
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    }
+  ]
+}

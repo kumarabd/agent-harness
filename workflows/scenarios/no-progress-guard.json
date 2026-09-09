@@ -1,0 +1,11 @@
+{
+  "_comment": "turn-pipeline.md no-progress guard (turn.go, future-work.md §4). The model reports status=working but produces no content and no tool call — twice running. turn.go must end the turn (stopReason='no_progress') at the second such step rather than burning the whole iteration ceiling. no-progress-guard.expect.sh checks the turn stopped at exactly 2 iterations.",
+  "message": { "role": "user", "content": "do the task" },
+  "scripted_model_responses": [
+    { "content": "", "tool_calls": [], "status": "working", "usage": { "input_tokens": 30, "output_tokens": 2 } },
+    { "content": "", "tool_calls": [], "status": "working", "usage": { "input_tokens": 30, "output_tokens": 2 } },
+    { "content": "", "tool_calls": [], "status": "working", "usage": { "input_tokens": 30, "output_tokens": 2 } },
+    { "content": "", "tool_calls": [], "status": "working", "usage": { "input_tokens": 30, "output_tokens": 2 } },
+    { "content": "", "tool_calls": [], "status": "working", "usage": { "input_tokens": 30, "output_tokens": 2 } }
+  ]
+}

@@ -128,6 +128,35 @@ POSTGRES_DB="$PG_DB" \
 POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
   "$STARTER_BIN" -session "$SESSION_KEY" -scenario "$SCENARIO_JSON"
 
+# --- Auto-approve any permission request this turn raises. A scripted
+# shell_exec (or a subagent's) against a gated command dispatches a real
+# UserInputRequestWorkflow that blocks for an hour; nothing else in this slice
+# answers it. Poll for pending kind='permission' rows under this turn's tree
+# and signal each one 'approve'. Backgrounded for the turn's lifetime; the
+# ${AUTO_APPROVE:-1} env lets a caller opt out (e.g. to test a real denial).
+if [ "${AUTO_APPROVE:-1}" = "1" ]; then
+  (
+    seen=""
+    for _ in $(seq 1 300); do
+      ids="$(pg_query "SELECT request_id FROM user_input_requests WHERE kind='permission' AND status='pending' AND turn_id LIKE '${ROOT_TURN_ID}%'" 2>/dev/null || true)"
+      for rid in $ids; do
+        case " $seen " in *" $rid "*) continue ;; esac
+        seen="$seen $rid"
+        echo "  --- auto-approving permission request $rid ---"
+        TEMPORAL_ADDRESS=localhost:17233 temporal workflow signal \
+          --namespace "$TEMPORAL_NAMESPACE" --workflow-id "$rid" \
+          --name UserInputResponse \
+          --input "{\"request_id\":\"$rid\",\"selected_option_id\":\"approve\"}" >/dev/null 2>&1 || true
+      done
+      st="$(pg_query "SELECT status FROM turns WHERE turn_id = '$ROOT_TURN_ID'" 2>/dev/null || true)"
+      case "$st" in completed|failed|cancelled) break ;; esac
+      sleep 1
+    done
+  ) &
+  APPROVER_PID=$!
+  trap '[ -n "${APPROVER_PID:-}" ] && kill "$APPROVER_PID" 2>/dev/null || true' EXIT
+fi
+
 echo "--- waiting for root turn ($ROOT_TURN_ID) to reach a terminal status ---"
 STATUS=""
 # 300 iterations, not 60 — found live 2026-08-29: max-iterations.json alone

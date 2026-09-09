@@ -76,7 +76,7 @@ class ModelCallActivity:
             # (InsertMessage created it); `_test_scripted_responses.content` is
             # NOT NULL, so a NULL here means no fixture matched.
             head = await conn.fetchrow(
-                "SELECT t.parent_type, s.content, s.tool_calls, s.usage "
+                "SELECT t.parent_type, s.content, s.tool_calls, s.usage, s.status, s.next_step "
                 "FROM turns t "
                 "LEFT JOIN _test_scripted_responses s ON s.turn_id = t.turn_id AND s.seq = $2 "
                 "WHERE t.turn_id = $1",
@@ -107,12 +107,17 @@ class ModelCallActivity:
                 context_tokens = 0
                 context_window = 0
                 next_hint_modality, next_hint_tier = model_registry.default_hint()
-                # Fixture path: the model can't author status/next_step, so
-                # status stays synthesized from tool-call presence below and
-                # the note/estimate are empty.
-                model_status = ""
-                next_step_note = ""
-                est_remaining_steps = 0
+                # A scenario fixture MAY carry the model-authored output fields
+                # (status / next_step) to drive the branches the fixture path
+                # couldn't otherwise reach (status="blocked", the no-progress
+                # guard, the iteration-ceiling raise). Absent ⇒ same synthesis
+                # as before.
+                model_status = fixture["status"] or ""
+                _fx_next = json.loads(fixture["next_step"]) if fixture["next_step"] else {}
+                next_step_note = str(_fx_next.get("note", ""))
+                est_remaining_steps = int(_fx_next.get("est_remaining_steps", 0) or 0)
+                if _fx_next.get("tier"):
+                    next_hint_tier = str(_fx_next["tier"])
                 # Fixture path never runs build_conversation, so there's no
                 # per-task resolved set to speak of — a scripted response can
                 # still script a call to any TOOL_REGISTRY-backed name

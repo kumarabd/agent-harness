@@ -1,0 +1,35 @@
+{
+  "_comment": "Root sibling fan-out — two spawn_subagent calls in one response run as concurrent child TurnWorkflows (<turn:1>:sub:1 and <turn:1>:sub:2), both awaited before the parent's next step. parallel-subagents.expect.sh checks both subagent turns completed and the parent folded both results into its final answer.",
+  "message": { "role": "user", "content": "audit the auth module and the billing module in parallel, then summarize both" },
+  "scripted_model_responses": [
+    {
+      "content": "Delegating both audits.",
+      "tool_calls": [
+        {
+          "name": "spawn_subagent", "is_subagent": true,
+          "arguments": {
+            "prompt": "Audit the authentication module for injection and broken session handling. Return a short findings list.",
+            "scripted_model_responses": [
+              { "content": "Auth audit done — 1 finding: session fixation on login.", "tool_calls": [], "usage": { "input_tokens": 60, "output_tokens": 20 } }
+            ]
+          }
+        },
+        {
+          "name": "spawn_subagent", "is_subagent": true,
+          "arguments": {
+            "prompt": "Audit the billing module for rounding errors and missing idempotency on charge. Return a short findings list.",
+            "scripted_model_responses": [
+              { "content": "Billing audit done — 1 finding: charge endpoint is not idempotent.", "tool_calls": [], "usage": { "input_tokens": 60, "output_tokens": 20 } }
+            ]
+          }
+        }
+      ],
+      "usage": { "input_tokens": 90, "output_tokens": 30 }
+    },
+    {
+      "content": "Both audits are in: auth has a session-fixation issue on login, billing's charge endpoint is not idempotent.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 140, "output_tokens": 45 }
+    }
+  ]
+}

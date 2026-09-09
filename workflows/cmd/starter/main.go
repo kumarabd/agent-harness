@@ -43,6 +43,12 @@ type scenarioModelResponse struct {
 	Content   string             `json:"content"`
 	ToolCalls []scenarioToolCall `json:"tool_calls"`
 	Usage     types.Usage        `json:"usage"`
+	// Optional model-authored output fields (docs/components/turn-pipeline.md).
+	// Absent ⇒ ModelCall synthesizes status from tool-call presence. Present ⇒
+	// the fixture drives status="blocked" / the no-progress guard / the
+	// iteration-ceiling raise, which a fixture couldn't reach otherwise.
+	Status   string          `json:"status,omitempty"`
+	NextStep json.RawMessage `json:"next_step,omitempty"`
 }
 
 type scenarioToolCall struct {
@@ -229,9 +235,18 @@ func writeFixtures(ctx context.Context, pool *pgxpool.Pool, turnID string, start
 		if err != nil {
 			return err
 		}
+		var status any
+		if resp.Status != "" {
+			status = resp.Status
+		}
+		var nextStep any
+		if len(resp.NextStep) > 0 {
+			nextStep = string(resp.NextStep)
+		}
 		_, err = pool.Exec(ctx,
-			"INSERT INTO _test_scripted_responses (turn_id, seq, content, tool_calls, usage) VALUES ($1, $2, $3, $4, $5)",
-			turnID, seq, resp.Content, toolCallsJSON, usageJSON,
+			"INSERT INTO _test_scripted_responses (turn_id, seq, content, tool_calls, usage, status, next_step) "+
+				"VALUES ($1, $2, $3, $4, $5, $6, $7)",
+			turnID, seq, resp.Content, toolCallsJSON, usageJSON, status, nextStep,
 		)
 		if err != nil {
 			return fmt.Errorf("writing fixture for turn %q seq %d: %w", turnID, seq, err)

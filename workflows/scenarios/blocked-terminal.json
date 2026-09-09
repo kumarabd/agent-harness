@@ -1,0 +1,12 @@
+{
+  "_comment": "turn-pipeline.md status:\"blocked\" terminal branch (turn.go). The model reports status=blocked with no tool call and no ask_user — it has said its piece and cannot proceed. The turn delivers that message and ends with stopReason='blocked' rather than looping to the ceiling. blocked-terminal.expect.sh checks the turn completed in exactly one iteration with the blocked message as its final response.",
+  "message": { "role": "user", "content": "fix the thing" },
+  "scripted_model_responses": [
+    {
+      "content": "I can't tell which thing you mean, and I have nothing to act on here. Tell me the file or the symptom and I'll take it from there.",
+      "tool_calls": [],
+      "status": "blocked",
+      "usage": { "input_tokens": 40, "output_tokens": 30 }
+    }
+  ]
+}

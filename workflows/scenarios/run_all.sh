@@ -8,34 +8,24 @@
 # Usage: workflows/scenarios/run_all.sh
 # (same prerequisites as run_scenario.sh — see its own header)
 #
-# Deliberately excluded from SCENARIOS below, and why:
-#   - real-llm-basic.json — needs a real provider API key and spends real
-#     money; not part of the free regression suite. Run manually when
-#     verifying real-provider integration specifically.
-#   - interrupt-initial.json / interrupt-followup.json,
-#     subagent-merge-cancelled-initial.json / -cancelled-followup.json —
-#     each pair is two scripted scenarios chained against the SAME
-#     still-running session (the second targets the first's active turn
-#     as a follow-up). run_scenario.sh always mints a fresh session per
-#     call, so these pairs aren't runnable through this simple one-shot
-#     runner yet — a real, named gap, not silently dropped. Run manually
-#     (two `run_scenario.sh <name> <same-session-key>` calls back to
-#     back) until a chained-pair mode is added here.
-#   - shell-exec-basic.json, shell-exec-parallel.json, multi-step-task.json,
-#     subagent-merge-happy.json, subagent-merge-conflict.json — each
-#     scripts a shell_exec call against a command (`echo`) that
-#     permissions.py's real gating rules require approval for. That
-#     dispatches a real UserInputRequestWorkflow which blocks for
-#     `UserInputRequestTimeout` (1 hour) waiting for a response — and
-#     nothing in this runner answers it (no gateway exists in this slice
-#     to send one). Confirmed live 2026-08-29, not assumed: running the
-#     full list once left four of these genuinely stuck for 10+ minutes
-#     before being found and manually `temporal workflow terminate`-d — a
-#     real, named gap in this runner's scope, not silently dropped from
-#     the suite. Run manually and answer the approval yourself (`temporal
-#     workflow signal --workflow-id <request_id> --name UserInputResponse
-#     --input '{"request_id":"<request_id>","selected_option_id":"approve"}'`)
-#     until auto-approval support is added here.
+# CHAINED_PAIRS below run a <name>-initial / <name>-followup pair against ONE
+# session: -initial starts a turn, then (while it's still in flight) -followup
+# signals the same session so the coordinator folds it into the running turn.
+# Only <name>-followup.expect.sh is checked.
+#
+# Gated shell_exec calls (`echo` needs approval per permissions.py) are handled
+# by run_scenario.sh's built-in auto-approver — it polls for the pending
+# permission request and signals it 'approve'. No manual step any more.
+#
+# Deliberately still excluded:
+#   - real-llm-basic.json / real-llm-pipeline-* — need a real provider API key
+#     and spend real money.
+#   - subagent-merge-happy / -conflict / -cancelled-* — their
+#     merge_subagent_output arg hardcodes a fixed session key
+#     ("merge-happy:turn:1:sub:1" etc.), so they only run under that exact
+#     -session. Run manually:
+#       run_scenario.sh subagent-merge-happy merge-happy
+#   - multi-step-task.json, shell-exec-parallel.json — no .expect.sh yet.
 #
 # Add a new scenario to this suite by: (1) dropping <name>.json (and,
 # ideally, <name>.expect.sh — see run_scenario.sh's own header) into this
@@ -80,6 +70,7 @@ bash "$SCRIPT_DIR/cleanup_test_data.sh" || echo "  (cleanup had non-fatal errors
 SCENARIOS=(
   happy-path
   shell-exec-slow
+  shell-exec-basic
   max-iterations
   claim-check-large-output
   exploration-summary-json
@@ -93,8 +84,19 @@ SCENARIOS=(
   spawn-subagent-nested-valid
   spawn-subagent-nested-rejected
   subagent-full-agent
+  parallel-subagents
   real-assembly
   resolved-tool-dispatch
+  blocked-terminal
+  no-progress-guard
+  ceiling-raise
+)
+
+# <name>-initial started, then <name>-followup signalled into the same
+# still-running session. Only <name>-followup.expect.sh is checked.
+CHAINED_PAIRS=(
+  interrupt
+  ask-user
 )
 
 PASSED=()
@@ -112,6 +114,28 @@ for name in "${SCENARIOS[@]}"; do
     NO_ASSERTIONS+=("$name")
   else
     PASSED+=("$name")
+  fi
+done
+
+for pair in "${CHAINED_PAIRS[@]}"; do
+  echo ""
+  echo "=== chained pair: $pair ==="
+  key="test:scenario:${pair}:$(date +%s)-$RANDOM"
+  # -initial in the background: it starts the turn and waits for it to finish,
+  # which is fine — the followup below folds into that same still-running turn.
+  bash "$SCRIPT_DIR/run_scenario.sh" "${pair}-initial" "$key" >/dev/null 2>&1 &
+  init_pid=$!
+  sleep 3
+  output="$(bash "$SCRIPT_DIR/run_scenario.sh" "${pair}-followup" "$key" 2>&1)"
+  status=$?
+  wait "$init_pid" 2>/dev/null || true
+  echo "$output"
+  if [ $status -ne 0 ]; then
+    FAILED+=("${pair}-pair")
+  elif echo "$output" | grep -q "^NO-ASSERTIONS:"; then
+    NO_ASSERTIONS+=("${pair}-pair")
+  else
+    PASSED+=("${pair}-pair")
   fi
 done
 
