@@ -7,7 +7,7 @@ Everything the model can emit in a response falls into one of three layers:
                  per-task *resolved* tools (built per turn from ToolDiscover's
                  rows, not listed here).
   - COGNITION  — reading the agent's own substrate: search_memory / memory_expand
-                 (agent-brain), load_skill (the procedure store), lcm_grep /
+                 (agent-brain), lcm_grep /
                  lcm_describe / lcm_expand (this session's history + compaction DAG).
   - CONTROL    — steering the constructs the agent lives inside: report_status
                  (status + next_step), spawn_subagent (subagent tree), the intention tools.
@@ -66,7 +66,7 @@ class Capability:
     turn_kinds: frozenset[TurnKind]
     peel: bool = False
     # docs/components/turn-pipeline.md — a provisioning action (search_memory,
-    # discover_tools, load_skill, spawn_subagent, ask_user). Flagged so later
+    # discover_tools, spawn_subagent, ask_user). Flagged so later
     # phases can exclude these from approval gating / the user-visible stream /
     # the iteration budget. No behavioural effect yet.
     meta: bool = False
@@ -93,7 +93,6 @@ CAPABILITIES: list[Capability] = [
     Capability("search_memory", Layer.COGNITION, _MAIN, handler_ref="search_memory", meta=True),
     Capability("memory_expand", Layer.COGNITION, _MAIN, handler_ref="memory_expand"),
     Capability("discover_tools", Layer.INTERFACE, _MAIN, handler_ref="discover_tools", meta=True),
-    Capability("load_skill", Layer.COGNITION, _MAIN, handler_ref="load_skill", meta=True),
     # call_tool is internal-only since the 2026-09-04 per-task-resolution
     # revision (tool-registry.md, "Resolved: Three-Layer Tool Taxonomy") —
     # turn_kinds=() means schema_for never offers it to the model. It keeps a

@@ -1,10 +1,9 @@
 """Shared helpers for the `turn_retrieval` staging table.
 
-The key column is `owner_id` — "whichever unit owns this row". MemoryRetrieve
-and ToolDiscover run once per TURN and stage under the current turn's id;
-SkillDiscover runs once per task-run and stages under the plan_id (the planning
-turn's id). Workflows carry only an id reference plus per-subsystem status — the
-content lives here.
+`owner_id` is the current turn id. Only `discover_tools` writes here now (the
+pre-LLM retrieval fan-out and the skill subsystem are gone): a mid-turn tool
+discovery is appended so it becomes callable by name on the turn's next step —
+`prompt.assemble` reads the `kind='tool'` rows back into `tools_schema_for`.
 """
 
 from __future__ import annotations

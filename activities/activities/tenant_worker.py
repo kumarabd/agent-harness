@@ -85,8 +85,6 @@ from temporalio.worker import Worker
 
 from . import llm_client, shell_hub
 from .metrics import LATENCY_BUCKETS_SECONDS, SECONDS_LATENCY_METRICS
-from .skills import seed as skill_seed
-from .skills.record import RecordSkillActivity
 from .compress_context import CompressContextActivity
 from .db import create_pool
 from .get_max_turn_seq import GetMaxTurnSeqActivity
@@ -116,11 +114,6 @@ async def main() -> None:
     # builds shell_hub's in-process zvec index once at startup.
     # No-op if shell_hub.CATALOG is empty or EMBEDDING_BASE_URL isn't set.
     await shell_hub.init()
-    # docs/components/skill-subsystem.md phase 1 — load the authored seed
-    # procedures into skill_procedures. Idempotent; embeds only new/changed
-    # seeds. No-op if EMBEDDING_BASE_URL isn't set (seeds present but not
-    # retrievable until it is).
-    await skill_seed.init(pool)
     # AsyncOpenAI clients are no longer constructed here (2026-08-28,
     # per-tier provider revision) — every activity that needs one
     # resolves it via llm_client.get_client(model_config), keyed on the
@@ -162,7 +155,6 @@ async def main() -> None:
         task_queue=task_queue,
         activities=[
             ModelCallActivity(pool, client).__call__,
-            RecordSkillActivity(pool).__call__,
             ToolCallActivity(pool, client).__call__,
             InsertMessageActivity(pool).__call__,
             GetMaxTurnSeqActivity(pool).__call__,

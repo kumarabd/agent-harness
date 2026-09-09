@@ -155,17 +155,6 @@ type ModelCallInput struct {
 	OfferDeliveryTools bool `json:"offer_delivery_tools,omitempty"`
 }
 
-// RecordSkillInput is RecordSkill's input (docs/components/skill-subsystem.md;
-// turn-pipeline.md Phase 8). Dispatched once at turn end when the turn used
-// tools across ≥2 reasoning steps. The activity reads the whole trajectory
-// (this turn + any subagent turns under it by id prefix) from Postgres, then
-// match-or-inserts against skill_procedures.
-type RecordSkillInput struct {
-	TurnID      string `json:"turn_id"`
-	StopReason  string `json:"stop_reason"`
-	CloseReason string `json:"close_reason"` // "turn_end" (the only value now that PlanWorkflow is gone)
-}
-
 // ToolCallRef is one tool call minted by ModelCall — name/ID/dispatch-kind
 // only, no arguments. The workflow uses this to decide Activity-vs-child-workflow
 // dispatch; it never sees the arguments themselves.

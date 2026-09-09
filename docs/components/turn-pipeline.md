@@ -197,9 +197,13 @@ from the user-visible stream and the iteration budget):
 |---|---|
 | `search_memory(query)` | returns matched long-term memory as an observation |
 | `discover_tools(query)` | matched tool schemas become callable for the rest of the turn |
-| `load_skill(name)` | the procedure text is appended to context as an observation |
 | `spawn_subagent(brief, …)` | starts a child `TurnWorkflow` (see *Subagents*) |
 | `ask_user(question, options?)` | parks the turn on a user-input request (see *Interrupts*) |
+
+There is no skill/procedure retrieval. The harness-owned skill subsystem
+(`load_skill`, `RecordSkill`, `SkillDiscover`, the `skill_procedures` store) was
+removed — a procedural-memory approach is deferred and will be redesigned
+separately rather than carried in this shape.
 
 The scratchpad uses the ordinary file tools against a session-scoped path
 (`…/turn/<seq>/scratchpad.md`); assembly auto-tails that path, so there is no
@@ -207,8 +211,8 @@ dedicated scratchpad tool.
 
 Provisioning is a round-trip by nature — the model cannot act on a tool it does
 not yet have a schema for — so the static core tells the model to **batch its
-provisioning** (request skills + tools + memory in one step) and to take the
-first concrete step in the same response where possible.
+provisioning** (request tools + memory in one step) and to take the first
+concrete step in the same response where possible.
 
 ### Information-seeking contract (the three rules)
 
@@ -388,10 +392,10 @@ model:
 
 ## Skill recording
 
-After a turn that did real multi-step work and completed cleanly, a detached
-`RecordSkill` child sweeps that turn's trajectory (match → reinforce; no match +
-success → generalize a new procedure). Gated on the turn having used tools across
-multiple iterations.
+Removed. The harness-owned procedural-memory subsystem (`RecordSkill`,
+`load_skill`, `SkillDiscover`, the `skill_procedures` store, the RL EMA loop) is
+gone — a procedural-memory approach is deferred and will be redesigned
+separately rather than carried in this shape.
 
 **Known regression:** recording is now per-turn. Teaching the agent something
 across several messages fragments into several partial procedures. Accepted for

@@ -405,82 +405,6 @@ async def memory_expand(arguments: dict, ctx: ToolContext) -> dict:
     return await agent_brain.call_tool("memory_expand", arguments)
 
 
-# load_skill — docs/components/turn-pipeline.md. The model asks for a procedure
-# by describing the task it's about to do; return the closest matching rendered
-# procedure as an observation (lcm.assemble folds tool_calls.result into the
-# next prompt as context — exactly "the procedure text appended as an
-# observation"). Ambiguous → the candidate titles to pick from; nothing over the
-# floor → the titles of what exists, so the model at least knows the catalog.
-_LOAD_SKILL_FLOOR = 0.30          # cosine; skill trigger texts are short, so matches run lower than doc-doc
-_LOAD_SKILL_AMBIGUOUS_GAP = 0.05  # 2nd-best within this of the best → present both rather than guess
-_LOAD_SKILL_SCOPES = ("global",)
-
-
-async def load_skill(arguments: dict, ctx: ToolContext) -> dict:
-    from .skills import embedding as _emb, store as _store
-    from .skills.vectors import cosine
-
-    query = str(arguments.get("query", "")).strip()
-    if not query:
-        return {"error": "load_skill needs a 'query' describing the task you're about to do."}
-
-    procedures = await _store.current_procedures(ctx.pool, _LOAD_SKILL_SCOPES)
-    if not procedures:
-        return {"note": "No procedures have been recorded yet."}
-
-    q_vec = await _emb.embed(query)
-    if q_vec is None:
-        return {"note": "Skill similarity search is unavailable (no embedding backend configured)."}
-
-    scored = sorted(
-        ((cosine(q_vec, p.trigger_embedding), p) for p in procedures if p.trigger_embedding),
-        key=lambda t: t[0],
-        reverse=True,
-    )
-    if not scored or scored[0][0] < _LOAD_SKILL_FLOOR:
-        return {
-            "note": "No recorded procedure matches that closely.",
-            "available": [p.title for _, p in scored[:8]] or [p.title for p in procedures[:8]],
-        }
-
-    best_sim, best = scored[0]
-    if len(scored) > 1 and best_sim - scored[1][0] < _LOAD_SKILL_AMBIGUOUS_GAP:
-        near = [p for s, p in scored if best_sim - s < _LOAD_SKILL_AMBIGUOUS_GAP][:4]
-        return {
-            "ambiguous": [{"id": p.id, "title": p.title} for p in near],
-            "hint": "Several procedures match — call load_skill again with a more specific query.",
-        }
-
-    logger.info("load_skill: matched %s (%r, sim=%.2f) for %r", best.id, best.title, best_sim, query[:60])
-    # Record which procedure this run pulled in, so RecordSkill's EMA loop
-    # (skills/record.py, `_SKILL_ROWS_SQL`) can reinforce / re-version it at
-    # turn end — the on-demand equivalent of the old SkillDiscover staging.
-    await _stage_loaded_skill(ctx, best.id)
-    return {"procedure_id": best.id, "title": best.title, "procedure": best.render()}
-
-
-async def _stage_loaded_skill(ctx: ToolContext, procedure_id: str) -> None:
-    """Append a `turn_retrieval` (owner_id=turn_id, kind='skill') row noting
-    `procedure_id`. Best-effort — a staging failure must not fail the model's
-    load_skill call. Same local-import + seq-append shape as
-    `_persist_discovered`."""
-    try:
-        from .retrieval.staging import RetrievalRow, write_rows
-
-        turn_id = ids.turn_id_of_tool_call(ctx.tool_call_id)
-        seq = await ctx.pool.fetchval(
-            "SELECT COALESCE(MAX(seq), -1) + 1 FROM turn_retrieval WHERE owner_id = $1 AND kind = 'skill'",
-            turn_id,
-        )
-        await write_rows(
-            ctx.pool,
-            turn_id,
-            [RetrievalRow(kind="skill", seq=seq, content=procedure_id, metadata={"procedure_id": procedure_id})],
-        )
-    except Exception:  # noqa: BLE001 - staging is bookkeeping, never load-bearing for the call
-        logger.warning("load_skill: failed to stage procedure %s for the RecordSkill loop", procedure_id, exc_info=True)
-
-
 async def discover_tools(query: str, top_k: int = 5) -> list[dict]:
     """The core of search_tools, ctx-free so both the model-facing tool
     handler below AND the request pipeline's ToolDiscover activity
@@ -694,7 +618,6 @@ _HANDLERS: dict[str, Any] = {
     "search_memory": memory_search,
     "memory_expand": memory_expand,
     "discover_tools": search_tools,
-    "load_skill": load_skill,
     "call_tool": call_tool,
     "lcm_grep": lcm_grep,
     "lcm_describe": lcm_describe,

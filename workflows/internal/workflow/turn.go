@@ -83,21 +83,6 @@ func CompressContextWorkflow(ctx workflow.Context, turnID string) error {
 	return workflow.ExecuteActivity(actx, "CompressContext", turnID).Get(actx, nil)
 }
 
-// RecordSkillWorkflow — the skill subsystem's write path
-// (docs/components/skill-subsystem.md). Same thin-wrapper reasoning as
-// WriteMemoryWorkflow: a detached child so the activity's completion is
-// recorded against a still-open history, not the turn's already-closed one.
-// Dispatched once when a task-run closes, over the whole multi-turn trajectory.
-// The old RecordSkillOutcome + skill_candidates + SkillSynthesize chain is
-// collapsed into this one online activity — no candidates queue, no debounce.
-// Longer timeout because RecordSkill makes the generalization model call inline
-// (match ⇒ reinforce, no match + success ⇒ generalize a new procedure).
-func RecordSkillWorkflow(ctx workflow.Context, input types.RecordSkillInput) error {
-	ao := workflow.ActivityOptions{StartToCloseTimeout: 5 * time.Minute}
-	actx := workflow.WithActivityOptions(ctx, ao)
-	return workflow.ExecuteActivity(actx, "RecordSkill", input).Get(actx, nil)
-}
-
 const (
 	// docs/components/turn-pipeline.md, "Iteration ceiling" — the model
 	// proposes est_remaining_steps via report_status; the harness starts the
@@ -799,11 +784,6 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	// into the next ModelCallInput. Empty on the first iteration — model_call.py
 	// bootstraps from model_registry.default_hint() Python-side.
 	hintModality, hintTier := "", ""
-	// docs/components/turn-pipeline.md, Phase 8 — RecordSkill is no longer gated
-	// on a pre-LLM classifier's lane decision. It fires at turn end iff the turn
-	// actually used tools across ≥2 reasoning steps (a real multi-step task-run,
-	// not a chat reply), keyed on the turn's own id.
-	iterationsWithTools := 0
 
 	// --- Start-of-turn: write the inbound message (or, for a subagent, let
 	// InsertMessage derive its kickoff content from its own tool_calls row)
@@ -1108,7 +1088,6 @@ loop:
 			cancel()
 			continue
 		}
-		iterationsWithTools++ // Phase 8 RecordSkill gate — a real working step
 
 		// --- Act: parallel fan-out over this reasoning step's tool calls ---
 		// components/02-architecture-temporal-execution.md §4: siblings run
@@ -1371,37 +1350,8 @@ loop:
 		}
 	}
 
-	// --- Recording (docs/components/turn-pipeline.md, Phase 8). No pre-LLM
-	// classifier decides "task-run" any more — the turn's own trace does: it's
-	// worth recording iff the model actually used tools across ≥2 reasoning
-	// steps (a real multi-step job, not a chat reply or a one-shot lookup).
-	// Keyed on the turn's own id; a subagent's turns sit under it by id prefix.
-	if iterationsWithTools >= 2 {
-		dispatchRecordSkill(ctx, input.TurnID, stopReason, "turn_end")
-	}
-
-	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "iterations_with_tools", iterationsWithTools, "interrupted_during_delivery", interruptedPayload != nil)
+	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "interrupted_during_delivery", interruptedPayload != nil)
 	return types.TurnResult{TurnID: input.TurnID, StopReason: stopReason, Iterations: iterations, InterruptedDuringDelivery: interruptedPayload}, nil
-}
-
-// dispatchRecordSkill starts the detached RecordSkillWorkflow for a finished
-// turn (docs/components/skill-subsystem.md). ABANDON so it outlives this
-// workflow; ALLOW_DUPLICATE so a later path can re-attempt. stopReason is the
-// loop-exit reason (record.py's clean-stop check reads it verbatim); closeReason
-// is always "turn_end" now that PlanWorkflow is gone.
-func dispatchRecordSkill(ctx workflow.Context, turnID string, stopReason string, closeReason string) {
-	rcwo := workflow.ChildWorkflowOptions{
-		WorkflowID:            turnID + ":record-skill",
-		ParentClosePolicy:     enumspb.PARENT_CLOSE_POLICY_ABANDON,
-		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-	}
-	rcctx := workflow.WithChildOptions(ctx, rcwo)
-	rf := workflow.ExecuteChildWorkflow(rcctx, RecordSkillWorkflow, types.RecordSkillInput{
-		TurnID:      turnID,
-		StopReason:  stopReason,
-		CloseReason: closeReason,
-	})
-	_ = rf.GetChildWorkflowExecution().Get(ctx, nil)
 }
 
 // dispatchSubagentManifests fans out one SubagentManifest activity per

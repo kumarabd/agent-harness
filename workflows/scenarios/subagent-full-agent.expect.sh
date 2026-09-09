@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Expectations for subagent-full-agent.json — temporal-workflow.md,
 # "Subagents are full agents", on the flat reason-act loop (turn-pipeline.md
-# Phase 8: no ClassifyRequest, no RoutingWorkflow, no lanes).
+# Phase 8: no ClassifyRequest, no RoutingWorkflow, no lanes; skill subsystem
+# removed).
 #
 # The subagent is spawned from turn:1, so its turn_id is <turn:1>:sub:1. It
-# runs the same reason-act loop as a top-level turn, and because it uses tools
-# across two reasoning steps, dispatchRecordSkill fires for it at turn end ->
-# a skill_procedures row carrying <sub:1> in source_ids.
+# runs the same reason-act loop as a top-level turn — multiple tool-using
+# steps, its own tool_calls under its own id, and completes cleanly. No
+# pre-LLM pipeline, no plan_id, no RecordSkill.
 #
 # Called by run_scenario.sh as: expect.sh <session_key> <root_turn_id>
 set -euo pipefail
@@ -21,15 +22,6 @@ pg() {
 }
 fail() { echo "  FAIL: $1"; exit 1; }
 ok() { echo "  ok: $1"; }
-poll_for() { # <sql count> <min> <label> <tries>
-  local sql="$1" min="$2" label="$3" tries="${4:-20}" v
-  for _ in $(seq 1 "$tries"); do
-    v="$(pg "$sql")"
-    [ "${v:-0}" -ge "$min" ] 2>/dev/null && { echo "  ok: $label ($v)"; return 0; }
-    sleep 1
-  done
-  fail "$label — got '${v:-<none>}', expected >= $min after ${tries}s"
-}
 
 [ "$(pg "SELECT status FROM turns WHERE turn_id = '$ROOT_TURN_ID'")" = "completed" ] \
   || fail "root turn ($ROOT_TURN_ID) not completed"
@@ -37,8 +29,7 @@ sub_status="$(pg "SELECT status FROM turns WHERE turn_id = '$SUB_TURN_ID'")"
 [ "$sub_status" = "completed" ] || fail "subagent turn ($SUB_TURN_ID) status = '$sub_status', expected 'completed'"
 ok "root + subagent turns completed"
 
-# --- no pre-LLM pipeline ran (Phase 8): the subagent has NO :routing child,
-#     and turns.plan_id is never written any more ---
+# --- no pre-LLM pipeline ran (Phase 8): no :routing child, no plan_id ---
 if command -v temporal >/dev/null 2>&1; then
   rstatus="$(TEMPORAL_ADDRESS=localhost:17233 temporal workflow describe \
     --namespace abishekk --workflow-id "${SUB_TURN_ID}:routing" -o json 2>/dev/null \
@@ -50,15 +41,16 @@ else
 fi
 sub_plan="$(pg "SELECT COALESCE(plan_id,'') FROM turns WHERE turn_id = '$SUB_TURN_ID'")"
 [ -z "$sub_plan" ] || fail "subagent turns.plan_id = '$sub_plan', expected empty (plan_id is no longer written)"
-ok "turns.plan_id unset (no task-run machinery)"
+ok "turns.plan_id unset"
 
-# --- the subagent used tools across 2 steps, so RecordSkill fired for it,
-#     keyed on its own turn id ---
+# --- the subagent ran its own multi-step loop with its own tool calls ---
 sub_tools="$(pg "SELECT count(*) FROM tool_calls WHERE parent_id = '$SUB_TURN_ID'")"
 [ "${sub_tools:-0}" -ge 2 ] || fail "subagent made $sub_tools tool calls, expected >= 2"
-ok "subagent used tools across multiple steps ($sub_tools calls)"
+ok "subagent ran its own multi-step loop ($sub_tools tool calls under its own id)"
 
-poll_for "SELECT count(*) FROM skill_procedures WHERE source_ids @> jsonb_build_array('$SUB_TURN_ID')" 1 \
-  "skill_procedures row written/versioned for the subagent (RecordSkill, keyed on turn_id)" 40
+# --- the skill subsystem is gone: no RecordSkill child, no skill_procedures ---
+rec="$(pg "SELECT count(*) FROM skill_procedures WHERE source_ids @> jsonb_build_array('$SUB_TURN_ID')" 2>/dev/null || echo 0)"
+[ "${rec:-0}" = "0" ] || fail "a skill_procedures row references this subagent — RecordSkill should be gone"
+ok "no RecordSkill (skill subsystem removed)"
 
 exit 0

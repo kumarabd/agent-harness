@@ -50,19 +50,6 @@ class ModelCallInput:
 
 
 @dataclass
-class RecordSkillInput:
-    """RecordSkill's input — docs/components/skill-subsystem.md;
-    turn-pipeline.md Phase 8. Dispatched once at turn end when the turn used
-    tools across ≥2 reasoning steps. The activity reads the whole trajectory
-    (this turn + any subagent turns under it by id prefix) from Postgres, then
-    match-or-inserts against skill_procedures."""
-
-    turn_id: str = ""
-    stop_reason: str = ""
-    close_reason: str = ""
-
-
-@dataclass
 class ToolCallRef:
     """One tool call minted by ModelCall — name/ID/dispatch-kind only, no
     arguments. The workflow uses this to decide Activity-vs-child-workflow

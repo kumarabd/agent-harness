@@ -125,7 +125,6 @@ DEFAULT_SYSTEM_PROMPT = (
     "memory (memory_expand for the raw detail behind a result).\n"
     "- discover_tools — find a tool that isn't already offered; a match becomes callable by its "
     "own name on your NEXT step, not the response that found it.\n"
-    "- load_skill — pull in a step-by-step procedure from a past successful run of a similar task.\n"
     "- spawn_subagent — delegate a self-contained slice of work to its own focused turn.\n"
     "- ask_user — put a question to the user and wait for their answer (the turn pauses; they "
     "may also just send a new message, which is the answer).\n"
@@ -641,28 +640,6 @@ _ASK_USER_SCHEMA = {
 }
 
 
-_LOAD_SKILL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "load_skill",
-        "description": (
-            "Pull a procedure from past successful runs into your context — a step-by-step "
-            "guide for a kind of task. Describe the task you're about to do; the closest "
-            "matching procedure is returned as an observation to follow (adapt or ignore it "
-            "where the situation differs). If several match, you get their titles to pick "
-            "from; if none do, you get the titles of what exists."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Natural-language description of the task you're about to do."},
-            },
-            "required": ["query"],
-        },
-    },
-}
-
-
 # name -> schema dict, over every model-facing schema this module defines.
 # `capabilities.schema_for` reads this back; the nested spawn_subagent variant
 # is passed separately.
@@ -671,7 +648,6 @@ _SCHEMA_BY_NAME: dict[str, dict] = {
     for t in [
         *TOOLS_SCHEMA,
         _ASK_USER_SCHEMA,
-        _LOAD_SKILL_SCHEMA,
         _DELIVER_REPLY_SCHEMA,
         _DELIVER_ATTACHMENT_SCHEMA,
     ]

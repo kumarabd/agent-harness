@@ -3,7 +3,7 @@
   prompt = static core (the system prompt) + pinned scratchpad + LCM conversation
 
 `lcm.assemble` builds the conversation (system prompt + summary DAG + verbatim
-window); everything the model retrieves at runtime (search_memory, load_skill, a
+window); everything the model retrieves at runtime (search_memory, discover_tools, a
 tool result) flows back into that stream as an ordinary observation, so there is
 no separate managed "memory" / "skills" section here any more. The one thing that
 isn't conversation is the callable tool schemas: `discover_tools`'s staged rows
