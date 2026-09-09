@@ -52,12 +52,14 @@ from dataclasses import dataclass, field
 from . import prompt
 from .types import Usage
 
-# docs/components/model-registry.md, "Resolved: Selection Mechanism" — not a
-# judgment-call nudge (contrast the reverted search_tools-before-shell_exec
-# system-prompt rule): the model has no structural way to know this protocol
-# exists at all without being told, unlike that case where the necessary
-# information was already available another way.
-_NEXT_STEP_HINT_TOOL_NAME = "declare_next_step_hint"
+# docs/components/turn-pipeline.md, "Model I/O schema" — the model authors
+# `status` + `next_step` every step via this peeled meta-tool. The model has
+# no structural way to know this protocol exists without being told, so the
+# prompt sentence below is load-bearing, not a nudge. Duplicated as a literal
+# (not imported from providers/base.py) for the same reason the providers
+# duplicate it back — llm.py ↔ providers is a load-order cycle; kept in sync
+# by convention with providers.base.REPORT_STATUS_TOOL_NAME.
+_REPORT_STATUS_TOOL_NAME = "report_status"
 
 # docs/components/temporal-workflow.md's recursion-termination guard (LCM/
 # Volt's Task tool, Ehrlich & Blackman 2026) — real, model-facing subagent
@@ -103,9 +105,11 @@ _SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"
 # guidance stays light (illustrative, not a decision procedure) and there is no
 # planning/lane machinery to describe.
 #
-# The final declare_next_step_hint sentence is load-bearing (model_registry's
-# escalate-on-retry / tier hinting depends on it) and platform_prompts.go's
-# voiceSystemPromptText copies it verbatim — keep it byte-for-byte.
+# The final report_status sentence is load-bearing — it's how the model
+# authors turn-pipeline.md's `status` + `next_step` output (model_registry's
+# escalate-on-retry / tier hinting depends on the tier; turn.go's loop
+# termination depends on the status). prompts.go's voiceSystemPromptText
+# carries its own equivalent sentence — keep the two in step.
 DEFAULT_SYSTEM_PROMPT = (
     "You are a capable, general-purpose personal assistant with real tools — not limited to "
     "coding. You have direct shell access (shell_exec) for local and system tasks.\n\n"
@@ -141,8 +145,11 @@ DEFAULT_SYSTEM_PROMPT = (
     "blocking what you're doing right now, note it or call create_intention to follow up later.\n\n"
     "After using a tool, summarize the result in plain text for the user rather than leaving it "
     "as raw output. "
-    f"Every response, also call {_NEXT_STEP_HINT_TOOL_NAME} alongside anything else you call, "
-    "declaring what the next step needs."
+    f"Every response, also call {_REPORT_STATUS_TOOL_NAME} alongside anything else you call: "
+    "status=working while there is more to do, status=done when the task is complete and your "
+    "message IS the answer, status=blocked when you cannot proceed without the user (pair it "
+    "with ask_user). Set est_remaining_steps to your honest estimate of reasoning steps left, "
+    "and note anything the next step needs to remember."
 )
 
 TOOLS_SCHEMA = [
@@ -478,25 +485,31 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": _NEXT_STEP_HINT_TOOL_NAME,
-            # docs/components/model-registry.md, "Resolved: Selection
-            # Mechanism" — included alongside whatever other tool_calls a
-            # response already has (OpenAI's function-calling API supports
-            # multiple tool_calls per response), so this rides on the same
-            # API call rather than costing a separate round trip.
+            "name": _REPORT_STATUS_TOOL_NAME,
+            # docs/components/turn-pipeline.md, "Model I/O schema" — the model's
+            # `status` + `next_step` output, transported as a peeled tool call
+            # (no provider guarantees native structured output). Rides on the
+            # same API call as any other tool_calls, never a separate round trip;
+            # the harness peels it in the provider and never dispatches it.
             "description": (
-                "Always include this alongside your response, every step, declaring what kind "
-                "of model the NEXT step needs. tier=fast for simple/mechanical next steps "
-                "(e.g. running a command and reporting its output), tier=expert for next steps "
-                "needing careful multi-step reasoning or judgment, tier=medium otherwise."
+                "Always include this alongside your response, every step. status: \"working\" "
+                "while there is more to do, \"done\" when the task is complete and your message "
+                "is the answer, \"blocked\" when you cannot proceed without the user (also call "
+                "ask_user). tier picks the model for the NEXT step: \"fast\" for simple/"
+                "mechanical steps (run a command, report output), \"expert\" for careful "
+                "multi-step reasoning or judgment, \"medium\" otherwise. est_remaining_steps is "
+                "your honest estimate of reasoning steps still needed. note is a short "
+                "note-to-self carried into the next step."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "modality": {"type": "string", "description": "Always \"language\" for now."},
+                    "status": {"type": "string", "enum": ["working", "done", "blocked"]},
                     "tier": {"type": "string", "enum": ["fast", "medium", "expert"]},
+                    "est_remaining_steps": {"type": "integer"},
+                    "note": {"type": "string"},
                 },
-                "required": ["modality", "tier"],
+                "required": ["status"],
             },
         },
     },
@@ -690,13 +703,18 @@ class RealModelResult:
     content: str
     raw_tool_calls: list[dict] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
-    # docs/components/model-registry.md — this step's self-declared hint for
-    # the next step, defaulted to model_registry.default_hint() if the model
-    # didn't include declare_next_step_hint in its response (real models
-    # aren't guaranteed to comply with an instruction every single call —
-    # degrade to the bootstrap default rather than erroring).
+    # docs/components/turn-pipeline.md — the model authors these via the
+    # peeled `report_status` meta-tool (providers/base.py). `status` empty ⇒
+    # the model didn't call report_status this step; model_call.py then
+    # synthesizes status from tool-call presence (the Phase-2 fallback,
+    # removed in Phase 9). tier empty ⇒ keep the current tier.
+    status: str = ""
+    next_hint_tier: str = ""
+    next_step_note: str = ""
+    est_remaining_steps: int = 0
+    # Always "language" for now — not model-authored (report_status dropped
+    # the modality field). model_registry.resolve still takes a modality arg.
     next_hint_modality: str = "language"
-    next_hint_tier: str = "medium"
 
 
 async def build_conversation(

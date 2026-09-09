@@ -13,20 +13,17 @@ import logging
 
 from openai import AsyncOpenAI
 
-from .. import model_registry, sentence_segmenter
+from .. import sentence_segmenter
 from ..types import Usage
-from .base import Provider, SimpleTextResult
+from .base import REPORT_STATUS_TOOL_NAME, Provider, SimpleTextResult, parse_report_status
 
 logger = logging.getLogger(__name__)
 
-# Name of the meta-tool the model self-declares next-step hints with —
-# copied here so this provider can strip it from raw_tool_calls before
-# they reach the caller, mirroring what llm.py used to do inline.
-# Deliberately duplicated as a module-level constant rather than
-# imported from llm.py, since llm.py IS a caller of this module (via
-# providers/__init__ → llm_client → model_call) and importing back
-# from it would circular. Kept in sync by convention.
-_NEXT_STEP_HINT_TOOL_NAME = "declare_next_step_hint"
+# The peeled meta-tool the model authors turn-pipeline.md's status + next_step
+# with — defined in base.py (which llm.py can't be imported from here without a
+# cycle). This provider strips it from raw_tool_calls before they reach the
+# caller and returns the parsed fields on RealModelResult.
+_REPORT_STATUS_TOOL_NAME = REPORT_STATUS_TOOL_NAME
 
 # docs/components/temporal-workflow.md's recursion-termination guard —
 # is_subagent has to be derived from which tool the model actually called,
@@ -55,18 +52,13 @@ class OpenAIProvider(Provider):
         message = response.choices[0].message
 
         raw_tool_calls = []
-        next_hint_modality, next_hint_tier = model_registry.default_hint()
+        reported = None
         for tc in message.tool_calls or []:
-            if tc.function.name == _NEXT_STEP_HINT_TOOL_NAME:
+            if tc.function.name == _REPORT_STATUS_TOOL_NAME:
                 try:
-                    hint_args = json.loads(tc.function.arguments)
-                    next_hint_modality = hint_args.get("modality", next_hint_modality)
-                    next_hint_tier = hint_args.get("tier", next_hint_tier)
+                    reported = parse_report_status(json.loads(tc.function.arguments))
                 except (json.JSONDecodeError, AttributeError):
-                    logger.warning(
-                        "OpenAIProvider.call_model: malformed %s arguments, using default hint",
-                        _NEXT_STEP_HINT_TOOL_NAME,
-                    )
+                    logger.warning("OpenAIProvider.call_model: malformed %s arguments", _REPORT_STATUS_TOOL_NAME)
                 continue
             raw_tool_calls.append(
                 {
@@ -84,8 +76,10 @@ class OpenAIProvider(Provider):
             content=message.content or "",
             raw_tool_calls=raw_tool_calls,
             usage=usage,
-            next_hint_modality=next_hint_modality,
-            next_hint_tier=next_hint_tier,
+            status=reported.status if reported else "",
+            next_hint_tier=reported.tier if reported else "",
+            next_step_note=reported.note if reported else "",
+            est_remaining_steps=reported.est_remaining_steps if reported else 0,
         )
 
     async def call_model_streaming(self, conversation, model, max_tokens, tools, on_chunk):
@@ -141,18 +135,15 @@ class OpenAIProvider(Provider):
             await on_chunk(content_buffer)
 
         raw_tool_calls = []
-        next_hint_modality, next_hint_tier = model_registry.default_hint()
+        reported = None
         for idx in sorted(tool_call_frags):
             frag = tool_call_frags[idx]
-            if frag["name"] == _NEXT_STEP_HINT_TOOL_NAME:
+            if frag["name"] == _REPORT_STATUS_TOOL_NAME:
                 try:
-                    hint_args = json.loads(frag["arguments"])
-                    next_hint_modality = hint_args.get("modality", next_hint_modality)
-                    next_hint_tier = hint_args.get("tier", next_hint_tier)
+                    reported = parse_report_status(json.loads(frag["arguments"]))
                 except (json.JSONDecodeError, AttributeError):
                     logger.warning(
-                        "OpenAIProvider.call_model_streaming: malformed %s arguments, using default hint",
-                        _NEXT_STEP_HINT_TOOL_NAME,
+                        "OpenAIProvider.call_model_streaming: malformed %s arguments", _REPORT_STATUS_TOOL_NAME
                     )
                 continue
             try:
@@ -171,8 +162,10 @@ class OpenAIProvider(Provider):
             content=content_buffer,
             raw_tool_calls=raw_tool_calls,
             usage=usage,
-            next_hint_modality=next_hint_modality,
-            next_hint_tier=next_hint_tier,
+            status=reported.status if reported else "",
+            next_hint_tier=reported.tier if reported else "",
+            next_step_note=reported.note if reported else "",
+            est_remaining_steps=reported.est_remaining_steps if reported else 0,
         )
 
     async def summarize_text(self, system_prompt, user_content, model, max_tokens=None):

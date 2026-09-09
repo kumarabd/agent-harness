@@ -199,9 +199,11 @@ class ToolCallRef:
 
 @dataclass
 class NextStep:
-    """docs/components/turn-pipeline.md — the model's advisory hint about what its
-    next reasoning step needs. `est_remaining_steps` feeds a later phase's
-    iteration-ceiling negotiation; unused for now."""
+    """docs/components/turn-pipeline.md — the model's advisory next-step hint,
+    authored via the peeled `report_status` meta-tool. `tier` picks the next
+    ModelCall's model; `est_remaining_steps` raises turn.go's iteration ceiling;
+    `note` is carried into the next step's context. `modality` is always
+    "language" (not model-authored)."""
 
     note: str = ""
     modality: str = ""

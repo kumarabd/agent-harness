@@ -99,9 +99,17 @@ func RecordSkillWorkflow(ctx workflow.Context, input types.RecordSkillInput) err
 }
 
 const (
-	maxIterations = 20        // components/temporal-workflow.md, Resolved: Stop-Condition Default Values
-	maxRetries    = 5         // turn-level cumulative cap, distinct from per-activity MaximumAttempts
-	budgetTokens  = 2_000_000 // high placeholder ceiling, not infinite — see resolved doc; turn-local API spend, unrelated to context size below
+	// docs/components/turn-pipeline.md, "Iteration ceiling" — the model
+	// proposes est_remaining_steps via report_status; the harness starts the
+	// ceiling at baseIterations (the floor) and lets the model's estimate
+	// raise it, to at most hardIterationCap. The model can never lower the
+	// ceiling and never push it past the hard cap.
+	baseIterations   = 20 // components/temporal-workflow.md, Resolved: Stop-Condition Default Values
+	hardIterationCap = 50 // absolute — model-proposed estimates are clamped here
+	estStepMultiple  = 2  // ceiling target = current iteration + est_remaining_steps * this
+
+	maxRetries   = 5         // turn-level cumulative cap, distinct from per-activity MaximumAttempts
+	budgetTokens = 2_000_000 // high placeholder ceiling, not infinite — see resolved doc; turn-local API spend, unrelated to context size below
 
 	// docs/components/context-slot.md, "Resolved: Duties and Strategies" #3
 	// — two-tier threshold, not one constant. Soft: fire compaction async,
@@ -937,10 +945,17 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 
 	var stopReason string
 
+	// docs/components/turn-pipeline.md, "Iteration ceiling". Starts at the
+	// floor; the model's report_status est_remaining_steps raises it (never
+	// lowers it), clamped to hardIterationCap. ceilingRaised tracks whether the
+	// model ever pushed it up, for the end-of-turn calibration log.
+	ceiling := baseIterations
+	ceilingRaised := false
+
 loop:
 	for {
 		// --- Resolved: Stop-Condition Logic (inline check, pure read of local state) ---
-		if iterations >= maxIterations {
+		if iterations >= ceiling {
 			stopReason = "max_iterations"
 			break
 		}
@@ -1007,7 +1022,21 @@ loop:
 		}
 		contextSeq++
 		if mcOut.NextStep != nil {
-			hintModality, hintTier = mcOut.NextStep.Modality, mcOut.NextStep.Tier
+			if mcOut.NextStep.Modality != "" || mcOut.NextStep.Tier != "" {
+				hintModality, hintTier = mcOut.NextStep.Modality, mcOut.NextStep.Tier
+			}
+			// The model's own estimate raises the ceiling (never lowers it),
+			// clamped hard. docs/components/turn-pipeline.md, "Iteration ceiling".
+			if est := mcOut.NextStep.EstRemainingSteps; est > 0 {
+				want := iterations + est*estStepMultiple
+				if want > ceiling {
+					if want > hardIterationCap {
+						want = hardIterationCap
+					}
+					ceiling = want
+					ceilingRaised = true
+				}
+			}
 		}
 		cumulativeTokens += mcOut.Usage.InputTokens + mcOut.Usage.OutputTokens
 		metrics.WithTags(map[string]string{"direction": "input"}).Counter("model_call_tokens_total").Inc(int64(mcOut.Usage.InputTokens))
@@ -1098,9 +1127,34 @@ loop:
 			cancel()
 			break
 		}
-		// "working" (or "blocked", until a later phase handles parking): no tool
-		// calls this step means the model is still reasoning — loop again; the
-		// iteration / retry / budget ceilings bound it.
+		// docs/components/turn-pipeline.md's interrupt model — a "blocked"
+		// status means the model needs the user. If it paired that with an
+		// ask_user call, the fan-out below parks the turn on it. If a follow-up
+		// already arrived, that IS the answer — fold it in and keep going. If
+		// it's "blocked" with nothing to wait on, the model has said its piece
+		// and can't proceed: deliver that message and end.
+		if mcOut.Status == "blocked" {
+			if len(pendingMessages) > 0 {
+				nextMsg := pendingMessages[0]
+				pendingMessages = pendingMessages[1:]
+				ictx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
+				if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: input.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
+					cancel()
+					return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, planID)
+				}
+				cancel()
+				continue
+			}
+			if len(mcOut.ToolCalls) == 0 {
+				stopReason = "blocked"
+				cancel()
+				break
+			}
+			// else: falls through to the fan-out, which parks on ask_user.
+		}
+		// "working" / "blocked"-with-an-action: no tool calls this step means
+		// the model is still reasoning — loop again; the iteration / retry /
+		// budget ceilings bound it.
 		if len(mcOut.ToolCalls) == 0 {
 			cancel()
 			continue
@@ -1327,6 +1381,18 @@ loop:
 	metrics.Counter("turn_iterations_total").Inc(int64(iterations))
 	metrics.Counter("turn_retries_total").Inc(int64(retries))
 	metrics.WithTags(map[string]string{"stop_reason": stopReason}).Counter("turn_stop_reason_total").Inc(1)
+
+	// docs/components/turn-pipeline.md, "Iteration ceiling" — estimate-vs-actual
+	// is logged as a calibration signal (how well the model's report_status
+	// est_remaining_steps tracked reality). hitCeiling is the case that matters:
+	// the turn ran out of budget rather than finishing on its own.
+	hitCeiling := stopReason == "max_iterations"
+	logger.Info("iteration budget",
+		"turn_id", input.TurnID, "iterations", iterations, "ceiling", ceiling,
+		"ceiling_raised", ceilingRaised, "hit_ceiling", hitCeiling)
+	if hitCeiling {
+		metrics.Counter("turn_hit_iteration_ceiling_total").Inc(1)
+	}
 
 	// --- Egress: every turn (top-level or subagent) persists its own
 	// turns.status — components/state-layer.md's read/write-split table

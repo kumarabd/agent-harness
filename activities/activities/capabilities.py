@@ -9,8 +9,8 @@ Everything the model can emit in a response falls into one of three layers:
   - COGNITION  — reading the agent's own substrate: search_memory / memory_expand
                  (agent-brain), load_skill (the procedure store), lcm_grep /
                  lcm_describe / lcm_expand (this session's history + compaction DAG).
-  - CONTROL    — steering the constructs the agent lives inside: declare_next_step_hint
-                 (tier), spawn_subagent (subagent tree), the intention tools.
+  - CONTROL    — steering the constructs the agent lives inside: report_status
+                 (status + next_step), spawn_subagent (subagent tree), the intention tools.
 
 This module is the single declarative source for *which* capabilities exist,
 *which turn kinds* (REASONING / SUBAGENT) expose each one, whether it is *peeled*
@@ -113,7 +113,7 @@ CAPABILITIES: list[Capability] = [
     Capability("lcm_grep", Layer.COGNITION, _MAIN, handler_ref="lcm_grep", timing=LOCAL),
     Capability("lcm_describe", Layer.COGNITION, _MAIN, handler_ref="lcm_describe", timing=LOCAL),
     Capability("lcm_expand", Layer.COGNITION, frozenset({TurnKind.SUBAGENT}), handler_ref="lcm_expand", timing=LOCAL),
-    Capability("declare_next_step_hint", Layer.CONTROL, _MAIN, peel=True),
+    Capability("report_status", Layer.CONTROL, _MAIN, peel=True),
     # Delivery-in-the-loop (2026-09-06): content that won't fit in one platform
     # message is the model's own judgment call (split at natural boundaries vs.
     # attach as a file — see skills/seeds/deliver-long-content.json), not a

@@ -107,6 +107,12 @@ class ModelCallActivity:
                 context_tokens = 0
                 context_window = 0
                 next_hint_modality, next_hint_tier = model_registry.default_hint()
+                # Fixture path: the model can't author status/next_step, so
+                # status stays synthesized from tool-call presence below and
+                # the note/estimate are empty.
+                model_status = ""
+                next_step_note = ""
+                est_remaining_steps = 0
                 # Fixture path never runs build_conversation, so there's no
                 # per-task resolved set to speak of — a scripted response can
                 # still script a call to any TOOL_REGISTRY-backed name
@@ -214,7 +220,16 @@ class ModelCallActivity:
                     )
                 histogram.record(time.monotonic() - started)
                 content, raw_tool_calls, usage = real.content, real.raw_tool_calls, real.usage
-                next_hint_modality, next_hint_tier = real.next_hint_modality, real.next_hint_tier
+                # docs/components/turn-pipeline.md — the model authors these via
+                # the peeled report_status meta-tool. Empty ⇒ it didn't call it
+                # this step: status is synthesized from tool-call presence below
+                # (the Phase-2 fallback, removed in Phase 9); tier keeps the
+                # bootstrap default.
+                model_status = real.status
+                next_step_note = real.next_step_note
+                est_remaining_steps = real.est_remaining_steps
+                next_hint_modality = real.next_hint_modality
+                next_hint_tier = real.next_hint_tier or model_registry.default_hint()[1]
 
             logger.info(
                 "ModelCall[%s:%d] -> %r (tool_calls=%d)",
@@ -369,21 +384,26 @@ class ModelCallActivity:
                         )
                     )
 
+            # docs/components/turn-pipeline.md — the model's own report_status
+            # `status` wins when present. Absent (fixture path, or a real model
+            # that skipped report_status this step) ⇒ synthesize from tool-call
+            # presence: deliberately len(raw_tool_calls), not len(refs) — a
+            # recursion-guard rejection removes a call from refs while
+            # raw_tool_calls stays non-empty, and that must keep the loop going
+            # ("working") so the model sees the rejection observation.
+            status = model_status or ("done" if not raw_tool_calls else "working")
             return ModelCallOutput(
-                # status is synthesized from tool-call presence until a later
-                # phase makes the model author it. Deliberately len(raw_tool_calls),
-                # not len(refs) — a recursion-guard rejection (this file's own
-                # _validate_subagent_delegation branch above) removes a call from
-                # refs while raw_tool_calls stays non-empty; that must keep the
-                # loop going ("working") so the model sees the rejection
-                # observation and reacts, not silently end the turn. "done"
-                # should mean literally no tool calls were attempted.
-                status="done" if not raw_tool_calls else "working",
+                status=status,
                 tool_calls=refs,
                 usage=usage,
                 context_tokens=context_tokens,
                 context_window=context_window,
-                next_step=NextStep(modality=next_hint_modality, tier=next_hint_tier),
+                next_step=NextStep(
+                    note=next_step_note,
+                    modality=next_hint_modality,
+                    tier=next_hint_tier,
+                    est_remaining_steps=est_remaining_steps,
+                ),
             )
 
     async def _call_model_streaming_with_delivery(self, turn_id: str, conversation: list[dict], provider, model: str, max_tokens: int, tools_schema: list[dict]):
@@ -499,7 +519,7 @@ def _resolve_gating(tool_name: str, arguments: dict) -> tuple[bool, str, str]:
         itself no longer calls call_tool directly since the 2026-09-04
         per-task-resolution revision, but a stray call still resolves
         correctly rather than silently ungated.)
-      - anything else (memory_search, search_tools, declare_next_step_hint,
+      - anything else (search_memory, discover_tools, report_status,
         ...): never gateable, these aren't side-effecting.
     """
     if tool_name == "shell_exec":

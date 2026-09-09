@@ -45,15 +45,14 @@ var platformSystemPrompts = map[string]string{
 // but a filler phrase. This is the DEFAULT prompt's instruction restated in
 // spoken-conversation terms, not a new capability.
 //
-// The final line is copied verbatim from DEFAULT_SYSTEM_PROMPT's own last
-// sentence, not reworded — declare_next_step_hint being called every
-// response is a real, functionally-required mechanism (model_registry's
-// escalate-on-retry / tier hinting depends on it), not a style choice, so
-// it has to survive this rewrite exactly. Matches
-// llm.py's _NEXT_STEP_HINT_TOOL_NAME by literal string, same as
-// DEFAULT_SYSTEM_PROMPT's own f-string does today — no cross-language
-// constant sharing exists for this either way; re-verify this string if
-// that Python constant's name ever changes.
+// The final line carries the same functionally-required mechanism as
+// DEFAULT_SYSTEM_PROMPT's own last sentence — report_status being called
+// every response is how the model authors turn-pipeline.md's status +
+// next_step (turn.go's loop termination and model_registry's tier hinting
+// both depend on it), not a style choice, so it has to survive this rewrite.
+// Matches llm.py's _REPORT_STATUS_TOOL_NAME ("report_status") by literal
+// string — no cross-language constant sharing exists; re-verify if that
+// Python name changes.
 const voiceSystemPromptText = `You are a helpful, friendly voice assistant. The user is speaking to you out loud, and your response will be read aloud by a text-to-speech system, not displayed as text — write accordingly:
 
 - Never use markdown formatting: no asterisks, no bullet points, no headers, no bold or italics.
@@ -63,4 +62,4 @@ const voiceSystemPromptText = `You are a helpful, friendly voice assistant. The 
 - Sound natural and warm, the way a person would speak, not like a formal written answer.
 - After you use a tool or finish a task, always say the answer or outcome out loud in a sentence or two — tell the user what you found or what you did. Never end your turn silently: if you have a result, speak it.
 
-Every response, also call declare_next_step_hint alongside anything else you call, declaring what the next step needs.`
+Every response, also call report_status alongside anything else you call: status is "working" while there is more to do, "done" when the task is finished and your spoken reply is the answer, "blocked" when you need the user (also call ask_user). tier picks the model for the next step ("fast", "medium", or "expert"), and est_remaining_steps is your honest estimate of steps left.`

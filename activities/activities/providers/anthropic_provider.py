@@ -26,9 +26,9 @@ naming plainly rather than sprinkled across the code:
    carrying usage, etc.) rather than OpenAI's flat delta shape. Same
    on_chunk sentence-boundary contract for the caller.
 
-The `declare_next_step_hint` meta-tool works exactly the same on both
-sides — the model calls it as a normal tool; we strip it out and read
-the hint fields from its arguments.
+The `report_status` meta-tool works exactly the same on both sides — the
+model calls it as a normal tool; we strip it out and read the status /
+next_step fields from its arguments (see providers/base.parse_report_status).
 """
 
 from __future__ import annotations
@@ -38,13 +38,13 @@ import logging
 
 from anthropic import AsyncAnthropic
 
-from .. import model_registry, sentence_segmenter
+from .. import sentence_segmenter
 from ..types import Usage
-from .base import Provider, SimpleTextResult
+from .base import REPORT_STATUS_TOOL_NAME, Provider, SimpleTextResult, parse_report_status
 
 logger = logging.getLogger(__name__)
 
-_NEXT_STEP_HINT_TOOL_NAME = "declare_next_step_hint"
+_REPORT_STATUS_TOOL_NAME = REPORT_STATUS_TOOL_NAME
 # docs/components/temporal-workflow.md's recursion-termination guard —
 # is_subagent has to be derived from which tool the model actually called,
 # not hardcoded False.
@@ -163,25 +163,16 @@ class AnthropicProvider(Provider):
 
         content_parts: list[str] = []
         raw_tool_calls: list[dict] = []
-        next_hint_modality, next_hint_tier = model_registry.default_hint()
+        reported = None
 
         for block in response.content:
             btype = getattr(block, "type", None)
             if btype == "text":
                 content_parts.append(block.text or "")
             elif btype == "tool_use":
-                if block.name == _NEXT_STEP_HINT_TOOL_NAME:
-                    # Anthropic returns input as an already-parsed object,
-                    # not a JSON string, so no json.loads needed.
-                    hint_args = block.input or {}
-                    if isinstance(hint_args, dict):
-                        next_hint_modality = hint_args.get("modality", next_hint_modality)
-                        next_hint_tier = hint_args.get("tier", next_hint_tier)
-                    else:
-                        logger.warning(
-                            "AnthropicProvider.call_model: non-dict %s input, using default hint",
-                            _NEXT_STEP_HINT_TOOL_NAME,
-                        )
+                if block.name == _REPORT_STATUS_TOOL_NAME:
+                    # Anthropic returns input as an already-parsed object.
+                    reported = parse_report_status(block.input or {})
                     continue
                 # Internal shape stores arguments as an already-parsed dict
                 # (json.loads-ed on the OpenAI side); match that shape.
@@ -203,8 +194,10 @@ class AnthropicProvider(Provider):
             content="".join(content_parts),
             raw_tool_calls=raw_tool_calls,
             usage=usage,
-            next_hint_modality=next_hint_modality,
-            next_hint_tier=next_hint_tier,
+            status=reported.status if reported else "",
+            next_hint_tier=reported.tier if reported else "",
+            next_step_note=reported.note if reported else "",
+            est_remaining_steps=reported.est_remaining_steps if reported else 0,
         )
 
     async def call_model_streaming(self, conversation, model, max_tokens, tools, on_chunk):
@@ -283,7 +276,7 @@ class AnthropicProvider(Provider):
             await on_chunk(content_buffer)
 
         raw_tool_calls = []
-        next_hint_modality, next_hint_tier = model_registry.default_hint()
+        reported = None
         for idx in sorted(tool_blocks):
             tb = tool_blocks[idx]
             try:
@@ -294,10 +287,8 @@ class AnthropicProvider(Provider):
                     tb["name"],
                 )
                 input_obj = {}
-            if tb["name"] == _NEXT_STEP_HINT_TOOL_NAME:
-                if isinstance(input_obj, dict):
-                    next_hint_modality = input_obj.get("modality", next_hint_modality)
-                    next_hint_tier = input_obj.get("tier", next_hint_tier)
+            if tb["name"] == _REPORT_STATUS_TOOL_NAME:
+                reported = parse_report_status(input_obj)
                 continue
             raw_tool_calls.append(
                 {"name": tb["name"], "arguments": input_obj, "is_subagent": tb["name"] == _SPAWN_SUBAGENT_TOOL_NAME}
@@ -307,8 +298,10 @@ class AnthropicProvider(Provider):
             content=content_buffer,
             raw_tool_calls=raw_tool_calls,
             usage=usage,
-            next_hint_modality=next_hint_modality,
-            next_hint_tier=next_hint_tier,
+            status=reported.status if reported else "",
+            next_hint_tier=reported.tier if reported else "",
+            next_step_note=reported.note if reported else "",
+            est_remaining_steps=reported.est_remaining_steps if reported else 0,
         )
 
     async def summarize_text(self, system_prompt, user_content, model, max_tokens=None):

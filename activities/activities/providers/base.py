@@ -27,8 +27,63 @@ caches the Provider itself, keyed on (provider, base_url, api_key).
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+# docs/components/turn-pipeline.md, "Model I/O schema" — the model authors
+# `status` + `next_step` via this peeled meta-tool. No provider guarantees
+# native structured output, so a peeled tool call (never dispatched, never
+# shown to the user) is the transport; semantically it IS the output field.
+# Replaces the Phase-2-era `declare_next_step_hint` (tier hint only).
+#
+# Lives here, not in llm.py, because llm.py imports providers (via
+# llm_client) — a provider importing back from llm.py would circular. Both
+# providers peel this name from their raw tool calls before returning.
+REPORT_STATUS_TOOL_NAME = "report_status"
+
+_VALID_STATUSES = ("working", "done", "blocked")
+_VALID_TIERS = ("fast", "medium", "expert")
+
+
+@dataclass
+class ReportStatus:
+    """Parsed `report_status` payload. `status` empty ⇒ the model didn't call
+    it this step; model_call.py synthesizes from tool-call presence (the
+    Phase-2 fallback, removed in Phase 9)."""
+
+    status: str = ""
+    tier: str = ""
+    note: str = ""
+    est_remaining_steps: int = 0
+
+
+def parse_report_status(args: object) -> ReportStatus:
+    """Tolerant parse of a `report_status` tool call's arguments (a dict on
+    both provider shapes by the time it reaches here). Unknown/malformed
+    fields are dropped, not raised on — a weak model half-complying is
+    common and must not fail the turn."""
+    if not isinstance(args, dict):
+        logger.warning("parse_report_status: non-dict args %r, ignoring", type(args))
+        return ReportStatus()
+    status = str(args.get("status", "")).strip().lower()
+    if status not in _VALID_STATUSES:
+        status = ""
+    tier = str(args.get("tier", "")).strip().lower()
+    if tier not in _VALID_TIERS:
+        tier = ""
+    try:
+        est = int(args.get("est_remaining_steps", 0) or 0)
+    except (TypeError, ValueError):
+        est = 0
+    return ReportStatus(
+        status=status,
+        tier=tier,
+        note=str(args.get("note", "")).strip(),
+        est_remaining_steps=max(0, est),
+    )
 
 
 @dataclass

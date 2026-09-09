@@ -117,6 +117,15 @@ finished trace if dashboards are wanted, never on the critical path).
 before I start," the final response. It never carries "still working" liveness;
 that is the watchdog's job (see *Progress watchdog*).
 
+**Transport.** No provider guarantees native structured output, so `status` +
+`next_step` ride a peeled meta-tool: the model calls `report_status(status, tier?,
+est_remaining_steps?, note?)` alongside its other tool calls every step, the
+provider strips it from `raw_tool_calls` and returns the parsed fields, and the
+harness never dispatches it or shows it to the user. Semantically it *is* the
+output field; the tool call is just the wire. When the model omits it,
+`model_call.py` synthesizes `status` from tool-call presence (the Phase-2
+fallback — removed once model adherence is proven).
+
 ---
 
 ## Prompt assembly
@@ -347,10 +356,13 @@ model:
 - **Approval gating** — policy-driven (`permissions`), evaluated at tool
   execution time. The model may also choose to confirm anything via `ask_user`,
   but the irreversible-action gate is structural and not the model's decision.
-- **Iteration ceiling** — the model proposes `est_remaining_steps`; the harness
-  enforces a hard cap above it that the model cannot raise. At the model's own
-  estimate it may request an extension with a one-line justification, granted up
-  to the cap. Estimate-vs-actual is logged as a calibration signal.
+- **Iteration ceiling** — starts at a floor (`baseIterations`, 20). Each step the
+  model's `report_status` `est_remaining_steps` can raise it toward
+  `iterations + est*2`, clamped to a hard cap (`hardIterationCap`, 50) the model
+  cannot exceed; it never lowers the ceiling. Estimate-vs-actual is logged
+  (`iteration budget` line + `turn_hit_iteration_ceiling_total`) as a calibration
+  signal. A separate one-line-justification extension channel is deferred — the
+  estimate itself is the negotiation for now.
 - **Token / cost budget** — a per-turn ceiling, checked each iteration.
 - **Compaction ceiling** — a hard, blocking compaction at the context-window
   limit, regardless of what the model wants (see *Safety mechanisms*).
