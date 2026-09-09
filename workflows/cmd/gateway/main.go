@@ -35,9 +35,11 @@ import (
 	"go.temporal.io/sdk/client"
 	contribtally "go.temporal.io/sdk/contrib/tally"
 
+	"agent-harness/workflows/internal/gateway/clerkauth"
 	"agent-harness/workflows/internal/gateway/core"
 	"agent-harness/workflows/internal/gateway/discord"
 	"agent-harness/workflows/internal/gateway/lease"
+	"agent-harness/workflows/internal/gateway/mobile"
 	"agent-harness/workflows/internal/gateway/web"
 )
 
@@ -127,7 +129,7 @@ func main() {
 
 	// docs/components/gateway/web.md, "Resolved: Auth" — read once at startup,
 	// fail loud (not per-request 503s) if the Gateway can never verify anyone.
-	clerkCfg := web.ClerkConfigFromEnv()
+	clerkCfg := clerkauth.ConfigFromEnv()
 	if clerkCfg.JWKSURL == "" {
 		log.Fatalf("CLERK_JWKS_URL or CLERK_ISSUER is required")
 	}
@@ -138,6 +140,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	web.New(ingestor, pool, temporalClient, clerkCfg).Register(mux)
+	mobile.New(ctx, ingestor, pool, temporalClient, clerkCfg).Register(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	// One goroutine per configured Discord bot (gateway.md's per-tenant,

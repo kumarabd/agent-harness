@@ -32,6 +32,11 @@ class Message:
     role: str = ""
     content: str = ""
     speaker_id: str = ""
+    # docs/components/gateway/mobile.md — the client-generated id a mobile
+    # device stamps on a message it sends, so its optimistic echo can dedupe
+    # when the message comes back over the fan-out stream. Empty for anything
+    # this process synthesizes.
+    client_msg_id: str = ""
 
 
 @dataclass

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
 
+	"agent-harness/workflows/internal/gateway/clerkauth"
 	"agent-harness/workflows/internal/gateway/core"
 )
 
@@ -22,11 +23,11 @@ type Handler struct {
 	ingestor *core.Ingestor
 	pool     *pgxpool.Pool
 	temporal client.Client
-	clerk    ClerkConfig
+	clerk    clerkauth.Config
 }
 
 // New wires a Web Handler to its dependencies.
-func New(ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk ClerkConfig) *Handler {
+func New(ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config) *Handler {
 	return &Handler{ingestor: ingestor, pool: pool, temporal: temporal, clerk: clerk}
 }
 

@@ -1,4 +1,4 @@
-package web
+package clerkauth
 
 // Clerk JWT verification against the project's own public JWKS endpoint —
 // no Clerk secret key involved. Deliberately mirrors agent-brain's own
@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +33,9 @@ import (
 
 var errInvalidToken = errors.New("invalid token")
 
-type ClerkConfig struct {
+func getenv(key string) string { return os.Getenv(key) }
+
+type Config struct {
 	JWKSURL string
 	Issuer  string
 }
@@ -40,18 +43,18 @@ type ClerkConfig struct {
 // clerkConfigFromEnv builds ClerkConfig from CLERK_JWKS_URL and optional
 // CLERK_ISSUER (CLERK_JWKS_URL, if set, wins — same precedence as
 // agent-brain's own auth.ClerkConfigFromEnv).
-func ClerkConfigFromEnv() ClerkConfig {
-	jwksURL := strings.TrimSpace(envOr("CLERK_JWKS_URL", ""))
-	issuer := strings.TrimSpace(envOr("CLERK_ISSUER", ""))
+func ConfigFromEnv() Config {
+	jwksURL := strings.TrimSpace(getenv("CLERK_JWKS_URL"))
+	issuer := strings.TrimSpace(getenv("CLERK_ISSUER"))
 	if jwksURL == "" && issuer != "" {
 		jwksURL = strings.TrimSuffix(issuer, "/") + "/.well-known/jwks.json"
 	}
-	return ClerkConfig{JWKSURL: jwksURL, Issuer: issuer}
+	return Config{JWKSURL: jwksURL, Issuer: issuer}
 }
 
 // verifyClerkSessionJWT validates a Clerk-issued Bearer JWT (RS256) and
 // returns the subject (Clerk user_id).
-func verifyClerkSessionJWT(ctx context.Context, cfg ClerkConfig, tokenStr string) (string, error) {
+func VerifyJWT(ctx context.Context, cfg Config, tokenStr string) (string, error) {
 	if cfg.JWKSURL == "" {
 		return "", errors.New("clerk jwks not configured")
 	}

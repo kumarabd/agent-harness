@@ -179,7 +179,12 @@ func (i *Ingestor) Ingest(ctx context.Context, event MessageEvent) (string, erro
 		TaskQueue:             i.taskQueue,
 		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
 	}
-	payload := types.SignalPayload{Message: types.Message{Role: "user", Content: event.Content, SpeakerID: event.User}}
+	payload := types.SignalPayload{Message: types.Message{
+		Role:        "user",
+		Content:     event.Content,
+		SpeakerID:   event.User,
+		ClientMsgID: event.PlatformMessageID,
+	}}
 	if _, err := i.temporal.SignalWithStartWorkflow(
 		ctx, sessionKey, wf.NewMessageSignalName, payload, opts,
 		wf.CoordinatorWorkflow, coordinatorInput,

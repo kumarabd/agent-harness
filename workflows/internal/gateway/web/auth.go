@@ -1,6 +1,7 @@
 package web
 
 import (
+	"agent-harness/workflows/internal/gateway/clerkauth"
 	"context"
 	"net/http"
 	"strings"
@@ -15,7 +16,7 @@ const clerkUserIDKey contextKey = "clerk_user_id"
 // Reuse agent-web's Existing Clerk Integration") and resolves the real Clerk
 // user_id from the token's sub claim — session_key is built from this, never
 // trusted from anything the client sends directly.
-func requireClerkAuth(cfg ClerkConfig, next http.Handler) http.Handler {
+func requireClerkAuth(cfg clerkauth.Config, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		token := strings.TrimPrefix(authHeader, "Bearer ")
@@ -24,7 +25,7 @@ func requireClerkAuth(cfg ClerkConfig, next http.Handler) http.Handler {
 			return
 		}
 
-		sub, err := verifyClerkSessionJWT(r.Context(), cfg, token)
+		sub, err := clerkauth.VerifyJWT(r.Context(), cfg, token)
 		if err != nil {
 			http.Error(w, "invalid session token", http.StatusUnauthorized)
 			return

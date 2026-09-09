@@ -200,10 +200,16 @@ class ModelCallActivity:
                 # Provider ABC — no shape awareness leaks into this call
                 # site.
                 provider = llm_client.get_provider(model_config)
-                if input.context_seq == 0 and platform in ("discord", "discord-voice"):
+                # Streaming platforms, first call only. discord/voice have
+                # turn.go drain MODEL_CALL_CHUNK_SIGNAL and dispatch a
+                # per-connection delivery activity; mobile (fan-out, no
+                # connection) has the gateway tail turn_deliveries via a NOTIFY
+                # trigger, so it must NOT signal the workflow (nothing drains
+                # it — the signals would just pile into history).
+                if input.context_seq == 0 and platform in ("discord", "discord-voice", "mobile"):
                     real = await self._call_model_streaming_with_delivery(
                         input.turn_id, conversation, provider, model_config.model, model_config.max_tokens,
-                        tools_schema,
+                        tools_schema, signal_workflow=platform != "mobile",
                     )
                 else:
                     real = await provider.call_model(
@@ -398,7 +404,7 @@ class ModelCallActivity:
                 ),
             )
 
-    async def _call_model_streaming_with_delivery(self, turn_id: str, conversation: list[dict], provider, model: str, max_tokens: int, tools_schema: list[dict]):
+    async def _call_model_streaming_with_delivery(self, turn_id: str, conversation: list[dict], provider, model: str, max_tokens: int, tools_schema: list[dict], signal_workflow: bool = True):
         """Wraps llm.call_model_streaming with this feature's two other real
         pieces (docs/components/gateway.md's "Resolved: ModelCall
         Streaming"): writing each chunk to turn_deliveries and signaling
@@ -439,8 +445,9 @@ class ModelCallActivity:
                     seq,
                     cumulative_text,
                 )
-            handle = self._temporal_client.get_workflow_handle(turn_id)
-            await handle.signal(MODEL_CALL_CHUNK_SIGNAL, seq)
+            if signal_workflow:
+                handle = self._temporal_client.get_workflow_handle(turn_id)
+                await handle.signal(MODEL_CALL_CHUNK_SIGNAL, seq)
             # Only after the chunk is durably written AND signaled — see
             # this method's own docstring on why heartbeat ordering here is
             # exactly what makes the retry-safety check above correct.

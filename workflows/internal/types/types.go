@@ -38,6 +38,11 @@ type Message struct {
 	// synthesizes itself (proactive wake fold-in, subagent kickoff content,
 	// plan seed/revision text) — those have no real human sender.
 	SpeakerID string `json:"speaker_id,omitempty"`
+	// ClientMsgID — docs/components/gateway/mobile.md. The client-generated id
+	// a mobile device stamps on a message it sends, threaded through so its
+	// optimistic echo can dedupe when the message fans back out over the
+	// stream. Empty for anything this process synthesizes.
+	ClientMsgID string `json:"client_msg_id,omitempty"`
 }
 
 // TurnInput starts a Turn Workflow — top-level or, recursively, a subagent.
