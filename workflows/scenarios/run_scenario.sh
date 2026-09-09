@@ -156,15 +156,6 @@ if [ "$STATUS" != "completed" ] && [ "$STATUS" != "failed" ] && [ "$STATUS" != "
 fi
 echo "root turn status: $STATUS"
 
-# turn-pipeline.md Phase 8 — a turn that used tools across >=2 reasoning steps
-# dispatches RecordSkill as an ABANDON child when it completes. If a
-# :record-skill child was started for any turn under this scenario, give it a
-# beat to finish before the expectations run.
-if pg_query "SELECT 1 FROM tool_calls WHERE parent_id LIKE '${ROOT_TURN_ID}%' GROUP BY parent_id HAVING count(*) >= 2 LIMIT 1" | grep -q 1; then
-  echo "--- multi-tool turn detected, giving RecordSkill a beat ---"
-  sleep 4
-fi
-
 if [ -f "$EXPECT_SH" ]; then
   echo "--- checking expectations: $(basename "$EXPECT_SH") ---"
   if PG_POD="$PG_POD" NAMESPACE="$NAMESPACE" PG_USER="$PG_USER" PG_DB="$PG_DB" \

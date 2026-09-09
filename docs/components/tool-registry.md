@@ -1,6 +1,15 @@
 # Component: Tool Registry
 
-> STATUS: IN PROGRESS — two-tier architecture, mcp-hub adoption, per-tenant deployment shape, Postgres isolation, the mcp-hub-mediated integration mechanism, and native-tool discovery (shell-hub) resolved. Cross-language duplication (native tier only) and tool versioning remain open. Permission gating moved to `components/user-input.md` (2026-08-23) — this doc's own catalogs stay untouched by it, deliberately. **2026-08-23: two real shell-hub result-quality bugs found via live testing and fixed** — a description-extraction bug (version banners/near-empty stubs indexed as if they were real descriptions) and a `top_k` contract violation (applied per-source instead of to the combined result, silently doubling result count). A genuine relevance floor is still a real, evidenced gap — deliberately deferred pending real usage data, not designed this pass.
+> STATUS: PARTIALLY STALE. The `capabilities.CAPABILITIES` table + `schema_for`
+> shape (the "Implementation shape" section) and the mcp-hub / shell-hub
+> discovery mechanism are current and accurate. Everything that mentions
+> **lanes**, **`PLANNING`/`CHECKPOINT` turn kinds**, **`propose_plan` /
+> `checkpoint_done` / `declare_next_step_hint`**, or the pre-LLM
+> **`ToolDiscover` / retrieval fan-out** describes machinery removed over the
+> turn-pipeline redesign (`docs/components/turn-pipeline.md` is the current
+> source of truth for how a turn runs). Current model-facing tool names:
+> `search_memory` / `memory_expand`, `discover_tools`, `report_status`; the
+> `TurnKind` enum is `{REASONING, SUBAGENT}`.
 
 ### Role (one line)
 The single source of truth for which tools an agent can invoke, their schemas, execution tiers, and (eventually) permission policy — replacing today's tool dispatch table and timing config, hand-duplicated across two languages, with something that actually scales past a handful of tools.

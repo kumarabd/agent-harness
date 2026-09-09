@@ -4,7 +4,7 @@ Three-Layer Tool Taxonomy & Per-Task Resolution" and its "Implementation shape".
 Everything the model can emit in a response falls into one of three layers:
 
   - INTERFACE  — open-ended external reach: shell_exec, discover_tools, and the
-                 per-task *resolved* tools (built per turn from ToolDiscover's
+                 per-task *resolved* tools (built per turn from discover_tools's
                  rows, not listed here).
   - COGNITION  — reading the agent's own substrate: search_memory / memory_expand
                  (agent-brain), lcm_grep /
@@ -76,7 +76,7 @@ class Capability:
     timing: TimingProfile = NETWORK
     # spawn_subagent's schema is replaced by the nested variant on a subagent turn
     has_subagent_variant: bool = False
-    # set per turn for resolved (ToolDiscover) tools; None for the static table
+    # set per turn for resolved (discover_tools) tools; None for the static table
     schema: dict | None = field(default=None, compare=False)
     # {server, tool} for a resolved mcp-hub tool — carried onto types.ToolCall
     # so turn.go dispatches it through the generic mcp-hub-tier proxy
@@ -115,15 +115,13 @@ CAPABILITIES: list[Capability] = [
     Capability("report_status", Layer.CONTROL, _MAIN, peel=True),
     # Delivery-in-the-loop (2026-09-06): content that won't fit in one platform
     # message is the model's own judgment call (split at natural boundaries vs.
-    # attach as a file — see skills/seeds/deliver-long-content.json), not a
-    # mechanical Go length-check. turn_kinds=frozenset() — never in any turn's
-    # default schema; offered only via schema_for's `also` param, by turn.go
-    # (a bounded recovery round after an automatic Deliver fails) or
-    # plan_workflow.go (the dedicated plan-presentation turn). No handler_ref:
-    # dispatched by turn.go straight to the owning gateway connection's own
-    # embedded worker (same routing as Deliver/DeliverChunk/DeliverInterim),
-    # never through the generic tenant-worker ToolCall path — same shape as
-    # spawn_subagent being dispatched as a child workflow instead of a handler.
+    # attach as a file), not a mechanical Go length-check. turn_kinds=frozenset()
+    # — never in any turn's default schema; offered only via schema_for's `also`
+    # param, by turn.go's bounded recovery round after an automatic Deliver
+    # fails. No handler_ref: dispatched by turn.go straight to the owning gateway
+    # connection's own embedded worker (same routing as Deliver/DeliverChunk/
+    # DeliverInterim), never through the generic tenant-worker ToolCall path —
+    # same shape as spawn_subagent being dispatched as a child workflow.
     Capability("deliver_reply", Layer.CONTROL, frozenset()),
     Capability("deliver_attachment", Layer.CONTROL, frozenset()),
 ]
@@ -166,10 +164,10 @@ def schema_for(
 
 
 # Per-task tool resolution (tool-registry.md, "Resolved: Three-Layer Tool
-# Taxonomy & Per-Task Resolution") — ToolDiscover's staged rows become
+# Taxonomy & Per-Task Resolution") — discover_tools's staged rows become
 # directly-callable schemas instead of a prompt hint. Capped conservatively:
 # some mcp-hub input_schema blobs are large enough that binding all of
-# ToolDiscover's top_k=10 would cost more than the old hint block did.
+# discover_tools's top_k=10 would cost more than the old hint block did.
 MAX_RESOLVED = 5
 
 _NAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
@@ -188,7 +186,7 @@ def _mint_name(server: str, tool: str, taken: set[str]) -> str:
 
 
 def mint_resolved(rows: "list[tuple[str, dict | None]]") -> list[Capability]:
-    """Turn ToolDiscover's staged `(content, metadata)` rows — `content` =
+    """Turn discover_tools's staged `(content, metadata)` rows — `content` =
     "{server}/{tool} — {description}", `metadata` = {server, tool,
     input_schema} — into up to MAX_RESOLVED directly-callable `Capability`
     objects. A row missing a usable `{server, tool, input_schema}` is skipped,
@@ -197,7 +195,7 @@ def mint_resolved(rows: "list[tuple[str, dict | None]]") -> list[Capability]:
 
     Keeps the LAST `MAX_RESOLVED`, not the first: `rows` is seq-ordered, and a
     mid-turn `search_tools` call (`tools._persist_discovered`) appends after
-    ToolDiscover's pre-turn scan — so when there's more than fits, the
+    discover_tools's pre-turn scan — so when there's more than fits, the
     model's own deliberate follow-up discovery outranks the initial guess,
     not the reverse."""
     out: list[Capability] = []

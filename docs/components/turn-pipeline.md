@@ -1,15 +1,15 @@
 # Component: Turn Pipeline
 
-> STATUS: **DESIGN — target architecture.** This is the single reference for how a
-> turn runs. It replaces the classify / lane / routing / planning machinery with a
-> model-steered reason-act loop over a thin set of deterministic rails. The
-> "What this replaces" section at the end lists the components to remove.
+> STATUS: **CURRENT — this is how a turn runs.** Built and deployed over
+> 2026-09-07…09 (the classify / lane / routing / planning machinery and the
+> harness-owned skill subsystem were removed; a model-steered reason-act loop
+> over a thin set of deterministic rails is what runs now).
 
 ### Role (one line)
 
 Everything between "a user message arrives" and "the response is delivered" — one
 durable `TurnWorkflow` running a reason-act loop in which **the model decides how
-to solve the task**, and the harness supplies primitives (memory, skills, tools,
+to solve the task**, and the harness supplies primitives (memory, tools,
 subagents, a scratchpad, delivery) and safety rails (approval gating, budget
 ceilings, compaction).
 
@@ -403,36 +403,39 @@ v1; revisit if it proves noisy.
 
 ---
 
-## What this replaces
+## What this replaced (done)
 
-Remove:
+Removed over 2026-09-07…09:
 
-- **Workflows** — `PlanWorkflow`, `CheckpointWorkflow`, `RoutingWorkflow`.
-- **Workflow code** — `Route` / `laneIsDeliberate` (`routing.go`); `dispatchWork`
-  / `WorkKind` / `WorkAttach` / `PlanDone` / plan-abandon handling
-  (`dispatch.go`, `coordinator.go`) — `dispatch` collapses to `InsertMessage` +
-  start `TurnWorkflow`; the coordinator collapses to "forward to the active turn
-  or start one."
-- **Activities** — `ClassifyRequest`, `NextCheckpoint`, `MarkCheckpointDone`,
-  `RenderPlan`, `ResolveOpenPlan`, `SkillDiscover` staged-under-plan logic. Plan
-  meta-tool peeling (`propose_plan` / `checkpoint_done`) leaves `ModelCall`.
-- **Modules** — `plan.py`, `plan_resolve.py`, the PLAN.md file store; the
-  section-model + budget-shed logic in `prompt.py` (assembly shrinks to "pinned
-  context + tools param"; LCM does the rest).
-- **Schema / types** — `TaskRepresentation`, `RoutingPlan` / `RoutingResult`, the
-  `PlanningMode` / `PlanHandling` / `PlanID` / `Task` / `OfferDeliveryTools` flag
-  soup on `TurnInput`, the `NeedsApproval` field on `TurnResult`, `turn_plan` /
-  plan tables.
-- **Docs** — `lane-model.md`, `episode-lifecycle.md`,
-  `request-pipeline.md` + `request-pipeline/`. Fold anything still live from
-  `temporal-workflow.md` (the reference-passing contract, determinism
-  constraints, the id scheme) into this doc or keep that doc trimmed to those.
+- **Workflows** — `PlanWorkflow`, `CheckpointWorkflow`, `RoutingWorkflow`,
+  `RecordSkillWorkflow`.
+- **Workflow code** — `Route` / `laneIsDeliberate` / `startRouting` (`routing.go`,
+  deleted); `dispatchWork` / `WorkKind` / `WorkAttach` / `PlanDone`
+  (`dispatch.go`, `coordinator.go`) — `dispatch` is now `InsertMessage` + start
+  `TurnWorkflow`; the coordinator is "forward to the active turn or start one".
+- **Activities** — `ClassifyRequest`, `MemoryRetrieve`, `ToolDiscover`,
+  `SkillDiscover`, `RecordSkill`, the plan-lifecycle activities.
+- **Modules** — `plan.py`, `plan_resolve.py`, `classify.py`,
+  `activities/activities/retrieval/`, `activities/activities/skills/`, the PLAN.md
+  file store; the section-model / budget-shed logic in `prompt.py`.
+- **Schema / types** — `TaskRepresentation`, `RoutingPlan` / `RoutingResult`,
+  `RecordSkillInput`, `SubsystemResult`, the `PlanningMode` / `PlanHandling` /
+  `PlanID` / `Task` / `HintModality` / `HintTier` flag soup on `TurnInput`,
+  `NeedsApproval` / `NextHint*` on `TurnResult`, `ModelCallInput.{PlanID,Complexity}`,
+  `InsertMessageInput.PlanID`.
+- **Meta-tools** — `declare_next_step_hint` (→ `report_status`, Phase 7),
+  `propose_plan` / `checkpoint_done` (peeled by `ModelCall`), `load_skill`.
+- **Docs** — `lane-model.md`, `skill-subsystem.md`, `skills.md`,
+  `request-pipeline.md` + `request-pipeline/`, `episode-lifecycle.md`.
 
-Keep, unchanged: the reference-passing contract (the workflow holds only ids, all
+Kept, unchanged: the reference-passing contract (the workflow holds only ids, all
 content I/O is in activities), the `{turn_id}` = workflow-id / `:act:n` / `:sub:n`
 id scheme, interrupts, `Persist` / `Deliver` + delivery recovery, the streaming
 chunk path, `IntentionWorkflow` (proactivity — a genuinely separate concern),
 `UserInputRequestWorkflow`.
+
+The `skill_procedures` / `skill_procedure_cooccurrence` / `turns.plan_id` schema
+is left in place (unused) — a cleanup migration drops it.
 
 ---
 

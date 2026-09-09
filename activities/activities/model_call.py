@@ -117,7 +117,7 @@ class ModelCallActivity:
                 # per-task resolved set to speak of — a scripted response can
                 # still script a call to any TOOL_REGISTRY-backed name
                 # (shell_exec, search_tools, ...), it just can't exercise a
-                # resolved (ToolDiscover) dispatch. Empty, not omitted: the
+                # resolved (discover_tools) dispatch. Empty, not omitted: the
                 # tool_calls minting loop below is shared with the real path
                 # and unconditionally looks this up per call.
                 resolved_by_name: dict = {}
@@ -207,10 +207,10 @@ class ModelCallActivity:
                 histogram.record(time.monotonic() - started)
                 content, raw_tool_calls, usage = real.content, real.raw_tool_calls, real.usage
                 # docs/components/turn-pipeline.md — the model authors these via
-                # the peeled report_status meta-tool. Empty ⇒ it didn't call it
-                # this step: status is synthesized from tool-call presence below
-                # (the Phase-2 fallback, removed in Phase 9); tier keeps the
-                # bootstrap default.
+                # the peeled report_status meta-tool. Empty status ⇒ it didn't
+                # call report_status this step; the default below (done iff no
+                # tool calls) is derived, not a fallback hiding a bug. tier
+                # keeps the bootstrap default.
                 model_status = real.status
                 next_step_note = real.next_step_note
                 est_remaining_steps = real.est_remaining_steps
@@ -319,7 +319,7 @@ class ModelCallActivity:
                         else ids.activity_id(input.turn_id, n)
                     )
 
-                    # A per-task resolved (ToolDiscover) call is offered to the
+                    # A per-task resolved (discover_tools) call is offered to the
                     # model under its OWN name (e.g. "weather_lookup"), so
                     # TOOL_REGISTRY has no handler for tool_name. resolved_server/
                     # resolved_tool (migration 026) carry the {server, tool}
@@ -491,8 +491,8 @@ def _resolve_gating(tool_name: str, arguments: dict) -> tuple[bool, str, str]:
     boundary as routing metadata, same category as tool_name itself).
 
     Only the shell_exec / call_tool cases live here — a **resolved** (per-task
-    ToolDiscover) call's identity is already known statically (the `Capability`
-    ToolDiscover produced for it this turn carries `resolved_target`), so the
+    discover_tools) call's identity is already known statically (the `Capability`
+    discover_tools produced for it this turn carries `resolved_target`), so the
     caller (the tool_calls minting loop) resolves those directly and only
     falls back to this function when the name isn't a resolved one.
 

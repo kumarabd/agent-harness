@@ -3,38 +3,23 @@
 A growing suite of scripted Temporal scenarios, run against the
 **already-deployed live cluster workers** (no local worker binaries, no
 scaling anything down) — the thing to run after any change touching
-`ModelCall`, `turn.go`'s dispatch loop, tool_calls minting, the `lcm/`
-package, or the pre-LLM request pipeline, instead of re-deriving
-verification from scratch every time.
+`ModelCall`, `turn.go`'s dispatch loop, tool_calls minting, or the `lcm/`
+package, instead of re-deriving verification from scratch every time.
 
-> **Not zero-cost any more.** The scripted-fixture path replaces only the
-> reason-act loop's own model calls. The pre-LLM request pipeline
-> (`docs/components/request-pipeline.md`) runs for real regardless of
-> fixtures — `ClassifyRequest` (fast tier), `RoutingWorkflow` →
-> `MemoryRetrieve` (agent-brain), `SkillDiscover` (embeddings),
-> `ToolDiscover` (mcp-hub). So each scenario turn spends a few cents of real
-> fast-tier LLM + a handful of backend calls. Cheap, but real — those steps
-> are exactly what the newer scenarios verify.
+> **Mostly zero-cost.** The scripted-fixture path replaces the reason-act
+> loop's model calls, and there is no pre-LLM pipeline any more (classify /
+> lane / routing / plan / skill retrieval were all removed) — a fixture turn
+> is pure plumbing. The one exception is **`real-assembly`**, which
+> deliberately omits fixtures so its one ModelCall runs `prompt.assemble` →
+> `lcm.assemble` for real against a seeded multi-turn history — the assembly
+> path every real turn takes. One real fast-tier call.
 >
-> The reason-act model calls are still fixture-scripted in every scenario
-> **except `real-assembly`**, which deliberately omits fixtures so its one
-> ModelCall runs step 9 (`prompt.assemble` → `lcm.assemble`) for real
-> against a seeded multi-turn history — the assembly path every real turn
-> takes and every other scenario short-circuits. One extra real fast-tier
-> call; it's the only place `prompt_assemble_latency_seconds` comes from.
->
-> `resolved-tool-dispatch` (docs/components/tool-registry.md, "Resolved:
-> Three-Layer Tool Taxonomy & Per-Task Resolution") stays fully
-> fixture-scripted — a scripted response's `tool_calls` still dispatch for
-> real, so it scripts a `search_tools` call and checks the real handler's
-> `_persist_discovered` wrote what it found into `turn_retrieval` under the
-> turn's own id, the mechanism that lets a mid-turn discovery be called by
-> name on the turn's next step now that `call_tool` isn't in the schema at
-> all. (Pre-seeding a resolved row via `setup.sql` instead — to test a model
-> calling it by name — was tried and reverted: `turns.status` has no neutral
-> "not started yet" value, so a pre-existing `status='running'` row makes
-> `cmd/starter` treat the scenario's message as a follow-up to an
-> already-active turn instead of starting one.)
+> `resolved-tool-dispatch` stays fully fixture-scripted — a scripted
+> response's `tool_calls` still dispatch for real, so it scripts a
+> `discover_tools` call and checks the real handler's `_persist_discovered`
+> wrote what it found into `turn_retrieval` under the turn's own id, the
+> mechanism that lets a mid-turn discovery be called by name on the next
+> step.
 
 ## Running it
 
@@ -117,16 +102,12 @@ That's the whole process — no other registration needed.
   `run_all.sh`'s own comment for the exact `temporal workflow signal`
   invocation).
 
-## Deliberate turns + subagents
+## Subagents
 
-Planning (`PlanWorkflow` / `CheckpointWorkflow` / PLAN.md) was removed in the
-turn-pipeline redesign (Phase 1 — see `docs/components/turn-pipeline.md`). A
-Deliberate task is now one flat `TurnWorkflow` reason-act loop that opens a
-task-run against **its own turn id** (`openedFresh` in `turn.go`): it stages
-`kind='skill'` retrieval under that id and dispatches one async `RecordSkill`
-over its trajectory at turn end. `run_scenario.sh` waits for the root turn to
-finish (which already awaits any subagent subtree), then gives an ABANDON
-`RecordSkill` child a beat if any turn under the scenario carries a `plan_id`.
+Every turn — top-level or subagent — is one flat `TurnWorkflow` running the
+same reason-act loop. There is no classify / lane / routing / plan / skill
+machinery any more (all removed over the turn-pipeline redesign — see
+`docs/components/turn-pipeline.md`).
 
 In `run_all.sh`:
 
@@ -134,19 +115,13 @@ In `run_all.sh`:
   **`spawn-subagent-nested-rejected`**, **`subagent-full-agent`** — the
   `spawn_subagent` call sits directly in `turn:1`'s scripted responses. The
   subagent turn_id is `<turn:1>:sub:1`, a nested spawn's grandchild
-  `<turn:1>:sub:1:sub:1`. `subagent-spawn` is the minimal spawn-plumbing case
-  (the regression the `caller_is_subagent` `NameError` once broke);
+  `<turn:1>:sub:1:sub:1`. `subagent-spawn` is the minimal spawn-plumbing case;
   `spawn-subagent-nested-*` are the recursion-termination guard;
-  `subagent-full-agent` additionally asserts the spawned subagent, being
-  Deliberate, opens its **own** task-run (`turns.plan_id == its turn_id`,
-  `openedFresh`), runs its own `RoutingWorkflow`, and gets a
-  `dispatchRecordSkill` at turn end.
-- **`lite-simple-task`** — the Lite lane: a simple task → `turns.plan_id` NULL,
-  memory-only retrieval, no `RecordSkill`. Its `expect.sh` reads the classify
-  log line and **skips** (not fails) if the classifier rated the turn Deliberate.
-
-`superpowers-b/` remains the broader live eval (a real teaching conversation,
-no scripting).
+  `subagent-full-agent` asserts a spawned subagent runs its own multi-step
+  loop with its own `tool_calls`, and that **no** `:routing` / `:record-skill`
+  child is ever started for it.
+- **`lite-simple-task`** — a plain one-step answer turn: no tool calls,
+  nothing staged to `turn_retrieval`, no children.
 
 ## Coverage notes
 

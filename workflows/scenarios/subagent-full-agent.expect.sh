@@ -29,7 +29,7 @@ sub_status="$(pg "SELECT status FROM turns WHERE turn_id = '$SUB_TURN_ID'")"
 [ "$sub_status" = "completed" ] || fail "subagent turn ($SUB_TURN_ID) status = '$sub_status', expected 'completed'"
 ok "root + subagent turns completed"
 
-# --- no pre-LLM pipeline ran (Phase 8): no :routing child, no plan_id ---
+# --- no pre-LLM pipeline ran: no :routing child ---
 if command -v temporal >/dev/null 2>&1; then
   rstatus="$(TEMPORAL_ADDRESS=localhost:17233 temporal workflow describe \
     --namespace abishekk --workflow-id "${SUB_TURN_ID}:routing" -o json 2>/dev/null \
@@ -39,18 +39,18 @@ if command -v temporal >/dev/null 2>&1; then
 else
   echo "  SKIP: temporal CLI not on PATH"
 fi
-sub_plan="$(pg "SELECT COALESCE(plan_id,'') FROM turns WHERE turn_id = '$SUB_TURN_ID'")"
-[ -z "$sub_plan" ] || fail "subagent turns.plan_id = '$sub_plan', expected empty (plan_id is no longer written)"
-ok "turns.plan_id unset"
 
 # --- the subagent ran its own multi-step loop with its own tool calls ---
 sub_tools="$(pg "SELECT count(*) FROM tool_calls WHERE parent_id = '$SUB_TURN_ID'")"
 [ "${sub_tools:-0}" -ge 2 ] || fail "subagent made $sub_tools tool calls, expected >= 2"
 ok "subagent ran its own multi-step loop ($sub_tools tool calls under its own id)"
 
-# --- the skill subsystem is gone: no RecordSkill child, no skill_procedures ---
-rec="$(pg "SELECT count(*) FROM skill_procedures WHERE source_ids @> jsonb_build_array('$SUB_TURN_ID')" 2>/dev/null || echo 0)"
-[ "${rec:-0}" = "0" ] || fail "a skill_procedures row references this subagent — RecordSkill should be gone"
-ok "no RecordSkill (skill subsystem removed)"
+# --- no :record-skill child (skill subsystem removed) ---
+if command -v temporal >/dev/null 2>&1; then
+  rs="$(TEMPORAL_ADDRESS=localhost:17233 temporal workflow describe \
+    --namespace abishekk --workflow-id "${SUB_TURN_ID}:record-skill" -o json 2>/dev/null || true)"
+  [ -z "$rs" ] || fail "a ${SUB_TURN_ID}:record-skill workflow exists — RecordSkill should be gone"
+  ok "no RecordSkill child (skill subsystem removed)"
+fi
 
 exit 0

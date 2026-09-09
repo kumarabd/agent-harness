@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Expectations for lite-simple-task.json — turn-pipeline.md Phase 8.
+# Expectations for lite-simple-task.json — turn-pipeline.md (post-cutover).
 #
 # There are no lanes any more. This is just a plain single-step turn: the model
-# answers in one reasoning step with no tool calls. Nothing should be staged to
-# turn_retrieval before the loop (the pre-LLM retrieval fan-out is gone), and
-# RecordSkill must NOT fire (it needs tools used across >=2 steps).
+# answers in one reasoning step with no tool calls, and nothing runs before the
+# loop (the pre-LLM retrieval fan-out and the skill subsystem are gone).
 #
 # Called by run_scenario.sh as: expect.sh <session_key> <root_turn_id>
 set -euo pipefail
@@ -39,12 +38,8 @@ n_staged="$(pg "SELECT count(*) FROM turn_retrieval WHERE owner_id = '$ROOT_TURN
 [ "${n_staged:-0}" = "0" ] || fail "$n_staged turn_retrieval rows staged — nothing runs pre-LLM any more"
 ok "nothing staged to turn_retrieval before the loop"
 
-ep="$(pg "SELECT COALESCE(plan_id,'') FROM turns WHERE turn_id = '$ROOT_TURN_ID'")"
-[ -z "$ep" ] || fail "turns.plan_id = '$ep' — plan_id is no longer written"
-ok "turns.plan_id unset"
-
-rec="$(pg "SELECT count(*) FROM skill_procedures WHERE source_ids @> jsonb_build_array('$ROOT_TURN_ID')")"
-[ "${rec:-0}" = "0" ] || fail "a skill_procedures row carries this turn — a no-tool turn must not record"
-ok "no RecordSkill (turn used no tools)"
+n_tools="$(pg "SELECT count(*) FROM tool_calls WHERE parent_id = '$ROOT_TURN_ID'")"
+[ "${n_tools:-0}" = "0" ] || fail "$n_tools tool calls on a plain answer turn"
+ok "plain answer turn — no tool calls"
 
 exit 0

@@ -43,6 +43,7 @@ result.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -475,32 +476,21 @@ async def search_tools(arguments: dict, ctx: ToolContext) -> dict:
 
 
 async def _persist_discovered(ctx: ToolContext, results: list[dict]) -> None:
-    """Stage a mid-turn `search_tools` call's results the same way
-    `ToolDiscover` (`retrieval/tools.py`) stages its pre-turn scan, appended
-    after whatever's already there (`MAX(seq)+1`) — never overwriting
-    ToolDiscover's own rows, which use the same 0-based seq range.
-    Best-effort: a persist failure loses the binding for later steps, never
-    the results this response already carries.
-
-    Local import of `retrieval.staging` — avoids a load-order cycle with
-    `retrieval/tools.py` (which imports `discover_tools` from this module):
-    a function-local import runs at CALL time, by which point the whole
-    worker process has finished every module's own import phase, so this
-    module is always fully loaded by then regardless of import order at
-    startup."""
+    """Stage a mid-turn `discover_tools` call's results into `turn_retrieval`
+    (kind='tool', owner_id = this turn) so `prompt.assemble` binds them as
+    callable schemas on the turn's next step. Appended after whatever's already
+    there (`MAX(seq)+1`). Best-effort — a persist failure loses the binding for
+    later steps, never the results this response already carries."""
     if not results:
         return
     try:
-        from .retrieval.staging import RetrievalRow, write_rows
-
         turn_id = ids.turn_id_of_tool_call(ctx.tool_call_id)
-        start = await ctx.pool.fetchval(
+        seq = await ctx.pool.fetchval(
             "SELECT COALESCE(MAX(seq), -1) + 1 FROM turn_retrieval WHERE owner_id = $1 AND kind = 'tool'",
             turn_id,
         )
         seen: set[tuple[str, str]] = set()
-        rows: list[RetrievalRow] = []
-        seq = start
+        rows: list[tuple] = []
         for result in results:
             server = str(result.get("server", "")).strip()
             tool = str(result.get("tool", "")).strip()
@@ -511,14 +501,20 @@ async def _persist_discovered(ctx: ToolContext, results: list[dict]) -> None:
             content = f"{server}/{tool}" if server else tool
             if description:
                 content += f" — {description[:300]}"
-            rows.append(RetrievalRow(
-                kind="tool", seq=seq, content=content,
-                metadata={"server": server, "tool": tool, "input_schema": result.get("input_schema")},
-            ))
+            metadata = {"server": server, "tool": tool, "input_schema": result.get("input_schema")}
+            rows.append((turn_id, "tool", seq, content, None, json.dumps(metadata)))
             seq += 1
-        await write_rows(ctx.pool, turn_id, rows)
+        if rows:
+            await ctx.pool.executemany(
+                "INSERT INTO turn_retrieval (owner_id, kind, seq, content, score, metadata) "
+                "VALUES ($1, $2, $3, $4, $5, $6) "
+                "ON CONFLICT (owner_id, kind, seq) DO UPDATE SET "
+                "  content = EXCLUDED.content, score = EXCLUDED.score, "
+                "  metadata = EXCLUDED.metadata, created_at = now()",
+                rows,
+            )
     except Exception:  # noqa: BLE001 - never fail the search itself over persisting its binding
-        logger.warning("search_tools: failed to persist discovered rows for mid-turn binding", exc_info=True)
+        logger.warning("discover_tools: failed to persist discovered rows for mid-turn binding", exc_info=True)
 
 
 async def call_tool(arguments: dict, ctx: ToolContext) -> dict:
@@ -645,15 +641,6 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
 # not model-facing, so not in the capability table; still needed by scenario
 # fixtures that script tool calls.
 TOOL_REGISTRY.update({"search": _DEMO_TOOL_SPEC, "slow_tool": _DEMO_TOOL_SPEC, "noop_tool": _DEMO_TOOL_SPEC})
-
-# One-phase back-compat: a stray call to a meta-tool's old name (from an
-# already-recorded skill procedure, or a stale fixture) still dispatches instead
-# of failing "unknown tool". Removed once the store has re-recorded under the
-# new names (docs/components/turn-pipeline.md, Phase 9).
-TOOL_REGISTRY.update({
-    "memory_search": TOOL_REGISTRY["search_memory"],
-    "search_tools": TOOL_REGISTRY["discover_tools"],
-})
 
 assert set(_HANDLERS) == set(_cap.HANDLER_REFS), (
     "tools._HANDLERS and capabilities.CAPABILITIES handler_refs have drifted: "
