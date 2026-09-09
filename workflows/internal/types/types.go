@@ -81,28 +81,14 @@ type TurnInput struct {
 	// startTurn helper did InsertMessage before starting this workflow). Skip
 	// the start-of-turn InsertMessage.
 	PreInserted bool `json:"pre_inserted,omitempty"`
-	// PlanID: the task-run this turn belongs to. A top-level Deliberate turn or a
-	// Deliberate subagent opens one against its own turn id (turn.go); empty for
-	// a Lite / conversational turn. When Task is also set, TurnWorkflow skips its
-	// own ClassifyRequest.
-	PlanID string `json:"plan_id,omitempty"`
-	// Task: pre-resolved classification, passed through when a caller already
-	// classified (not used by startTurn today — kept for the subagent path).
-	Task *TaskRepresentation `json:"task,omitempty"`
-	// HintModality/HintTier seed this turn's FIRST ModelCall hint — normally
-	// every turn starts blank (model_registry.default_hint() picks the bootstrap
-	// tier from Complexity instead). No caller sets these today; kept for a
-	// future re-planning path.
-	HintModality string `json:"hint_modality,omitempty"`
-	HintTier     string `json:"hint_tier,omitempty"`
 	// OfferDeliveryTools: this turn's ModelCall calls offer deliver_reply/
 	// deliver_attachment (docs/components/activities-outbound-delivery.md's
-	// model-driven retry philosophy applied to delivery itself) — set by
-	// plan_workflow.go's plan-presentation turn. Threaded into every
-	// ModelCallInput this turn builds, mirrored by Python's
-	// ModelCallInput.offer_delivery_tools. turn.go's own bounded
-	// post-Deliver-failure recovery round sets this directly on a raw
-	// ModelCallInput instead (not a new turn), so it doesn't need this field.
+	// model-driven retry philosophy applied to delivery itself). Threaded into
+	// every ModelCallInput this turn builds, mirrored by Python's
+	// ModelCallInput.offer_delivery_tools. No caller sets it today (the
+	// plan-presentation turn that used to is gone); turn.go's own bounded
+	// post-Deliver-failure recovery round sets it directly on a raw
+	// ModelCallInput instead.
 	OfferDeliveryTools bool `json:"offer_delivery_tools,omitempty"`
 }
 
@@ -127,11 +113,6 @@ type TurnResult struct {
 	// freshly-arrived signal once this turn's future resolves, starting a
 	// new turn with it rather than discarding it.
 	InterruptedDuringDelivery *SignalPayload `json:"interrupted_during_delivery,omitempty"`
-	// NextHintModality/NextHintTier — the turn's own last declare_next_step_hint
-	// call, a small derived routing signal, not content. No caller reads these
-	// today; kept for a future re-planning path.
-	NextHintModality string `json:"next_hint_modality,omitempty"`
-	NextHintTier     string `json:"next_hint_tier,omitempty"`
 }
 
 // SignalPayload is what SignalWithStart / a follow-up signal carries into the
@@ -159,121 +140,30 @@ type WakePayload struct {
 // prior turn history from Postgres itself (it *is* the context-hydration
 // step now) and looks up ContextSeq's scripted/real response.
 type ModelCallInput struct {
-	TurnID string `json:"turn_id"`
-	// PlanID — the task-run this turn belongs to (== the planning turn's id).
-	// Prompt assembly reads the staged skills + the PLAN.md ledger by this, and
-	// propose_plan / checkpoint_done updates apply against it. Empty for a Lite
-	// or conversational turn.
-	PlanID     string `json:"plan_id"`
+	TurnID     string `json:"turn_id"`
 	ContextSeq int    `json:"context_seq"`
-	// docs/components/model-registry.md, "Resolved: Selection Mechanism" —
-	// the previous step's self-declared hint for this step, threaded
-	// through opaquely (this workflow never interprets these, just copies
-	// ModelCallOutput's hint fields into the next call's input). Empty on
-	// the very first call of a turn — the Python side's
-	// model_registry.default_hint() supplies {language, medium} in that
-	// case, not a literal default here.
+	// docs/components/turn-pipeline.md, Phase 7 — the previous step's
+	// report_status tier hint for this step, threaded through opaquely (the
+	// workflow never interprets it, just copies ModelCallOutput.NextStep's
+	// modality/tier into the next call's input). Empty on the very first call
+	// of a turn — model_registry.default_hint() supplies {language, medium}.
 	HintModality string `json:"hint_modality"`
 	HintTier     string `json:"hint_tier"`
-	// Complexity — docs/components/request-pipeline/02-request-understanding.md.
-	// Step 2's complexity estimate, threaded through opaquely so ModelCall can
-	// bootstrap the turn's FIRST tier from it instead of always starting at
-	// medium. The workflow never interprets it; empty for subagents and when
-	// step 2 fell back.
-	Complexity string `json:"complexity"`
 	// OfferDeliveryTools — mirrors types.TurnInput's field of the same name;
 	// see there. Also set directly (without a TurnInput) by turn.go's local
 	// post-Deliver-failure recovery round.
 	OfferDeliveryTools bool `json:"offer_delivery_tools,omitempty"`
 }
 
-// ClassifyRequestInput is ClassifyRequest's only input
-// (docs/components/request-pipeline/02-request-understanding.md). The activity
-// reads the turn's seed user message (and a little recent context) from
-// Postgres itself and returns a TaskRepresentation.
-type ClassifyRequestInput struct {
-	TurnID string `json:"turn_id"`
-}
-
-// TaskRepresentation is step 2's output — small derived routing signals only:
-// the two routing scalars (intent/complexity), the classifier's confidence, a
-// distilled retrieval query, and a few named entities. Carried by the workflow
-// the same way ModelCallOutput.NextHintTier and ToolCallRef's {Server,Tool}
-// are — routing metadata derived from the message, not the message content
-// (which stays Postgres-side). RetrievalQuery/Entities are passed straight
-// into the step-4/5/7 retrieval activities by RetrievalWorkflow. Confidence ==
-// A zero value marks an un-classified turn; ClassifyRequest fails rather than
-// returning one (no fallback — request-pipeline/02-request-understanding.md).
-type TaskRepresentation struct {
-	Intent         string   `json:"intent"`     // "conversational" | "question" | "task" | "meta"
-	Complexity     string   `json:"complexity"` // "trivial" | "simple" | "moderate" | "complex"
-	Confidence     float64  `json:"confidence"`
-	RetrievalQuery string   `json:"retrieval_query"`
-	Entities       []string `json:"entities"`
-	// ContinuesPrior — whether this message continues the session's in-progress
-	// task-run or starts a new one. Consumed by ResolveOpenPlan, which
-	// cross-checks it against embedding similarity when Confidence is low.
-	ContinuesPrior bool `json:"continues_prior"`
-}
-
-// MemoryRetrieveInput is MemoryRetrieve's input
-// (docs/components/request-pipeline/04-memory-retrieval.md). RetrievalQuery is
-// the distilled query from step 2's TaskRepresentation — a small derived
-// signal passed straight in, not read from Postgres.
-//
-// MemoryRetrieve runs once PER TURN, staged under the current turn's id
-// (OwnerID = TurnID).
-type MemoryRetrieveInput struct {
-	OwnerID        string `json:"owner_id"` // the current turn_id — turn_retrieval staging key
-	RetrievalQuery string `json:"retrieval_query"`
-	// ParentTurnID is set only for a subagent turn ("Subagents are full
-	// agents"). When present, MemoryRetrieve copies the parent turn's staged
-	// kind='memory' rows instead of re-querying agent-brain — memory is about
-	// the user's world, stable across a turn tree.
-	ParentTurnID string `json:"parent_turn_id,omitempty"`
-}
-
-// ToolDiscoverInput is ToolDiscover's input
-// (docs/components/request-pipeline/07-tool-discovery.md). REVISED 2026-09-02:
-// runs once PER TURN, staged under OwnerID = the current turn_id.
-type ToolDiscoverInput struct {
-	OwnerID        string   `json:"owner_id"`
-	RetrievalQuery string   `json:"retrieval_query"`
-	Entities       []string `json:"entities"`
-}
-
-// SkillDiscoverInput is SkillDiscover's input
-// (docs/components/request-pipeline/05-skill-discovery.md). Plan-scoped — runs
-// once on the planning turn, staged under PlanID for the prompt + RecordSkill.
-type SkillDiscoverInput struct {
-	PlanID         string `json:"plan_id"`
-	RetrievalQuery string `json:"retrieval_query"`
-}
-
-// RecordSkillInput is RecordSkill's input
-// (docs/components/skill-subsystem.md REVISION 2026-09-02). Dispatched once when
-// a task-run (PlanWorkflow, or a Deliberate subagent turn) finishes. The
-// activity reads the whole multi-turn trajectory / tool calls / staged skill
-// rows / PLAN.md from Postgres + the PV itself, then match-or-inserts against
-// skill_procedures. Intent/Complexity/CloseReason come from the caller (there
-// is no `episodes` row to read them from — decision B).
+// RecordSkillInput is RecordSkill's input (docs/components/skill-subsystem.md;
+// turn-pipeline.md Phase 8). Dispatched once at turn end when the turn used
+// tools across ≥2 reasoning steps. The activity reads the whole trajectory
+// (this turn + any subagent turns under it by id prefix) from Postgres, then
+// match-or-inserts against skill_procedures.
 type RecordSkillInput struct {
-	PlanID      string `json:"plan_id"`
+	TurnID      string `json:"turn_id"`
 	StopReason  string `json:"stop_reason"`
-	Intent      string `json:"intent"`
-	Complexity  string `json:"complexity"`
-	CloseReason string `json:"close_reason"` // "plan_complete" | "superseded" | "turn_end" | ""
-}
-
-// SubsystemResult is what each retrieval-phase activity returns to
-// RoutingWorkflow — a status and the count of rows it staged to
-// turn_retrieval. No content: the rows are read from turn_retrieval by later
-// steps. Status is "ok" | "empty" | "error" from the activity; RoutingWorkflow
-// records "timed_out" / "skipped" in the same shape for subsystems it didn't
-// run or that missed the phase deadline.
-type SubsystemResult struct {
-	Status string `json:"status"`
-	Count  int    `json:"count"`
+	CloseReason string `json:"close_reason"` // "turn_end" (the only value now that PlanWorkflow is gone)
 }
 
 // ToolCallRef is one tool call minted by ModelCall — name/ID/dispatch-kind
@@ -395,11 +285,6 @@ type InsertMessageInput struct {
 	// InitiatedBy — set only on the is_turn_start call; written to
 	// turns.initiated_by (docs/components/proactivity.md). Empty → 'user'.
 	InitiatedBy string `json:"initiated_by,omitempty"`
-	// PlanID — set on the is_turn_start call for any turn under a PlanWorkflow
-	// (docs/components/request-pipeline/08-planning.md). Written to
-	// turns.plan_id, which RecordSkill's trajectory gather keys on (by prefix,
-	// so a nested plan's turns are swept in too).
-	PlanID string `json:"plan_id,omitempty"`
 }
 
 // UserInputOption is one selectable choice in a UserInputRequest.

@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Expectations for subagent-full-agent.json — temporal-workflow.md,
-# "Subagents are full agents", on the flat reason-act loop.
+# "Subagents are full agents", on the flat reason-act loop (turn-pipeline.md
+# Phase 8: no ClassifyRequest, no RoutingWorkflow, no lanes).
 #
 # The subagent is spawned from turn:1, so its turn_id is <turn:1>:sub:1. It
-# runs the pre-LLM pipeline itself:
-#   - its own RoutingWorkflow child (<sub>:routing) executes
-#   - being Deliberate it opens its own single-turn task-run: plan_id == its
-#     turn_id (openedFresh, turn.go)
-#   - dispatchRecordSkill fires for it -> a skill_procedures row in source_ids
+# runs the same reason-act loop as a top-level turn, and because it uses tools
+# across two reasoning steps, dispatchRecordSkill fires for it at turn end ->
+# a skill_procedures row carrying <sub:1> in source_ids.
 #
 # Called by run_scenario.sh as: expect.sh <session_key> <root_turn_id>
 set -euo pipefail
@@ -38,24 +37,28 @@ sub_status="$(pg "SELECT status FROM turns WHERE turn_id = '$SUB_TURN_ID'")"
 [ "$sub_status" = "completed" ] || fail "subagent turn ($SUB_TURN_ID) status = '$sub_status', expected 'completed'"
 ok "root + subagent turns completed"
 
-# --- the subagent opened its own task-run (Deliberate, openedFresh) ---
-sub_plan="$(pg "SELECT COALESCE(plan_id,'') FROM turns WHERE turn_id = '$SUB_TURN_ID'")"
-[ "$sub_plan" = "$SUB_TURN_ID" ] || fail "subagent turns.plan_id = '$sub_plan', expected its own turn_id (openedFresh) — did it classify Lite?"
-ok "subagent opened its own task-run (turns.plan_id == turn_id)"
-
-# --- steps 2+3 ran for the subagent: its RoutingWorkflow child executed ---
+# --- no pre-LLM pipeline ran (Phase 8): the subagent has NO :routing child,
+#     and turns.plan_id is never written any more ---
 if command -v temporal >/dev/null 2>&1; then
   rstatus="$(TEMPORAL_ADDRESS=localhost:17233 temporal workflow describe \
     --namespace abishekk --workflow-id "${SUB_TURN_ID}:routing" -o json 2>/dev/null \
     | python3 -c 'import sys,json; print(json.load(sys.stdin)["workflowExecutionInfo"]["status"])' 2>/dev/null || true)"
-  [ -n "$rstatus" ] || fail "no ${SUB_TURN_ID}:routing workflow — the subagent did not run step 3"
-  ok "subagent ran its own RoutingWorkflow (status: $rstatus)"
+  [ -z "$rstatus" ] || fail "a ${SUB_TURN_ID}:routing workflow exists ($rstatus) — RoutingWorkflow should be gone"
+  ok "no RoutingWorkflow child (pre-LLM pipeline removed)"
 else
-  echo "  SKIP: temporal CLI not on PATH — cannot check the subagent's RoutingWorkflow directly"
+  echo "  SKIP: temporal CLI not on PATH"
 fi
+sub_plan="$(pg "SELECT COALESCE(plan_id,'') FROM turns WHERE turn_id = '$SUB_TURN_ID'")"
+[ -z "$sub_plan" ] || fail "subagent turns.plan_id = '$sub_plan', expected empty (plan_id is no longer written)"
+ok "turns.plan_id unset (no task-run machinery)"
 
-# --- RecordSkill fired for the subagent (dispatchRecordSkill at turn end) ---
+# --- the subagent used tools across 2 steps, so RecordSkill fired for it,
+#     keyed on its own turn id ---
+sub_tools="$(pg "SELECT count(*) FROM tool_calls WHERE parent_id = '$SUB_TURN_ID'")"
+[ "${sub_tools:-0}" -ge 2 ] || fail "subagent made $sub_tools tool calls, expected >= 2"
+ok "subagent used tools across multiple steps ($sub_tools calls)"
+
 poll_for "SELECT count(*) FROM skill_procedures WHERE source_ids @> jsonb_build_array('$SUB_TURN_ID')" 1 \
-  "skill_procedures row written/versioned for the subagent's task-run (RecordSkill)" 40
+  "skill_procedures row written/versioned for the subagent (RecordSkill, keyed on turn_id)" 40
 
 exit 0

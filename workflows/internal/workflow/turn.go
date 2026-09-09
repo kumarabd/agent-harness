@@ -794,16 +794,16 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	retries := 0
 	cumulativeTokens := 0
 	contextSeq := 0 // ModelCall's own call-index for fixture lookup — distinct from messages.seq, which activities compute themselves
-	// docs/components/model-registry.md, "Resolved: Selection Mechanism" —
-	// empty on the first iteration for a plain turn (bootstrap default
-	// supplied Python-side by model_registry.default_hint(), not duplicated
-	// here), then copied verbatim from each ModelCallOutput's own next-step
-	// hint. This workflow never interprets these values, just passes them
-	// through. Seeded from input.HintModality/HintTier when the caller set
-	// one (plan_workflow.go's checkpoint dispatch, propagating the previous
-	// turn's own declare_next_step_hint forward — see TurnInput.HintTier's
-	// doc comment) — empty for every other caller, unchanged behavior.
-	hintModality, hintTier := input.HintModality, input.HintTier
+	// docs/components/model-registry.md — the model authors its next-step tier
+	// hint via report_status (Phase 7); this workflow carries it forward opaquely
+	// into the next ModelCallInput. Empty on the first iteration — model_call.py
+	// bootstraps from model_registry.default_hint() Python-side.
+	hintModality, hintTier := "", ""
+	// docs/components/turn-pipeline.md, Phase 8 — RecordSkill is no longer gated
+	// on a pre-LLM classifier's lane decision. It fires at turn end iff the turn
+	// actually used tools across ≥2 reasoning steps (a real multi-step task-run,
+	// not a chat reply), keyed on the turn's own id.
+	iterationsWithTools := 0
 
 	// --- Start-of-turn: write the inbound message (or, for a subagent, let
 	// InsertMessage derive its kickoff content from its own tool_calls row)
@@ -811,9 +811,8 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	// already in Postgres (components/temporal-workflow.md, "Resolved:
 	// Reference/ID Schema"). This also creates the turns row.
 	//
-	// PreInserted (docs/components/request-pipeline/08-planning.md, Phase 3C):
-	// the dispatch helper (dispatch.go) already did InsertMessage before
-	// deciding to start this workflow — skip it.
+	// PreInserted: the dispatch helper (dispatch.go) already did InsertMessage
+	// before starting this workflow — skip it.
 	if !input.PreInserted {
 		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 		actx := workflow.WithActivityOptions(ctx, ao)
@@ -825,7 +824,6 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 			ParentType:  input.ParentType,
 			TurnSeq:     input.TurnSeq,
 			InitiatedBy: input.InitiatedBy,
-			PlanID:      input.PlanID,
 		}
 		if err := workflow.ExecuteActivity(actx, "InsertMessage", insertInput).Get(actx, nil); err != nil {
 			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, nil, "")
@@ -875,73 +873,11 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 		})
 	}
 
-	// --- Step 2: request understanding
-	// (docs/components/request-pipeline/02-request-understanding.md). A cheap
-	// fast-tier analysis of the inbound message — intent + complexity routing
-	// scalars, plus a distilled retrieval query and named entities for the
-	// step-4/5/7 retrieval subsystems. It IS load-bearing: every lane /
-	// retrieval decision below reads it, so there is no neutral fallback —
-	// ClassifyRequest either returns a real representation or raises
-	// (activities/classify.py), Temporal retries the bounded ladder, and an
-	// exhausted retry fails the turn here rather than silently routing every
-	// request as (task, moderate). A broken classifier must be visible.
-	// Runs for subagents too (request-pipeline/08-planning.md, "Subagents are
-	// full agents"): the spawn prompt is written as the turn's seed user message
-	// by InsertMessage, exactly what ClassifyRequest reads, and a subagent
-	// handed a complex sub-task deserves its own skill discovery and plan. A
-	// subagent handed a trivial one classifies simple and fast-paths.
-	var taskRep types.TaskRepresentation
-	if input.Task != nil {
-		// The dispatch helper already classified (dispatch.go) — a plain turn,
-		// or the planning turn under a PlanWorkflow.
-		taskRep = *input.Task
-	} else {
-		// Bounded retry, not Temporal's unlimited default: ClassifyRequest now
-		// raises instead of degrading, and a persistently-failing classifier
-		// must fail the turn (failTurn below), not retry forever and hang it.
-		cao := workflow.ActivityOptions{
-			StartToCloseTimeout: activityTimeoutTierA,
-			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
-		}
-		cactx := workflow.WithActivityOptions(ctx, cao)
-		if err := workflow.ExecuteActivity(cactx, "ClassifyRequest", types.ClassifyRequestInput{TurnID: input.TurnID}).Get(cactx, &taskRep); err != nil {
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, "")
-		}
-	}
-	logger.Info("request classified", "turn_id", input.TurnID, "parent_type", input.ParentType, "intent", taskRep.Intent, "complexity", taskRep.Complexity, "confidence", taskRep.Confidence)
-
-	// --- Task-run resolution. A Deliberate turn (top-level or subagent) becomes
-	// its own single-turn task-run — plan id == its own turn id — which scopes
-	// skill retrieval and the end-of-turn RecordSkill. A Lite / conversational
-	// turn just runs the loop.
-	parentTurnID := ""
-	if input.ParentType == "turn" {
-		parentTurnID = input.ParentID
-	}
-	planID := input.PlanID
-	openedFresh := false
-	if planID == "" && laneIsDeliberate(taskRep) {
-		planID = input.TurnID
-		openedFresh = true
-	}
-	logger.Info("task-run resolved", "turn_id", input.TurnID, "plan_id", planID)
-
-	// --- Step 3: routing + retrieval orchestration
-	// (docs/components/request-pipeline/03-routing.md). Every non-conversational
-	// turn runs memory + tool discovery fresh for THIS turn. A Deliberate turn
-	// (openedFresh) additionally stages skills under its own turn id: pass
-	// seedPlanID so RoutingWorkflow does that. A Lite turn passes "" — memory +
-	// tools only.
-	if taskRep.Intent != "conversational" {
-		// seedPlanID != "" ⇒ RoutingWorkflow also runs SkillDiscover under it.
-		seedPlanID := ""
-		if openedFresh {
-			seedPlanID = planID
-		}
-		if _, err := startRouting(ctx, seedPlanID, input.TurnID, parentTurnID, taskRep, &pendingMessages); err != nil {
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, planID)
-		}
-	}
+	// docs/components/turn-pipeline.md, Phase 8 — the pre-LLM pipeline
+	// (ClassifyRequest → lane decision → RoutingWorkflow retrieval fan-out) is
+	// gone. The turn goes straight to the reason-act loop; the model pulls
+	// memory / skills / tools on demand via the meta-tools, and picks its own
+	// model tier per step via report_status.
 
 	var stopReason string
 
@@ -990,15 +926,10 @@ loop:
 		}
 		mctx := workflow.WithActivityOptions(cancelCtx, mao)
 		modelInput := types.ModelCallInput{
-			TurnID:       input.TurnID,
-			PlanID:       planID,
-			ContextSeq:   contextSeq,
-			HintModality: hintModality,
-			HintTier:     hintTier,
-			// Step 2's estimate — ModelCall uses it only to bootstrap the
-			// first call's tier (when HintTier is empty). Zero value for
-			// subagents; harmless to pass every iteration.
-			Complexity:         taskRep.Complexity,
+			TurnID:             input.TurnID,
+			ContextSeq:         contextSeq,
+			HintModality:       hintModality,
+			HintTier:           hintTier,
 			OfferDeliveryTools: input.OfferDeliveryTools,
 		}
 		mcFuture := workflow.ExecuteActivity(mctx, "ModelCall", modelInput)
@@ -1022,7 +953,7 @@ loop:
 		}
 		if mcErr != nil {
 			cancel()
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, mcErr, interrupts, planID)
+			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, mcErr, interrupts, "")
 		}
 		contextSeq++
 		if mcOut.NextStep != nil {
@@ -1136,7 +1067,7 @@ loop:
 				ictx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
 				if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: input.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
 					cancel()
-					return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, planID)
+					return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, "")
 				}
 				cancel()
 				continue
@@ -1158,7 +1089,7 @@ loop:
 				ictx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
 				if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: input.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
 					cancel()
-					return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, planID)
+					return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, "")
 				}
 				cancel()
 				continue
@@ -1177,6 +1108,7 @@ loop:
 			cancel()
 			continue
 		}
+		iterationsWithTools++ // Phase 8 RecordSkill gate — a real working step
 
 		// --- Act: parallel fan-out over this reasoning step's tool calls ---
 		// components/02-architecture-temporal-execution.md §4: siblings run
@@ -1359,7 +1291,7 @@ loop:
 			iactx := workflow.WithActivityOptions(ctx, iao)
 			insertInput := types.InsertMessageInput{TurnID: input.TurnID, Message: next.Message}
 			if err := workflow.ExecuteActivity(iactx, "InsertMessage", insertInput).Get(iactx, nil); err != nil {
-				return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, planID)
+				return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts, "")
 			}
 
 			// A mid-turn follow-up lands in the conversation (InsertMessage
@@ -1421,13 +1353,7 @@ loop:
 	{
 		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 		actx := workflow.WithActivityOptions(ctx, ao)
-		// planID: "" for a Lite turn or a checkpoint/planning turn (InsertMessage
-		// already wrote the right value at turn start); the subagent's own
-		// fresh task-run id for openedFresh (only known after task-run
-		// resolution above, too late for that earlier write — Persist's
-		// plan_id arg is a no-op unless it's non-empty, so passing it
-		// unconditionally here is safe for every other case).
-		_ = workflow.ExecuteActivity(actx, "Persist", input.TurnID, "completed", planID).Get(actx, nil)
+		_ = workflow.ExecuteActivity(actx, "Persist", input.TurnID, "completed", "").Get(actx, nil)
 	}
 	// docs/components/memory-slot.md's "Resolved: Write-Path Construction"
 	// correction (2026-08-29): WriteMemory no longer dispatches here, once
@@ -1445,47 +1371,34 @@ loop:
 		}
 	}
 
-	// --- Recording. A Deliberate turn (top-level or subagent) is its own
-	// single-turn task-run — record its trajectory now (record.py re-gates on
-	// intent/complexity + a clean stop). A Lite / conversational turn has no
-	// planID and records nothing.
-	if planID != "" {
-		dispatchRecordSkill(ctx, planID, taskRep, stopReason, "turn_end")
+	// --- Recording (docs/components/turn-pipeline.md, Phase 8). No pre-LLM
+	// classifier decides "task-run" any more — the turn's own trace does: it's
+	// worth recording iff the model actually used tools across ≥2 reasoning
+	// steps (a real multi-step job, not a chat reply or a one-shot lookup).
+	// Keyed on the turn's own id; a subagent's turns sit under it by id prefix.
+	if iterationsWithTools >= 2 {
+		dispatchRecordSkill(ctx, input.TurnID, stopReason, "turn_end")
 	}
 
-	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "interrupted_during_delivery", interruptedPayload != nil)
+	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "iterations_with_tools", iterationsWithTools, "interrupted_during_delivery", interruptedPayload != nil)
 	return types.TurnResult{TurnID: input.TurnID, StopReason: stopReason, Iterations: iterations, InterruptedDuringDelivery: interruptedPayload}, nil
 }
 
 // dispatchRecordSkill starts the detached RecordSkillWorkflow for a finished
-// task-run (docs/components/skill-subsystem.md). ABANDON so it outlives this
-// workflow; ALLOW_DUPLICATE so a later path can re-attempt. Intent/complexity/
-// closeReason are passed in — there is no `episodes` row to read them from
-// (decision B).
-//
-// stopReason and closeReason are genuinely different things record.py reads
-// separately: stopReason is a single TurnWorkflow's own loop-exit reason
-// ("no_tool_calls" | "max_iterations" | ...), which record.py's clean-stop
-// check needs verbatim; closeReason is the coarser reason the task-run as a
-// whole ended ("plan_complete" | "superseded" | "turn_end" | ""). A bare
-// subagent turn (turn.go's call site) has both. A PlanWorkflow's root close
-// (plan_workflow.go's call site) swept a whole tree of turns, so no single
-// loop-exit reason applies — it passes "", and record.py never reaches its
-// stopReason check for any closeReason a PlanWorkflow sends (short-circuits
-// on "plan_complete", falls to the failure branch otherwise), so the empty
-// value is inert there, not a fallback being relied on.
-func dispatchRecordSkill(ctx workflow.Context, planID string, task types.TaskRepresentation, stopReason string, closeReason string) {
+// turn (docs/components/skill-subsystem.md). ABANDON so it outlives this
+// workflow; ALLOW_DUPLICATE so a later path can re-attempt. stopReason is the
+// loop-exit reason (record.py's clean-stop check reads it verbatim); closeReason
+// is always "turn_end" now that PlanWorkflow is gone.
+func dispatchRecordSkill(ctx workflow.Context, turnID string, stopReason string, closeReason string) {
 	rcwo := workflow.ChildWorkflowOptions{
-		WorkflowID:            planID + ":record-skill",
+		WorkflowID:            turnID + ":record-skill",
 		ParentClosePolicy:     enumspb.PARENT_CLOSE_POLICY_ABANDON,
 		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
 	}
 	rcctx := workflow.WithChildOptions(ctx, rcwo)
 	rf := workflow.ExecuteChildWorkflow(rcctx, RecordSkillWorkflow, types.RecordSkillInput{
-		PlanID:      planID,
+		TurnID:      turnID,
 		StopReason:  stopReason,
-		Intent:      task.Intent,
-		Complexity:  task.Complexity,
 		CloseReason: closeReason,
 	})
 	_ = rf.GetChildWorkflowExecution().Get(ctx, nil)

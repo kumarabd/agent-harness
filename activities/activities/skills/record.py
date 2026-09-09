@@ -39,21 +39,15 @@ logger = logging.getLogger(__name__)
 _MAX_TRANSCRIPT_CHARS = 20_000
 _MAX_TASK_TEXT_CHARS = 2_000
 _SUCCESS_STOP_REASONS = {"no_tool_calls"}
-_RECORD_INTENTS = {"task", "question"}
-_RECORD_COMPLEXITIES = {"moderate", "complex"}
 _SCOPES = ("global",)
 # cosine floor for "this trajectory represents an existing procedure" when that
 # procedure has no learned cluster_radius yet. Numeric-tuning-deferred.
 _MATCH_RADIUS = 0.82
 
-# A Deliberate turn records against its own turn id as the task-run id, written
-# to turns.plan_id by Persist. Its subagent turns sit under it by id prefix
-# (`<turn>:sub:...`), so a prefix match sweeps them in. The final clause covers a
-# turn whose plan_id never got written (older rows / a race) by matching turn_id.
-_TRAJECTORY_FILTER = (
-    "(t.plan_id = $1 OR starts_with(t.plan_id, $1 || ':') "
-    "OR (t.plan_id IS NULL AND t.turn_id = $1))"
-)
+# turn-pipeline.md Phase 8 — RecordSkill is keyed on the turn's own id (turn.go
+# already gated on "used tools across ≥2 steps"). A subagent's turns sit under it
+# by id prefix (`<turn>:sub:...`), so a prefix match sweeps them in.
+_TRAJECTORY_FILTER = "(t.turn_id = $1 OR starts_with(t.turn_id, $1 || ':'))"
 _MESSAGES_SQL = (
     "SELECT m.role, m.content, m.message_id, m.seq "
     "FROM messages m JOIN turns t ON m.parent_id = t.turn_id "
@@ -90,21 +84,15 @@ class RecordSkillActivity:
 
     @activity.defn(name="RecordSkill")
     async def __call__(self, input: RecordSkillInput) -> None:
-        plan_id = input.plan_id  # the task-run id (decision B — no `episodes` table)
-        intent = input.intent or "task"
-        complexity = input.complexity or "moderate"
+        # turn-pipeline.md Phase 8 — the turn id is the trajectory key. turn.go
+        # already decided this turn is worth recording ("used tools across ≥2
+        # steps"), so there is no intent/complexity gate here any more.
+        plan_id = input.turn_id
         close_reason = input.close_reason or ""
-
-        if intent not in _RECORD_INTENTS or complexity not in _RECORD_COMPLEXITIES:
-            logger.info(
-                "RecordSkill[%s]: intent=%s complexity=%s — nothing worth learning",
-                plan_id, intent, complexity,
-            )
-            return
 
         total_started = time.monotonic()
 
-        # --- 1. gather everything that only needs plan_id, concurrently. Each
+        # --- 1. gather everything that only needs the turn id, concurrently. Each
         # runs on its own pooled connection. The store-wide procedure list is
         # pulled here too so it no longer serializes behind the first embed
         # inside _match_or_insert.

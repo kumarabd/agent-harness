@@ -37,139 +37,29 @@ class Message:
 @dataclass
 class ModelCallInput:
     turn_id: str = ""
-    # docs/components/request-pipeline/08-planning.md — the task-run this turn
-    # belongs to (== the planning/anchor turn_id). Prompt assembly reads the
-    # staged retrieval + the PLAN.md ledger by this, and propose_plan /
-    # checkpoint_done updates are applied against it. Empty for a conversational
-    # fast-path turn (no plan).
-    plan_id: str = ""
     context_seq: int = 0
-    # docs/components/model-registry.md, "Resolved: Selection Mechanism" —
-    # the PREVIOUS step's self-declared hint for THIS step, threaded through
-    # opaquely by the workflow (it never interprets these, just passes
-    # ModelCallOutput's hint fields into the next ModelCallInput). Empty
-    # string on the very first call of a turn — model_registry.default_hint()
-    # is what actually supplies {language, medium} in that case, not a
-    # literal default here, so the workflow doesn't need to know the
-    # registry's own bootstrap value.
+    # docs/components/turn-pipeline.md, Phase 7 — the PREVIOUS step's
+    # report_status tier hint for THIS step, threaded through opaquely by the
+    # workflow. Empty on the very first call of a turn —
+    # model_registry.default_hint() supplies {language, medium}.
     hint_modality: str = ""
     hint_tier: str = ""
-    # docs/components/request-pipeline/02-request-understanding.md — step 2's
-    # complexity estimate, threaded through so ModelCall can bootstrap the
-    # turn's FIRST tier from it (empty hint_tier only). Empty for subagents
-    # and when step 2 fell back.
-    complexity: str = ""
-    # Delivery-in-the-loop (2026-09-06) — offers deliver_reply/deliver_attachment
-    # for this one call: turn.go's bounded post-Deliver-failure recovery round,
-    # or a plan-presentation turn (plan_workflow.go). Mirrored in types.go's
-    # ModelCallInput.OfferDeliveryTools.
+    # Delivery-in-the-loop — offers deliver_reply/deliver_attachment for this
+    # one call: turn.go's bounded post-Deliver-failure recovery round.
     offer_delivery_tools: bool = False
 
 
 @dataclass
-class ClassifyRequestInput:
-    """ClassifyRequest's only input — docs/components/request-pipeline/
-    02-request-understanding.md. The activity reads the turn's seed user
-    message (and a little recent context) from Postgres itself and returns a
-    TaskRepresentation."""
+class RecordSkillInput:
+    """RecordSkill's input — docs/components/skill-subsystem.md;
+    turn-pipeline.md Phase 8. Dispatched once at turn end when the turn used
+    tools across ≥2 reasoning steps. The activity reads the whole trajectory
+    (this turn + any subagent turns under it by id prefix) from Postgres, then
+    match-or-inserts against skill_procedures."""
 
     turn_id: str = ""
-
-
-@dataclass
-class TaskRepresentation:
-    """Step 2's output. Small derived routing signals only — the two routing
-    scalars (intent/complexity), the classifier's confidence, a distilled
-    retrieval query, and a few named entities. Carried by the workflow the
-    same way ModelCallOutput's next_hint_tier and ToolCallRef's {server,tool}
-    are: routing metadata derived from the message, not the message content
-    itself (which stays Postgres-side). retrieval_query/entities are passed
-    straight into the step-4/5/7 retrieval activities by RetrievalWorkflow.
-
-    ClassifyRequest has no fallback — every field here is a real classifier
-    output or the activity raised. `confidence` is the model's own self-report
-    (0.0–1.0); a genuinely low value still routes to the safer Deliberate lane
-    (`laneIsDeliberate`), but it no longer doubles as a "wasn't classified"
-    sentinel. The zero-value dataclass is only what an un-run activity would
-    leave; turn.go never proceeds with it (a classify failure fails the turn)."""
-
-    intent: str = ""
-    complexity: str = ""
-    confidence: float = 0.0
-    retrieval_query: str = ""
-    entities: list[str] = field(default_factory=list)
-    # docs/components/request-pipeline/08-planning.md — whether this message
-    # continues the session's in-progress task-run (a running PlanWorkflow) or
-    # starts a new one. Only meaningful when a run is actually in progress;
-    # `dispatch.go` passes it to ResolveOpenPlan. When `confidence` is low,
-    # ResolveOpenPlan cross-checks this against embedding similarity rather than
-    # trusting it outright.
-    continues_prior: bool = False
-
-
-@dataclass
-class MemoryRetrieveInput:
-    """MemoryRetrieve's input — docs/components/request-pipeline/
-    04-memory-retrieval.md. REVISED 2026-09-02: runs once PER TURN, staged
-    under owner_id = the current turn_id. retrieval_query is the distilled
-    query from step 2's TaskRepresentation.
-
-    parent_turn_id is set only for a subagent turn: when present, the activity
-    copies the parent turn's staged kind='memory' rows instead of calling
-    agent-brain."""
-
-    owner_id: str = ""
-    retrieval_query: str = ""
-    parent_turn_id: str = ""
-
-
-@dataclass
-class ToolDiscoverInput:
-    """ToolDiscover's input — docs/components/request-pipeline/
-    07-tool-discovery.md. REVISED 2026-09-02: runs once PER TURN, staged under
-    owner_id = the current turn_id."""
-
-    owner_id: str = ""
-    retrieval_query: str = ""
-    entities: list[str] = field(default_factory=list)
-
-
-@dataclass
-class SkillDiscoverInput:
-    """SkillDiscover's input — docs/components/request-pipeline/
-    05-skill-discovery.md. Runs once per task-run, staged under plan_id, feeds
-    the planning turn."""
-
-    plan_id: str = ""
-    retrieval_query: str = ""
-
-
-@dataclass
-class RecordSkillInput:
-    """RecordSkill's input — docs/components/skill-subsystem.md REVISION
-    2026-09-02. Dispatched once when a task-run finishes. The activity reads the
-    whole multi-turn trajectory / tool calls / staged skill rows / PLAN.md from
-    Postgres + the PV itself, then match-or-inserts against skill_procedures.
-    Intent/complexity/close_reason come from the caller (decision B — no
-    `episodes` row to read them from)."""
-
-    plan_id: str = ""
     stop_reason: str = ""
-    intent: str = ""
-    complexity: str = ""
     close_reason: str = ""
-
-
-@dataclass
-class SubsystemResult:
-    """What each retrieval-phase activity returns to RoutingWorkflow — a
-    status and the count of rows it staged to turn_retrieval. No content: the
-    rows are read from turn_retrieval by later steps. status is
-    "ok" | "empty" | "error" as returned by the activity; RoutingWorkflow may
-    additionally record "timed_out" / "skipped" in the same shape."""
-
-    status: str = "empty"
-    count: int = 0
 
 
 @dataclass
@@ -280,14 +170,8 @@ class InsertMessageInput:
     parent_type: str = ""
     turn_seq: int | None = None
     # Provenance for the turns row, set only on the is_turn_start call
-    # (docs/components/proactivity.md): "" / "user" (default), "intn:<id>",
-    # or "plan".
+    # (docs/components/proactivity.md): "" / "user" (default), "intn:<id>".
     initiated_by: str = ""
-    # docs/components/request-pipeline/08-planning.md — every turn under a
-    # PlanWorkflow (the planning turn and each parent_type='plan' checkpoint
-    # turn) carries the task-run's plan_id here so the turns row records it
-    # directly. Empty for a plain / conversational turn.
-    plan_id: str = ""
 
 
 @dataclass

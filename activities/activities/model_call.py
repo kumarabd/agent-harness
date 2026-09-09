@@ -122,29 +122,15 @@ class ModelCallActivity:
                 # and unconditionally looks this up per call.
                 resolved_by_name: dict = {}
             else:
-                # docs/components/model-registry.md, "Resolved: Selection
-                # Mechanism" + "Resolved: Escalate-on-Retry" — the previous
-                # step's hint picks the tier; a Temporal-driven retry of this
-                # same activity attempt escalates it by one tier per attempt,
-                # capped at expert, regardless of what the hint said — a
-                # fast-tier model producing unparseable output is exactly the
-                # failure this exists to recover from.
-                #
-                # The turn's FIRST call has no prior hint. Instead of always
-                # starting at medium, bootstrap the tier from step 2's
-                # complexity estimate (request-pipeline/02-request-understanding.md):
-                # trivial/simple -> fast, moderate -> medium, complex -> expert.
-                # Empty/unknown complexity (subagents) still lands on the medium
-                # default. Only consulted when hint_tier is empty, so later steps'
-                # self-declared hints always win. context_window (from the
-                # resolved model_config) rides out on ModelCallOutput for the
-                # compression gate.
+                # docs/components/model-registry.md, "Resolved: Escalate-on-Retry"
+                # — the previous step's report_status tier hint picks the tier; a
+                # Temporal-driven retry of this activity attempt escalates it one
+                # tier per attempt, capped at expert. The turn's FIRST call has no
+                # prior hint → model_registry.default_hint() ({language, medium}).
+                # context_window (from the resolved model_config) rides out on
+                # ModelCallOutput for the compression gate.
                 hint_modality = input.hint_modality or model_registry.default_hint()[0]
-                hint_tier = (
-                    input.hint_tier
-                    or model_registry.tier_for_complexity(input.complexity)
-                    or model_registry.default_hint()[1]
-                )
+                hint_tier = input.hint_tier or model_registry.default_hint()[1]
                 attempt = activity.info().attempt
                 for _ in range(attempt - 1):
                     hint_tier = model_registry.escalate(hint_tier)

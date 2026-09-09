@@ -1,5 +1,5 @@
 {
-  "_comment": "temporal-workflow.md, 'Subagents are full agents'. A clearly-Deliberate top-level task; turn:1 spawns a subagent handed a clearly-complex sub-task. The subagent runs ClassifyRequest + RoutingWorkflow itself and, being Deliberate, opens its OWN single-turn task-run (turns.plan_id == its own turn_id <turn:1>:sub:1, openedFresh in turn.go) — one reason-act loop. At the subagent turn's end dispatchRecordSkill fires over its trajectory.",
+  "_comment": "temporal-workflow.md, 'Subagents are full agents' (post turn-pipeline redesign Phase 8: no ClassifyRequest, no RoutingWorkflow, no lanes — a subagent is a flat TurnWorkflow running the same reason-act loop). turn:1 spawns a subagent handed a complex sub-task; the subagent uses tools across two reasoning steps, so at its turn end dispatchRecordSkill fires over its trajectory (keyed on <turn:1>:sub:1), writing a skill_procedures row that carries the subagent turn_id in source_ids.",
   "message": {
     "role": "user",
     "content": "Have a subagent run a full security audit of the auth module while the main line handles the API cleanup, then reconcile the two before we ship."
@@ -22,9 +22,16 @@
                 "usage": { "input_tokens": 110, "output_tokens": 30 }
               },
               {
+                "content": "Now checking the login path for rate limiting.",
+                "tool_calls": [
+                  { "name": "search", "is_subagent": false, "arguments": { "query": "login path rate limit throttle brute force" } }
+                ],
+                "usage": { "input_tokens": 120, "output_tokens": 30 }
+              },
+              {
                 "content": "Audit complete — 3 findings: 1 critical (no login rate limit), 2 medium. Prioritized report attached.",
                 "tool_calls": [],
-                "usage": { "input_tokens": 120, "output_tokens": 40 }
+                "usage": { "input_tokens": 130, "output_tokens": 40 }
               }
             ]
           }

@@ -85,7 +85,6 @@ from temporalio.worker import Worker
 
 from . import llm_client, shell_hub
 from .metrics import LATENCY_BUCKETS_SECONDS, SECONDS_LATENCY_METRICS
-from .classify import ClassifyRequestActivity
 from .skills import seed as skill_seed
 from .skills.record import RecordSkillActivity
 from .compress_context import CompressContextActivity
@@ -95,11 +94,6 @@ from .insert_message import InsertMessageActivity
 from .intention import CheckConditionActivity, FireIntentionActivity
 from .model_call import ModelCallActivity
 from .persist import PersistActivity
-from .retrieval import (
-    MemoryRetrieveActivity,
-    SkillDiscoverActivity,
-    ToolDiscoverActivity,
-)
 from .seed_child_session import SeedChildSessionContextActivity
 from .status_ping import StatusPingActivity
 from .subagent_manifest import SubagentManifestActivity
@@ -168,10 +162,6 @@ async def main() -> None:
         task_queue=task_queue,
         activities=[
             ModelCallActivity(pool, client).__call__,
-            ClassifyRequestActivity(pool).__call__,
-            MemoryRetrieveActivity(pool).__call__,
-            ToolDiscoverActivity(pool).__call__,
-            SkillDiscoverActivity(pool).__call__,
             RecordSkillActivity(pool).__call__,
             ToolCallActivity(pool, client).__call__,
             InsertMessageActivity(pool).__call__,

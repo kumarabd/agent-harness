@@ -66,15 +66,18 @@ class InsertMessageActivity:
                     )
 
                 if input.is_turn_start:
+                    # turns.plan_id is left NULL now that the pre-LLM
+                    # classify/lane/plan machinery is gone (turn-pipeline.md
+                    # Phase 8); the column stays until a Phase 9 cleanup
+                    # migration. RecordSkill keys on turn_id, not plan_id.
                     await conn.execute(
-                        "INSERT INTO turns (turn_id, parent_id, parent_type, turn_seq, status, initiated_by, plan_id) "
-                        "VALUES ($1, $2, $3, $4, 'running', $5, $6) ON CONFLICT (turn_id) DO NOTHING",
+                        "INSERT INTO turns (turn_id, parent_id, parent_type, turn_seq, status, initiated_by) "
+                        "VALUES ($1, $2, $3, $4, 'running', $5) ON CONFLICT (turn_id) DO NOTHING",
                         input.turn_id,
                         input.parent_id,
                         input.parent_type,
                         input.turn_seq,
                         input.initiated_by or "user",
-                        input.plan_id or None,
                     )
 
                 if input.is_turn_start and input.parent_type == "turn":

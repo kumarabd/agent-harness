@@ -452,7 +452,33 @@ async def load_skill(arguments: dict, ctx: ToolContext) -> dict:
         }
 
     logger.info("load_skill: matched %s (%r, sim=%.2f) for %r", best.id, best.title, best_sim, query[:60])
+    # Record which procedure this run pulled in, so RecordSkill's EMA loop
+    # (skills/record.py, `_SKILL_ROWS_SQL`) can reinforce / re-version it at
+    # turn end — the on-demand equivalent of the old SkillDiscover staging.
+    await _stage_loaded_skill(ctx, best.id)
     return {"procedure_id": best.id, "title": best.title, "procedure": best.render()}
+
+
+async def _stage_loaded_skill(ctx: ToolContext, procedure_id: str) -> None:
+    """Append a `turn_retrieval` (owner_id=turn_id, kind='skill') row noting
+    `procedure_id`. Best-effort — a staging failure must not fail the model's
+    load_skill call. Same local-import + seq-append shape as
+    `_persist_discovered`."""
+    try:
+        from .retrieval.staging import RetrievalRow, write_rows
+
+        turn_id = ids.turn_id_of_tool_call(ctx.tool_call_id)
+        seq = await ctx.pool.fetchval(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM turn_retrieval WHERE owner_id = $1 AND kind = 'skill'",
+            turn_id,
+        )
+        await write_rows(
+            ctx.pool,
+            turn_id,
+            [RetrievalRow(kind="skill", seq=seq, content=procedure_id, metadata={"procedure_id": procedure_id})],
+        )
+    except Exception:  # noqa: BLE001 - staging is bookkeeping, never load-bearing for the call
+        logger.warning("load_skill: failed to stage procedure %s for the RecordSkill loop", procedure_id, exc_info=True)
 
 
 async def discover_tools(query: str, top_k: int = 5) -> list[dict]:

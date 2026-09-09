@@ -254,9 +254,10 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 	}
 }
 
-// proactiveSeedText builds the seed "user" message (ClassifyRequest requires
-// role='user', seq=0 — turns.initiated_by carries the real provenance) for a
-// proactive turn started with no conversation in flight.
+// proactiveSeedText builds the seed "user" message (role='user', seq=0 — the
+// turn's first ModelCall reads it as the request; turns.initiated_by carries
+// the real provenance) for a proactive turn started with no conversation in
+// flight.
 func proactiveSeedText(w types.WakePayload) string {
 	s := "[Proactive check — you set this intention for yourself; the user did not send this message]\n\n" + w.Objective
 	if w.Why != "" {

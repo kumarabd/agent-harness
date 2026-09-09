@@ -1,26 +1,11 @@
-"""Request-pipeline retrieval phase — steps 4/5/7 (docs/components/request-pipeline/).
+"""`turn_retrieval` staging helpers.
 
-Orchestrated by RoutingWorkflow (workflows/internal/workflow/routing.go): a
-plan-gated parallel fan-out of the discovery subsystems, each staging its
-results to `turn_retrieval` (staging.py) and returning a SubsystemResult.
-
-  - memory.py — agent-brain memory_search (step 4), per turn
-  - tools.py  — search_tools / mcp-hub + shell-hub (step 7), per turn
-  - skills.py — flat-cosine retrieval over the skill store (step 5), per task-run,
-                staged under the plan_id for the planning turn's prompt
-
-There is no skill-composition step: the planning turn reads SkillDiscover's
-rows straight from its prompt and drafts the plan itself.
+The pre-LLM retrieval fan-out (RoutingWorkflow + memory/tools/skills discovery)
+was removed in the turn-pipeline redesign (docs/components/turn-pipeline.md,
+Phase 8) — the model now pulls memory / skills / tools on demand via the
+`search_memory` / `load_skill` / `discover_tools` meta-tools. All that remains
+here is `staging.py`, the shared `turn_retrieval` read/write used by
+`discover_tools` (to make a mid-turn discovery callable by name on the next
+step) and by `load_skill` (to record which procedure a run used, for the
+RecordSkill EMA loop).
 """
-
-from __future__ import annotations
-
-from .memory import MemoryRetrieveActivity
-from .skills import SkillDiscoverActivity
-from .tools import ToolDiscoverActivity
-
-__all__ = [
-    "MemoryRetrieveActivity",
-    "ToolDiscoverActivity",
-    "SkillDiscoverActivity",
-]
