@@ -1,6 +1,8 @@
 package workflow
 
 import (
+	"time"
+
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
@@ -8,6 +10,10 @@ import (
 	"agent-harness/workflows/internal/ids"
 	"agent-harness/workflows/internal/types"
 )
+
+// turnRunTimeout — docs/components/turn-pipeline.md, "Progress watchdog". The
+// wedged-turn backstop, deliberately generous (placeholder, tune with data).
+const turnRunTimeout = 30 * time.Minute
 
 // startTurn is the session's front door: write the inbound message (creating the
 // turns row), then start a TurnWorkflow for it. The turn does its own
@@ -49,6 +55,13 @@ func startTurn(ctx workflow.Context, sessionKey, connectionID string, turnSeq in
 	cwo := workflow.ChildWorkflowOptions{
 		WorkflowID:        turnID,
 		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
+		// docs/components/turn-pipeline.md, "Progress watchdog" — the backstop
+		// for a genuinely wedged turn, where failTurn cannot run because the
+		// workflow itself is killed. A high placeholder ceiling, not a tight
+		// SLA: a legitimate long turn (20 iterations, subagents, retries) still
+		// fits well under it. On timeout the coordinator (which holds this
+		// future) delivers the fallback notice.
+		WorkflowRunTimeout: turnRunTimeout,
 	}
 	h := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(ctx, cwo), TurnWorkflow, in)
 	var we workflow.Execution

@@ -125,6 +125,14 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 				err := f.Get(ctx, &result)
 				if err != nil {
 					logger.Error("turn workflow ended with error", "turn_id", workID, "error", err)
+					// docs/components/turn-pipeline.md, "Progress watchdog" —
+					// a TurnWorkflow killed by its WorkflowRunTimeout (or any
+					// other hard failure) cannot run failTurn, so nothing has
+					// told the user. The coordinator holds the future, so it
+					// is the one place that still can: best-effort fallback
+					// notice, same tolerance as every other bookkeeping call
+					// here.
+					deliverWedgedFallback(ctx, input.SessionKey, input.ConnectionID, workID)
 				} else {
 					logger.Info("turn workflow completed", "turn_id", workID, "stop_reason", result.StopReason)
 				}

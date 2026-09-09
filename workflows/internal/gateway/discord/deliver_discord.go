@@ -435,6 +435,48 @@ func (a *discordDeliverActivity) DeliverInterim(ctx context.Context, requestID s
 	return nil
 }
 
+// DeliverStatus pushes the latest turn_status_pings row's one-liner out to the
+// Discord channel — docs/components/turn-pipeline.md's "Progress watchdog".
+// Takes turnID; the line itself was already written (and its content computed)
+// by the StatusPing activity the watchdog goroutine ran first, so this only
+// reads the newest row and sends it as a plain channel message. No idempotency
+// guard and no ambient-message mirror: a status ping is transient by design
+// (not transcript, not LCM context), the watchdog dispatches each ping exactly
+// once, and a rare Temporal retry re-sending the same short "still working"
+// line is harmless — the opposite of Deliver, where a duplicate final answer
+// would be confusing.
+func (a *discordDeliverActivity) DeliverStatus(ctx context.Context, turnID string) error {
+	var content string
+	err := a.pool.QueryRow(ctx,
+		"SELECT content FROM turn_status_pings WHERE turn_id = $1 ORDER BY seq DESC LIMIT 1",
+		turnID,
+	).Scan(&content)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+
+	var channelID string
+	// Same COALESCE(t.plan_id, t.turn_id) root resolution as Deliver above.
+	if err := a.pool.QueryRow(ctx, `
+		SELECT s.channel_id
+		FROM turns t
+		JOIN turns root ON root.turn_id = COALESCE(t.plan_id, t.turn_id)
+		JOIN sessions s ON s.session_key = root.parent_id
+		WHERE t.turn_id = $1
+	`, turnID).Scan(&channelID); err != nil {
+		return err
+	}
+
+	if _, err := a.session.ChannelMessageSend(channelID, discordSendableContent(content)); err != nil {
+		return err
+	}
+	log.Printf("discord: pushed status ping for turn %s to channel %s via connection %s", turnID, channelID, a.connectionID)
+	return nil
+}
+
 // deliverToolResult writes a model-tool-call's outcome back to `tool_calls`,
 // the exact same contract activities/activities/tool_call.py's ToolCall
 // activity honors (status/result/completed_at) — so the model's NEXT

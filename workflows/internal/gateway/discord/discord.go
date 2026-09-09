@@ -161,6 +161,10 @@ func (b *Bot) runConnection(ctx context.Context, dg *discordgo.Session, connecti
 	// half, A+B) — same embedded worker, same connection, since pushing a
 	// pending request's prompt needs the identical live session.
 	deliverWorker.RegisterActivityWithOptions(deliverActivity.DeliverInterim, activity.RegisterOptions{Name: "DiscordDeliverInterim"})
+	// docs/components/turn-pipeline.md's "Progress watchdog" — the watchdog
+	// goroutine in TurnWorkflow pushes a transient "still working" one-liner
+	// here on the same per-connection live session.
+	deliverWorker.RegisterActivityWithOptions(deliverActivity.DeliverStatus, activity.RegisterOptions{Name: "DiscordDeliverStatus"})
 	// Delivery-in-the-loop (2026-09-06) — deliver_reply/deliver_attachment
 	// are real model tool calls (llm.py's schema, capabilities.py's
 	// deliver_reply/deliver_attachment entries), but still need the same

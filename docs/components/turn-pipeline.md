@@ -241,32 +241,46 @@ reads it.
 ## Progress watchdog
 
 Keeps the user informed while the model is heads-down, without making the model
-responsible for narrating. A `workflow.Go` goroutine inside `TurnWorkflow` —
-structured concurrency scoped to the turn's lifetime, torn down automatically when
-the workflow returns.
+responsible for narrating. A `workflow.Go` goroutine inside `TurnWorkflow`, armed
+only for **top-level turns** (`ParentType == "session"` — a subagent has no
+external delivery target), scoped to the turn's lifetime, torn down automatically
+when the workflow returns.
 
 ```
-arm a durable timer (backoff per platform: discord {5s,15s,30s};
-                      voice {3s,8s,15s}; web {10s,30s,60s})
-every user-visible delivery  → reset the timer, collapse backoff
-timer fires with no delivery → StatusPing activity, then step the backoff
-turn completes               → close the done channel, goroutine returns
+arm a durable timer (backoff ladder, discord: {20s, 45s, 90s})
+progress since the timer was armed → collapse backoff, don't ping
+timer fires with no progress       → StatusPing activity + push, then step backoff
+turn's reason-act loop exits       → set turnDone, goroutine returns
 ```
+
+"Progress" is a monotonic counter the turn's main goroutine bumps on every real
+step (a new reason-act iteration, the final delivery). The delays are **not**
+sub-10s: a routine `ModelCall` already runs tens of seconds, so a tighter ladder
+would fire on every normal turn. Numeric tuning is deferred — adjust with real
+latency data.
 
 `StatusPing` (tenant-worker) reads the turn's current state — latest `tool_calls`
-row (name, status), iteration count, any error — and delivers a one-liner built
-from a template (`"Working on it — {tool_name}, step {n}"` / `"…hit a snag,
-retrying"` / `"Still working on this…"`). The ping is **transient**: written to
-`turn_deliveries` or marked `kind='status'`, and it must **not** enter LCM
-context — it is not part of the transcript.
+row (name, status), assistant-message count, any error — and returns a one-liner
+built from a template (`"Working on it — {tool_name}, step {n}"` / `"…hit a snag
+on {tool_name}, retrying."` / `"Still working on this…"`). It writes the line to
+its **own** table, `turn_status_pings` (migration `029`) — deliberately not a
+widened `turn_deliveries` (that's the streamed-chunk content ledger). The ping is
+**transient**: it never enters `messages`, never enters LCM context. The workflow
+then pushes it via the platform's delivery queue (`DiscordDeliverStatus` on the
+connection's embedded worker).
+
+**Discord text only today.** Voice already has its filler-audio player
+(`voice_filler_player.go`) covering the same gap better; Web surfaces progress
+through its poll. A third platform is a one-line addition (`statusPingBackoff` +
+`statusDeliverActivity` + a gateway `DeliverStatus`).
 
 This is distinct from Temporal's activity heartbeat (worker liveness) and from the
 model's `message` (content). Three separate liveness concepts, kept separate.
 
-A genuinely wedged workflow is a different problem: a `WorkflowRunTimeout` on the
-`TurnWorkflow` child bounds it, and the coordinator (which holds the child future)
-delivers a fallback notice on error/timeout, since `failTurn` cannot run when the
-workflow is killed.
+A genuinely wedged workflow is a different problem: a `WorkflowRunTimeout`
+(30 min, placeholder) on the `TurnWorkflow` child bounds it, and the coordinator
+(which holds the child future) calls `StatusPing(turnID, "wedged")` + push on the
+child's error, since `failTurn` cannot run when the workflow is killed.
 
 ---
 

@@ -434,6 +434,125 @@ func deliveryTaskQueue(sessionKey, connectionID string) (queue string, timeout t
 	}
 }
 
+// --- Progress watchdog (docs/components/turn-pipeline.md, "Progress
+// watchdog"). A workflow.Go goroutine, scoped to the turn's lifetime, that
+// narrates "still working" while the model is heads-down — so the model never
+// has to. Only connection-based text platforms need it: voice already has its
+// own filler-audio player (voice_filler_player.go) covering the same gap
+// better, and Web surfaces progress through its poll. So it's Discord-text
+// only today; a third platform is a one-line addition here, same as
+// deliveryTaskQueue.
+
+// statusPingBackoff is the per-fire delay ladder: arm this long, and if no
+// user-visible delivery landed in the meantime, ping and step to the next
+// rung. Deliberately NOT sub-10s — a normal ModelCall already runs tens of
+// seconds; the watchdog is for an abnormally long stretch, not routine ones.
+// Numeric tuning is explicitly deferred (turn-pipeline.md's Deferred list) —
+// adjust with real latency data.
+func statusPingBackoff(platform string) []time.Duration {
+	switch platform {
+	case "discord":
+		return []time.Duration{20 * time.Second, 45 * time.Second, 90 * time.Second}
+	default:
+		return nil
+	}
+}
+
+// statusDeliverActivity — the per-platform gateway activity name that pushes
+// the latest turn_status_pings row's line out on the connection's own embedded
+// worker (same literal-lookup idiom as deliveryTaskQueue / deliveryToolActivity).
+func statusDeliverActivity(platform string) (activityName string, ok bool) {
+	switch platform {
+	case "discord":
+		return "DiscordDeliverStatus", true
+	default:
+		return "", false
+	}
+}
+
+// runProgressWatchdog is the goroutine body. progress is a monotonic counter
+// the turn's main goroutine bumps on every real step (a new reason-act
+// iteration, the final delivery); done is set once the turn's loop has exited.
+// Both are plain shared values — safe here for the same reason
+// deliveryInterruptSource.messages is: workflow goroutines are cooperatively
+// scheduled, never truly concurrent. All activity calls are on the root ctx,
+// independent of the per-iteration cancelCtx, and best-effort: a failed ping
+// is logged, never surfaced into the turn.
+func runProgressWatchdog(ctx workflow.Context, turnID, sessionKey, connectionID string, progress *int, done *bool) {
+	platform := platformFromSessionKey(sessionKey)
+	steps := statusPingBackoff(platform)
+	deliverName, deliverOK := statusDeliverActivity(platform)
+	queue, _, queueOK := deliveryTaskQueue(sessionKey, connectionID)
+	if len(steps) == 0 || !deliverOK || !queueOK {
+		return
+	}
+	logger := workflow.GetLogger(ctx)
+
+	stepIdx := 0
+	lastSeen := *progress
+	for {
+		if err := workflow.NewTimer(ctx, steps[stepIdx]).Get(ctx, nil); err != nil {
+			return // ctx cancelled — the workflow is ending
+		}
+		if *done {
+			return
+		}
+		if *progress != lastSeen {
+			// Real progress since the timer was armed — collapse the backoff
+			// and don't ping; the user isn't actually left hanging.
+			lastSeen = *progress
+			stepIdx = 0
+			continue
+		}
+
+		var line string
+		pctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
+		if err := workflow.ExecuteActivity(pctx, "StatusPing", turnID, "").Get(pctx, &line); err != nil {
+			logger.Warn("progress watchdog: StatusPing failed", "turn_id", turnID, "error", err)
+		} else if line != "" {
+			dctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+				StartToCloseTimeout: activityTimeoutTierA,
+				TaskQueue:           queue,
+			})
+			if err := workflow.ExecuteActivity(dctx, deliverName, turnID).Get(dctx, nil); err != nil {
+				logger.Warn("progress watchdog: status delivery failed", "turn_id", turnID, "error", err)
+			}
+		}
+		if stepIdx < len(steps)-1 {
+			stepIdx++
+		}
+	}
+}
+
+// deliverWedgedFallback is the coordinator's path (coordinator.go holds the
+// TurnWorkflow child future) for the one case turn.go's own failTurn can't
+// cover: the workflow was killed outright by its WorkflowRunTimeout, so no
+// in-workflow code ran to tell the user. Writes a 'wedged' status ping and
+// pushes it, entirely best-effort — if the platform has no push channel
+// (Web) or a step fails, it's logged and dropped, same as every other
+// bookkeeping call in the coordinator.
+func deliverWedgedFallback(ctx workflow.Context, sessionKey, connectionID, turnID string) {
+	platform := platformFromSessionKey(sessionKey)
+	deliverName, deliverOK := statusDeliverActivity(platform)
+	queue, _, queueOK := deliveryTaskQueue(sessionKey, connectionID)
+	if !deliverOK || !queueOK {
+		return
+	}
+	logger := workflow.GetLogger(ctx)
+	pctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
+	if err := workflow.ExecuteActivity(pctx, "StatusPing", turnID, "wedged").Get(pctx, nil); err != nil {
+		logger.Warn("wedged fallback: StatusPing failed", "turn_id", turnID, "error", err)
+		return
+	}
+	dctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: activityTimeoutTierA,
+		TaskQueue:           queue,
+	})
+	if err := workflow.ExecuteActivity(dctx, deliverName, turnID).Get(dctx, nil); err != nil {
+		logger.Warn("wedged fallback: status delivery failed", "turn_id", turnID, "error", err)
+	}
+}
+
 // connectionDeliveryChunkActivity mirrors deliveryTaskQueue above,
 // for the per-chunk streaming path (awaitModelCallWithStreaming below) —
 // deliberately not unified into one lookup shared with it: VoiceDeliverChunk
@@ -734,6 +853,20 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 		}
 	})
 
+	// --- Progress watchdog (docs/components/turn-pipeline.md). Narrates
+	// "still working" while the model is heads-down. Top-level turns only — a
+	// subagent has no external delivery target. progressGen is bumped on every
+	// real step below; turnDone is set once the loop exits.
+	progressGen := 0
+	turnDone := false
+	if input.ParentType == "session" {
+		pg := &progressGen
+		td := &turnDone
+		workflow.Go(ctx, func(gctx workflow.Context) {
+			runProgressWatchdog(gctx, input.TurnID, input.SessionKey, input.ConnectionID, pg, td)
+		})
+	}
+
 	// --- Step 2: request understanding
 	// (docs/components/request-pipeline/02-request-understanding.md). A cheap
 	// fast-tier analysis of the inbound message — intent + complexity routing
@@ -821,6 +954,7 @@ loop:
 		}
 
 		iterations++
+		progressGen++ // a fresh reason-act pass is real progress — resets the watchdog backoff
 		cancelCtx, cancel := workflow.WithCancel(ctx)
 
 		// --- Reason: model-call activity (mints tool_call_id/subagent IDs
@@ -1185,6 +1319,10 @@ loop:
 		}
 		dispatchSubagentManifests(ctx, subagentIDs)
 	}
+
+	// The reason-act loop is done — tell the watchdog goroutine to stop before
+	// the (bounded) egress + delivery below, so it can't ping during teardown.
+	turnDone = true
 
 	metrics.Counter("turn_iterations_total").Inc(int64(iterations))
 	metrics.Counter("turn_retries_total").Inc(int64(retries))

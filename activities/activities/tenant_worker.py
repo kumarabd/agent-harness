@@ -101,6 +101,7 @@ from .retrieval import (
     ToolDiscoverActivity,
 )
 from .seed_child_session import SeedChildSessionContextActivity
+from .status_ping import StatusPingActivity
 from .subagent_manifest import SubagentManifestActivity
 from .tool_call import DenyToolCallActivity, ToolCallActivity
 from .user_input import CloseUserInputActivity, RequestUserInputActivity
@@ -183,6 +184,7 @@ async def main() -> None:
             CloseUserInputActivity(pool).__call__,
             SeedChildSessionContextActivity(pool).__call__,
             SubagentManifestActivity(pool).__call__,
+            StatusPingActivity(pool).__call__,
             FireIntentionActivity(pool, client).__call__,
             CheckConditionActivity(pool).__call__,
         ],
