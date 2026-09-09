@@ -396,6 +396,7 @@ class ModelCallActivity:
                 status=status,
                 tool_calls=refs,
                 usage=usage,
+                has_content=bool((content or "").strip()),
                 context_tokens=context_tokens,
                 context_window=context_window,
                 next_step=NextStep(

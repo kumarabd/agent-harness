@@ -951,6 +951,10 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	// model ever pushed it up, for the end-of-turn calibration log.
 	ceiling := baseIterations
 	ceilingRaised := false
+	// future-work.md §4 — a model that reports "working" but produces neither
+	// content nor a tool call is stuck; two such steps running ends the turn
+	// instead of burning the whole ceiling on empty responses.
+	emptyStreak := 0
 
 loop:
 	for {
@@ -1104,10 +1108,24 @@ loop:
 			_ = childFuture.GetChildWorkflowExecution().Get(cctx, nil)
 		}
 
+		// --- No-progress guard (future-work.md §4). A step with no content and
+		// no tool calls that still isn't "done" produced nothing actionable —
+		// two running means the model is stuck (a report_status "working" call
+		// gets peeled, so it reads as an empty step here). End the turn rather
+		// than loop to the ceiling.
+		if !mcOut.HasContent && len(mcOut.ToolCalls) == 0 && mcOut.Status != "done" {
+			emptyStreak++
+			if emptyStreak >= 2 {
+				stopReason = "no_progress"
+				cancel()
+				break
+			}
+		} else {
+			emptyStreak = 0
+		}
+
 		// --- Stop / continue on the model's declared status
-		// (docs/components/turn-pipeline.md's output schema). This phase
-		// synthesizes status from tool-call presence; a later phase makes the
-		// model author it.
+		// (docs/components/turn-pipeline.md's output schema).
 		if mcOut.Status == "done" {
 			// A follow-up that landed before this boundary makes the model's
 			// "done" stale — fold it in and keep looping rather than ending on

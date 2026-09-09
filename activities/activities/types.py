@@ -221,6 +221,10 @@ class ModelCallOutput:
     status: str = "working"
     tool_calls: list[ToolCallRef] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
+    # This step's message had non-whitespace text — turn.go's no-progress
+    # guard uses it (a "working" step with no content and no tool calls,
+    # twice, is a stuck model).
+    has_content: bool = False
     # docs/components/context-slot.md — the assembled context's estimated
     # size (lcm.py's estimate_tokens), computed fresh in Python each call
     # since the Go workflow can't accumulate this itself across separate

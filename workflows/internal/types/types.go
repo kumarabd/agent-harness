@@ -322,6 +322,11 @@ type ModelCallOutput struct {
 	Status    string        `json:"status"`
 	ToolCalls []ToolCallRef `json:"tool_calls"`
 	Usage     Usage         `json:"usage"`
+	// HasContent — the model's message this step had non-whitespace text.
+	// turn.go's no-progress guard: a "working" step with no content AND no
+	// tool calls, twice running, is a stuck model — end the turn rather than
+	// burn the whole iteration ceiling on empty responses (future-work.md §4).
+	HasContent bool `json:"has_content"`
 	// docs/components/context-slot.md — the assembled context's estimated
 	// size, computed fresh in Python each call (lcm.py's estimate_tokens)
 	// since this workflow can't accumulate it itself across separate
