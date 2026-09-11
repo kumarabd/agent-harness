@@ -72,7 +72,16 @@ func envOrDefault(key, fallback string) string {
 func main() {
 	sessionKey := flag.String("session", "", "session key (Session Coordinator workflow ID)")
 	scenarioPath := flag.String("scenario", "", "path to a scenario JSON file")
+	cancel := flag.Bool("cancel", false, "send a Cancel signal to -session's active turn instead of running a scenario")
 	flag.Parse()
+
+	if *cancel {
+		if *sessionKey == "" {
+			log.Fatal("-session is required with -cancel")
+		}
+		sendCancel(context.Background(), *sessionKey)
+		return
+	}
 
 	if *sessionKey == "" || *scenarioPath == "" {
 		log.Fatal("both -session and -scenario are required")
@@ -204,6 +213,27 @@ func signalAndReport(ctx context.Context, sessionKey string, msg types.Message, 
 
 	log.Printf("signalled session %q — coordinator run ID %s (workflow ID %s), expecting turn_id %q",
 		sessionKey, we.GetRunID(), we.GetID(), expectTurnID)
+}
+
+// sendCancel mirrors the real gateway's cancel path (core.CancelActiveTurn) —
+// a plain SignalWorkflow, never SignalWithStart: a cancel with no active
+// coordinator has nothing to do, so it should just no-op (fail loud here,
+// since a test driving -cancel with no session running is a scenario bug),
+// not spin one up.
+func sendCancel(ctx context.Context, sessionKey string) {
+	c, err := client.Dial(client.Options{
+		HostPort:  envOrDefault("TEMPORAL_ADDRESS", client.DefaultHostPort),
+		Namespace: envOrDefault("TEMPORAL_NAMESPACE", client.DefaultNamespace),
+	})
+	if err != nil {
+		log.Fatalf("unable to create Temporal client: %v", err)
+	}
+	defer c.Close()
+
+	if err := c.SignalWorkflow(ctx, sessionKey, "", wf.CancelSignalName, struct{}{}); err != nil {
+		log.Fatalf("SignalWorkflow(Cancel) failed: %v", err)
+	}
+	log.Printf("sent Cancel to session %q", sessionKey)
 }
 
 // writeFixtures recursively writes scripted responses for turnID, starting at

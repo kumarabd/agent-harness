@@ -222,6 +222,21 @@ func AnswerUserInput(ctx context.Context, pool *pgxpool.Pool, temporal client.Cl
 	return temporal.SignalWorkflow(ctx, workflowID, "", wf.UserInputResponseSignalName, resp)
 }
 
+// CancelActiveTurn validates that sessionKey is owned by userID (the same
+// ownership check every other write here runs — a session_key is a locator,
+// never proof of ownership) and, only then, signals the session's
+// CoordinatorWorkflow to stop whatever turn is currently running. A plain
+// SignalWorkflow, never SignalWithStart: a cancel with no active coordinator
+// has nothing to do, so it should just silently reach nobody rather than spin
+// one up — the coordinator itself further no-ops if there's no active turn to
+// forward it into (coordinator.go).
+func CancelActiveTurn(ctx context.Context, pool *pgxpool.Pool, temporal client.Client, userID, sessionKey string) error {
+	if _, err := AuthorizeSession(ctx, pool, userID, sessionKey); err != nil {
+		return err
+	}
+	return temporal.SignalWorkflow(ctx, sessionKey, "", wf.CancelSignalName, struct{}{})
+}
+
 // AlreadyAnsweredError — a request already answered/cancelled/expired
 // elsewhere (the 1-hour timeout, a stale poll, another device). Callers
 // treat this as an idempotent no-op ack, not a hard error — same as

@@ -70,6 +70,10 @@ type resumedFrame struct {
 // --- client → server ---
 
 type inboundFrame struct {
+	// Type — "auth" | "message" | "answer" | "cancel" | "resume". "cancel"
+	// needs no fields beyond this (docs/components/gateway/first-party-plan.md's
+	// cancel/stop primitive) — it stops whatever turn is currently running in
+	// this connection's own session, ownership-checked server-side.
 	Type string `json:"type"`
 	// auth
 	Token string `json:"token,omitempty"`

@@ -204,6 +204,10 @@ func (c *conn) handleInbound(ctx context.Context, f inboundFrame) {
 		}
 	case "answer":
 		c.answerUserInput(ctx, f)
+	case "cancel":
+		if err := core.CancelActiveTurn(ctx, c.h.pool, c.h.temporal, c.userID, c.sessionKey); err != nil {
+			c.send(errorFrame{Type: "error", Message: "failed to cancel"})
+		}
 	case "resume":
 		if f.AfterTurnSeq != nil {
 			select {

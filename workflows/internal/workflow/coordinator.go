@@ -95,6 +95,13 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 	var pendingWake *types.WakePayload
 	haveWake := false
 
+	// docs/components/gateway/first-party-plan.md's cancel/stop primitive —
+	// its own signal (never a NewMessage payload, see CancelSignalName's own
+	// doc comment). No active turn means nothing to cancel — a plain no-op,
+	// never starts one the way a real NewMessage would.
+	cancelChan := workflow.GetSignalChannel(ctx, CancelSignalName)
+	haveCancel := false
+
 	for {
 		// Were we actually idle-waiting on entry to this iteration? Only then
 		// can the idle timer be what wakes us — a turn completing (which also
@@ -118,6 +125,11 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			c.Receive(ctx, &w)
 			pendingWake = &w
 			haveWake = true
+		})
+		sel.AddReceive(cancelChan, func(c workflow.ReceiveChannel, more bool) {
+			var ignored struct{}
+			c.Receive(ctx, &ignored)
+			haveCancel = true
 		})
 		if workActive {
 			sel.AddFuture(workHandle, func(f workflow.Future) {
@@ -162,7 +174,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 		sel.Select(ctx)
 		cancelIdleTimer()
 
-		if wasIdle && !workActive && !haveSignal && !haveWake {
+		if wasIdle && !workActive && !haveSignal && !haveWake && !haveCancel {
 			// The idle timer fired while we were genuinely idle (no turn just
 			// completed into this branch) — self-terminate per the resolved TTL
 			// design (components/session-coordinator.md). A fresh
@@ -192,9 +204,26 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			return nil
 		}
 
-		if !haveSignal && !haveWake {
+		if !haveSignal && !haveWake && !haveCancel {
 			// Turn completion path looped back around with nothing new yet;
 			// go wait again.
+			continue
+		}
+
+		// A cancel takes priority over everything else landing the same tick
+		// — an explicit stop shouldn't be starved behind processing one more
+		// message first. Nothing is lost either way: a real message that
+		// also arrived this tick stays in pendingSignal/haveSignal and is
+		// handled next iteration, same as it would be for a wake.
+		if haveCancel {
+			haveCancel = false
+			if workActive {
+				if err := workflow.SignalExternalWorkflow(ctx, workID, "", CancelSignalName, struct{}{}).Get(ctx, nil); err != nil {
+					logger.Error("failed to forward cancel to active turn", "turn_id", workID, "error", err)
+				}
+			}
+			// No active turn: nothing to cancel, deliberately a no-op —
+			// never starts one the way a real NewMessage would.
 			continue
 		}
 

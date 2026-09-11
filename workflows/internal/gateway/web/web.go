@@ -1,6 +1,7 @@
 // Package web is the Web gateway platform: the authenticated HTTP surface
-// (POST /send, GET /poll, POST /respond, GET /sessions) a browser client
-// uses. docs/components/gateway/web.md. It normalizes each request into a
+// (POST /send, GET /poll, POST /respond, POST /cancel, GET /sessions) a
+// browser client uses. docs/components/gateway/web.md. It normalizes each
+// request into a
 // core.MessageEvent and hands it to the shared core.Ingestor; delivery
 // "collapses" for a polling client (GET /poll reads Postgres directly), so
 // there is no embedded Temporal worker here the way Discord has.
@@ -36,6 +37,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("POST /send", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleSend)))
 	mux.Handle("GET /poll", requireClerkAuth(h.clerk, http.HandlerFunc(h.handlePoll)))
 	mux.Handle("POST /respond", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleRespond)))
+	mux.Handle("POST /cancel", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleCancel)))
 	mux.Handle("GET /sessions", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleListSessions)))
 }
 

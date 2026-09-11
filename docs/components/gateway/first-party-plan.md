@@ -147,7 +147,7 @@ their implementation or the previously proposed solutions:
 |---|---|
 | Ingestion records dedup before Temporal signaling | Resolve acceptance failure window and define safe retry guarantees |
 | InsertMessage lacks a logical insertion idempotency constraint | Verify/fix activity retry behavior |
-| No explicit stop-turn primitive | Design a backend control once, then expose through both adapters |
+| No explicit stop-turn primitive | **DONE 2026-09-11** — `CancelSignalName`, a dedicated signal distinct from `NewMessage`/`SignalPayload` (never a message-content command: a coordinator-level "is this text a command" scan would collide with genuine user content and still cost a ModelCall — see turn.go's own doc comment on `CancelSignalName`). Coordinator forwards it into the active Turn Workflow exactly like NewMessage forwarding; turn.go stops at the next loop-top check or mid-tool-call-batch (reusing the exact cooperative cancel()+drain path an ordinary interrupt already used) WITHOUT folding in another ModelCall — `stopReason="cancelled_by_user"`, `turns.status='cancelled'`. Exposed as `core.CancelActiveTurn` (ownership-checked, shared by both adapters): mobile's `{type:"cancel"}` frame, web's `POST /cancel`. Live-cluster test: `workflows/scenarios/test_cancel.sh` (not a run_all.sh entry — a Cancel signal doesn't fit run_scenario.sh's NewMessage-shaped harness). |
 | Streaming limited to the first model call | Review backend generation/iteration streaming behavior |
 | Watchdog depends on Discord delivery machinery | Review transport-independent progress production |
 | Branch seeding copies current context and is best effort | Review branching semantics independently if requested |

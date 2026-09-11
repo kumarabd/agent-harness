@@ -1,0 +1,18 @@
+{
+  "_comment": "cancel/stop primitive test (docs/components/gateway/first-party-plan.md). turn:1 starts a long shell_exec (sleep 15, gated -> the runner auto-approves it). test_cancel.sh sends a Cancel signal against this same -session while the sleep is still running: turn.go must cancel the in-flight tool AND end the turn right there (status='cancelled') — no fold-in, no further ModelCall, unlike an ordinary interrupt. See test_cancel.sh.",
+  "message": { "role": "user", "content": "run a long tool call" },
+  "scripted_model_responses": [
+    {
+      "content": "Starting a long-running command.",
+      "tool_calls": [
+        { "name": "shell_exec", "arguments": { "command": "sleep 15" }, "is_subagent": false }
+      ],
+      "usage": { "input_tokens": 100, "output_tokens": 30 }
+    },
+    {
+      "content": "This response must never be used — a real cancel ends the turn without another ModelCall. If test_cancel.sh's assertions see this content anywhere, the cancel path fell back to an ordinary interrupt fold-in instead of stopping.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 10, "output_tokens": 10 }
+    }
+  ]
+}

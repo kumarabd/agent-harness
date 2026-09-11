@@ -18,6 +18,19 @@ import (
 // (02-architecture-temporal-execution.md §3).
 const NewMessageSignalName = "NewMessage"
 
+// CancelSignalName — docs/components/gateway/first-party-plan.md's cancel/stop
+// primitive. Deliberately its OWN signal, not a SignalPayload.Command field on
+// NewMessage: a cancel must never be mistaken for real conversational content
+// by any of the branches that inspect pendingMessages (status=="done" folding
+// a stale follow-up back in, status=="blocked" doing the same, etc.) — those
+// all mean "here's new input, adapt," which is exactly the opposite of what a
+// cancel means. Sent by the Gateway directly to the session's own
+// CoordinatorWorkflow via a plain SignalWorkflow (never SignalWithStart — a
+// cancel with no active coordinator has nothing to do, so it should just no-op
+// rather than spin one up), which forwards it into the active Turn Workflow
+// exactly like NewMessage forwarding (coordinator.go).
+const CancelSignalName = "Cancel"
+
 // WakeSignalName — docs/components/proactivity.md, "The fire path". A fired
 // IntentionWorkflow's FireIntention activity sends this to the session
 // CoordinatorWorkflow (payload: types.WakePayload). The coordinator handles it
@@ -839,6 +852,20 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 		}
 	})
 
+	// cancelRequested — a separate flag, deliberately never funneled through
+	// pendingMessages: several branches below treat "pendingMessages is
+	// non-empty" as "new input arrived, fold it in and keep reasoning,"
+	// which is the opposite of what a cancel means. A cancel only ever
+	// arrives once per turn in practice (the coordinator stops forwarding
+	// once workActive clears), so a plain bool is enough — no queue.
+	cancelRequested := false
+	cancelChan := workflow.GetSignalChannel(ctx, CancelSignalName)
+	workflow.Go(ctx, func(gctx workflow.Context) {
+		var ignored struct{}
+		cancelChan.Receive(gctx, &ignored)
+		cancelRequested = true
+	})
+
 	// --- Progress watchdog (docs/components/turn-pipeline.md). Narrates
 	// "still working" while the model is heads-down. Top-level turns only — a
 	// subagent has no external delivery target. progressGen is bumped on every
@@ -875,6 +902,14 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 loop:
 	for {
 		// --- Resolved: Stop-Condition Logic (inline check, pure read of local state) ---
+		if cancelRequested {
+			// Between steps — no active tool calls to cancel, just stop
+			// before starting another ModelCall. Mid-step cancellation
+			// (an active tool-call batch, or a parked ask_user) is handled
+			// below, where that work actually is.
+			stopReason = "cancelled_by_user"
+			break
+		}
 		if iterations >= ceiling {
 			stopReason = "max_iterations"
 			break
@@ -1230,10 +1265,10 @@ loop:
 			return true
 		}
 
-		// Wait for either all of this step's calls to settle, or a follow-up
-		// message to arrive — whichever happens first.
+		// Wait for either all of this step's calls to settle, a follow-up
+		// message to arrive, or a cancel — whichever happens first.
 		_ = workflow.Await(ctx, func() bool {
-			return allReady() || len(pendingMessages) > 0
+			return allReady() || len(pendingMessages) > 0 || cancelRequested
 		})
 
 		if !allReady() {
@@ -1260,6 +1295,16 @@ loop:
 				}
 			}
 			dispatchSubagentManifests(ctx, subagentIDs)
+
+			if cancelRequested {
+				// A stop, not new input — end here rather than folding
+				// anything in and paying for another ModelCall. The
+				// cancel() above already tore down this step's in-flight
+				// tool calls (including a parked ask_user child, same
+				// mechanism an ordinary interrupt already used).
+				stopReason = "cancelled_by_user"
+				break loop
+			}
 
 			// Dequeue exactly ONE pending message — never batch multiple
 			// queued messages into a single fold-in (components/temporal-workflow.md,
@@ -1330,9 +1375,17 @@ loop:
 	// subagent has no external delivery target, its result is read from
 	// Postgres by its parent's next ModelCall instead.
 	{
+		finalStatus := "completed"
+		if stopReason == "cancelled_by_user" {
+			// A real, distinct terminal status — not "completed" — so a
+			// client (mobile/web's shared isTerminal()/turn_end.status
+			// already accept "cancelled") can tell "the agent finished" from
+			// "the user stopped it" apart.
+			finalStatus = "cancelled"
+		}
 		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 		actx := workflow.WithActivityOptions(ctx, ao)
-		_ = workflow.ExecuteActivity(actx, "Persist", input.TurnID, "completed").Get(actx, nil)
+		_ = workflow.ExecuteActivity(actx, "Persist", input.TurnID, finalStatus).Get(actx, nil)
 	}
 	// docs/components/memory-slot.md's "Resolved: Write-Path Construction"
 	// correction (2026-08-29): WriteMemory no longer dispatches here, once
