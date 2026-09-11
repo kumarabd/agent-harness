@@ -39,6 +39,17 @@ Scoped narrowly and deliberately: **visibility only** — token consumption, cal
 
 ### Resolved: Pipeline-Phase Visibility (2026-09-02)
 
+> **SUPERSEDED (2026-09-11).** This whole section is instrumentation for
+> `ClassifyRequest` / `ComposeSkill` / `MemoryRetrieve` / `RoutingWorkflow` /
+> `SkillDiscover` / `ToolDiscover` / `RecordSkill` / `OpenEpisode` — every one
+> of those activities was deleted by the turn-pipeline redesign
+> (`turn-pipeline.md`, done 2026-09-07…09) and the skill-subsystem removal
+> right after it. The dashboards/queries below return nothing today; kept as
+> history of the investigation, not as current operating guidance. If
+> pipeline-phase visibility is needed again, it'd be re-scoped against
+> `ModelCall` / tool-call activities / the new `report_status` peeled tool, not
+> rebuilt against these names.
+
 > **Note (2026-09-02, later):** the plan-and-execute revision
 > (`request-pipeline/08-planning.md`) **removes `ComposeSkill`** — the ~7.2s
 > medium-tier merge below stops existing; the planning turn (one model call per

@@ -39,7 +39,10 @@ Each gateway kind talks to its client completely differently (a browser polling 
 
 **API surface**: `/send` gains `session_id`/`parent_session_id` (both optional; empty reproduces today's exact single-session behavior); `/poll` gains a `session_id` query param; `/respond` gains a `session_id` field; new `GET /sessions` lists this authenticated user's own sessions only (`WHERE platform='web' AND channel_id={their own Clerk user_id}` — never another user's). `parent_session_id` is only meaningful the first time a given `session_id` is sent — `submitMessageEvent`'s own genesis detection (`../gateway.md`) is what actually makes this take effect, so the client doesn't need to be careful about sending it exactly once.
 
-`GET /skills` (2026-09-01) is unrelated to the session model — a flat read-only list of the agent's current procedures (`../skill-subsystem.md`), tenant-global (no per-user filter), for agent-web's `/skills` page.
+~~`GET /skills` (2026-09-01) ...~~ — **REMOVED (2026-09-11).** The whole skill
+subsystem it read from (`skill_procedures`, `../skill-subsystem.md`) was
+deleted; `web/skills.go` and the route are gone. See the dated Notes Log entry
+below for what this used to be.
 
 **Genesis context injection**: built and live-verified — `../gateway.md`'s own Notes Log has the full detail (`SeedChildSessionContext` activity, `coordinator.go`'s own gating). Platform-agnostic, so a newly-branched Web session gets it exactly the same way a Discord thread-session does, no Web-specific code needed for this part at all.
 
@@ -50,7 +53,8 @@ Each gateway kind talks to its client completely differently (a browser polling 
 - **Reconnection/resend behavior on the browser side** — what the chat page does if a send fails or a poll comes back empty for longer than expected (retry policy, not yet designed).
 
 ### Notes Log
-- 2026-09-01: **`GET /skills` added** — a read-only view of the harness's current
+- 2026-09-01: **`GET /skills` added** (**REMOVED 2026-09-11** along with the
+  entire skill subsystem — kept below as history only) — a read-only view of the harness's current
   procedural memory (`../skill-subsystem.md`) for the new agent-web `/skills`
   page. `workflows/internal/gateway/web/skills.go`: Clerk-authed like every
   other route, a direct `skill_procedures WHERE valid_to IS NULL` read off the

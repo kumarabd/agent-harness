@@ -1,6 +1,6 @@
 # Component: Model Registry
 
-> STATUS: IN PROGRESS — registry structure, selection mechanism, escalate-on-retry, storage location, pricing table, fallback-past-top-tier, and multi-provider abstraction all resolved **and implemented**: `activities/activities/model_registry.py`, wired into `model_call.py`/`llm.py`/`turn.go`, `context-slot.md`'s compression threshold, `compress_context.py`/`tool_call.py`/`exploration_summary.py`'s downstream call sites, and now (2026-08-28, third revision) a Provider ABC (`activities/activities/providers/base.py`) with per-provider implementations for OpenAI-compatible (real OpenAI, DeepSeek, Qwen, Groq, OpenRouter, Crusoe, etc. — all one class) and Anthropic (native Messages API — its own class). Every configured tier owns its own `LANGUAGE_<TIER>_{PROVIDER,MODEL,API_KEY,BASE_URL,MAX_TOKENS}` config. Provider clients are constructed on demand via `llm_client.get_provider(config)` and cached per unique `(provider, base_url, api_key)` triple — deployments with tiers on the same provider still share one HTTP connection pool for free. Verified live against a real OpenAI-compatible cluster earlier; the Anthropic path is implemented and syntactically verified but not yet live-verified against a real Anthropic account — see Notes Log. **No remaining open items in this component's own scope.**
+> STATUS: IN PROGRESS — registry structure, selection mechanism, escalate-on-retry, storage location, pricing table, fallback-past-top-tier, and multi-provider abstraction all resolved **and implemented**: `activities/activities/model_registry.py`, wired into `model_call.py`/`llm.py`/`turn.go`, `context-slot.md`'s compression threshold, `compress_context.py`/`tool_call.py`/`exploration_summary.py`'s downstream call sites, and now (2026-08-28, third revision) a Provider ABC (`activities/activities/providers/base.py`) with per-provider implementations for OpenAI-compatible (real OpenAI, DeepSeek, Qwen, Groq, OpenRouter, Crusoe, etc. — all one class) and Anthropic (native Messages API — its own class). Every configured tier owns its own `LANGUAGE_<TIER>_{PROVIDER,MODEL,API_KEY,BASE_URL,MAX_TOKENS}` config. Provider clients are constructed on demand via `llm_client.get_provider(config)` and cached per unique `(provider, base_url, api_key)` triple — deployments with tiers on the same provider still share one HTTP connection pool for free. Verified live against a real OpenAI-compatible cluster earlier; the Anthropic path is implemented and syntactically verified but not yet live-verified against a real Anthropic account — see Notes Log. **No remaining open items in this component's own scope.** (2026-09-11: the "Selection Mechanism" section's `declare_next_step_hint` naming is superseded by `report_status` — see that section's own banner; the registry/tier/provider machinery itself is unaffected.)
 
 ### Role (one line)
 Lets the harness select an appropriate model per task at runtime — which model to call, based on what the turn/subagent/step actually needs — replacing today's single model hardcoded into worker startup with no selection mechanism at all.
@@ -22,6 +22,21 @@ registry[modality][tier] -> model config
 - `modality: vision | audio | video` — **placeholders only for now**, no real dispatch logic. Nothing in the current toolset (`shell_exec` plus fixture stubs) calls any of these; the registry's shape accommodates them cheaply, but selection logic for them is explicitly deferred until a real consumer exists.
 
 ### Resolved: Selection Mechanism — Model Self-Declares the Next Step's Hint
+
+> **SUPERSEDED (2026-09-11).** `declare_next_step_hint` / `next_step_hint:
+> {modality, tier}` described below was replaced by `turn-pipeline.md` Phase 7
+> with `report_status(status, tier?, est_remaining_steps?, note?)` — a peeled
+> meta-tool the provider layer strips (`REPORT_STATUS_TOOL_NAME` /
+> `parse_report_status` in `providers/base.py`), carrying model-authored
+> `status`/`next_step` (also feeding the iteration ceiling), not just a tier
+> hint. Bootstrapping also changed: no `{language, medium}` classify-shaped
+> default any more (`ClassifyRequest` is gone) — the first call's tier is
+> `input.hint_tier or model_registry.default_hint()[1]`, no complexity
+> dimension. `TurnInput.{HintModality,HintTier}` were dropped from the Go side
+> in the Phase 8 cutover. The per-step re-declaration and cache-stability
+> reasoning below still holds conceptually for `report_status`'s `tier` field,
+> just not literally under this name/shape.
+
 `ModelCallOutput` gains a `next_step_hint: {modality, tier}` field — the model, as part of producing its current response, also declares what the *next* step needs. This rides along on output the model already has to produce, so it costs no extra call, unlike a separate classification hop. The hint threads into the following `ModelCallInput`; the **activity** (Python, tenant-worker) resolves it against the registry and picks the concrete model — the Go workflow passes the hint through as opaque data and never needs to interpret it, consistent with the tenant-isolation contract.
 
 - **Bootstrapping**: the first `ModelCall` of a turn has no prior hint. Defaults to `{language, medium}`.

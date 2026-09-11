@@ -2,6 +2,20 @@
 
 > STATUS: DESIGN (2026-09-02). Not built.
 >
+> **Premise now stale (flagged 2026-09-11, not rewritten).** This design's
+> "REVISION" section below routes project work through `PlanWorkflow` +
+> `request-pipeline/08-planning.md`'s PLAN.md checkpoints, and closes an
+> episode with one `RecordSkill` call — all three of those (`PlanWorkflow`,
+> the planning-turn machinery, `RecordSkill`/the skill subsystem) were deleted
+> by the turn-pipeline redesign and the skill-subsystem removal
+> (`turn-pipeline.md`, 2026-09-07…09.5). The underlying asks — a persistent
+> project workspace, Claude Code session continuity across delegations, a
+> build+deploy+verify step — are still reasonable and undecided; whatever
+> replaces the plan-ledger idea (a scratchpad? a subagent per checkpoint?
+> nothing formal at all now that the loop is flat?) needs a fresh design pass
+> against the current turn shape before this is built, not a literal reading
+> of the text below.
+>
 > Gives the agent a real software-engineering capability: it authors, builds,
 > and deploys projects — automating the build/publish work the user does by
 > hand today, and taking feature requests against real repos.

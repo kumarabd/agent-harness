@@ -3,11 +3,15 @@
 > STATUS: DESIGN v3 (2026-09-02). Supersedes v2 ("first-class hand-built
 > components"), rejected as a parallel mini-architecture.
 >
-> **BUILD — Phase 1 substrate, branch `proactivity-substrate` (compiles, Go
-> tests green, NOT deployed):**
-> - **1a** — `turns.initiated_by` / `episodes.initiated_by` (migration `020`);
->   coordinator `Wake` signal → proactive turn (`initiated_by="intn:<id>"`) or
->   fold-in to the live turn; `startSessionTurn` helper.
+> **BUILD — Phase 1 substrate: MERGED to `main` and deployed** (PR #1,
+> `41a92f8` — predates the turn-pipeline redesign below, so it's shipped
+> through every loop-worker deploy since). Corrected 2026-09-11: this used to
+> read "branch `proactivity-substrate`, NOT deployed" — that was stale.
+> - **1a** — `turns.initiated_by` (migration `020`); coordinator `Wake` signal →
+>   proactive turn (`initiated_by="intn:<id>"`) or fold-in to the live turn;
+>   `startSessionTurn` helper. (`episodes.initiated_by`, added by the same
+>   migration, is moot — the `episodes` table itself was dropped in migration
+>   `025` when episode-lifecycle was superseded, see below.)
 > - **1b-i** — `IntentionWorkflow` (loop-worker): `time`/`deadline` one-shot,
 >   `condition`/`state`/`event` poll loop, `inactivity` idle timer;
 >   `revise`/`snooze`/`reset` signals, `status` query; `FireIntention` activity
@@ -38,8 +42,12 @@
 >   the `list` query against one fails and surfaces (no fallback). Schedules
 >   aren't workflow executions, so they keep the `intn-sched:<scope>:` id-prefix
 >   filter.
-> - The proactive seed is written **role=`user`, seq 0** (ClassifyRequest
->   requires it); `initiated_by` carries the real provenance.
+> - The proactive seed is written **role=`user`, seq 0** — the turn's first
+>   `ModelCall` reads it as the request (`coordinator.go`'s
+>   `proactiveSeedText`); `initiated_by` carries the real provenance. (This
+>   used to say "ClassifyRequest requires it" — ClassifyRequest no longer
+>   exists, see `turn-pipeline.md`; the actual reason was always just "the
+>   model needs something in seq 0 to read".)
 > - `cron` and any daily cadence run in the **execution engine's timezone**
 >   (per-user timezone is deferred — 2026-09-02).
 > - **The genesis daily-review intention is NOT built, but has no blockers left:**
@@ -56,9 +64,11 @@
 >   deciding turn's judgment + `lcm` are the only guard so far.
 >
 > Parent: [`../04-architecture-orchestrator-vision.md`](../04-architecture-orchestrator-vision.md).
-> Builds on `coordinator.go` / `turn.go`, [`episode-lifecycle.md`](episode-lifecycle.md),
-> [`request-pipeline/08-planning.md`](request-pipeline/08-planning.md) (the
-> `PlanWorkflow`), [`lane-model.md`](lane-model.md),
+> Builds on `coordinator.go` / `turn.go`, [`turn-pipeline.md`](turn-pipeline.md)
+> (the model-steered reason-act loop every deciding turn runs — this doc's
+> `episode-lifecycle.md` / `request-pipeline/08-planning.md` / `lane-model.md`
+> links were removed 2026-09-11: all three docs were deleted when that
+> machinery was stripped, see turn-pipeline.md's own "Removed" section),
 > [`memory-slot.md`](memory-slot.md) (agent-brain = the belief/preference store).
 
 ### The reframe
@@ -67,9 +77,10 @@
 agent set for itself instead of by a user message.**
 
 Nothing downstream of "a message arrives at the `CoordinatorWorkflow`" changes —
-same `ClassifyRequest`, same Lite/Deliberate fork, same episode / `PlanWorkflow`,
-same `lcm` + memory, same delivery. The proactive turn's opening message is one
-the agent wrote to itself:
+same `TurnWorkflow` reason-act loop (`turn-pipeline.md` — no classify, no lane
+fork, no plan workflow since the 2026-09-07…09 redesign), same `lcm` + memory,
+same delivery. The proactive turn's opening message is one the agent wrote to
+itself:
 
 ```
 [system, seq=0]  A travel email arrived: "Flight AA123 tomorrow delayed to 4:30pm."
@@ -83,10 +94,10 @@ feedback) collapses into machinery that already exists:
 | concept | already is |
 |---|---|
 | **Situation** — what's happening now | what every turn does: the model calls tools mid-loop to check live state. No `AssembleSituation` activity. |
-| **Policy** — when am I allowed to act | `MemoryRetrieve` + model judgment. agent-brain holds "no travel notifications", past "stop doing this" corrections, quiet hours. Not a rule engine. |
+| **Policy** — when am I allowed to act | the model calling `search_memory` + its own judgment. agent-brain holds "no travel notifications", past "stop doing this" corrections, quiet hours. Not a rule engine. |
 | **Opportunity detection** | a **default intention** seeded at genesis: *"periodically review recent episodes for anything worth raising."* Not a subsystem. |
 | **Proactive decision** — act? | the deciding turn's own output: a message = act; ending silently (`no_tool_calls`, empty response) = suppress. No arbiter workflow. |
-| **Plan / Execute** | `ClassifyRequest` on the seed → Lite (notify) or Deliberate (`PlanWorkflow`). The wake is a `seq=0` message; everything downstream is untouched. |
+| **Plan / Execute** | the wake is just a `seq=0` message into the same flat reason-act loop every turn runs (`turn-pipeline.md`) — no separate classify step or plan/lite fork exists to route through any more. |
 | **Suppression / cooldown** | the deciding turn's judgment (`lcm` shows what it already said) + the intention workflow's own state (it knows when it last fired). Not a cooldown subsystem. |
 | **Feedback / adaptation** | already built: "stop these" → agent-brain correction → future deciding turns retrieve it and stay quiet. Skip. |
 
@@ -153,10 +164,10 @@ starts a TurnWorkflow, seed = the synthesized system message, initiated_by = "in
                            output to the session's gateway channel
 ```
 
-The deciding turn is a **normal turn**: `ClassifyRequest` (Lite notify vs
-Deliberate `PlanWorkflow`), `MemoryRetrieve` (preferences, "stop doing this"
-corrections, quiet hours — the "policy"), tool calls (the "situation" check),
-then it either **produces a message** (act, delivered) or **ends silently**
+The deciding turn is a **normal turn**: the model calls `search_memory`
+(preferences, "stop doing this" corrections, quiet hours — the "policy") and
+other tools (the "situation" check) as it judges it needs to, then it either
+**produces a message** (act, delivered) or **ends silently**
 (suppress). `FireIntention` gets the turn's outcome back; an `IntentionWorkflow`
 that is suppressed N times in a row self-cancels and writes a belief
 (*"user doesn't want X"*).
@@ -177,8 +188,10 @@ turns, so each deciding turn sees in `lcm` what the last one just said.
    namespace is the one deploy step.
 3. **Coordinator `Wake` signal** — a handful of lines in the existing selector
    (`coordinator.go:102`), plus honouring `initiated_by` on the started turn.
-4. **`turns.initiated_by` / `episodes.initiated_by`** — one column, a provenance
-   string (`user` | `intn:<id>` | `plan`).
+4. **`turns.initiated_by`** — one column, a provenance string (`user` |
+   `intn:<id>` | `plan`). (Migration 020 also added `episodes.initiated_by`,
+   but the `episodes` table itself was dropped in migration `025` — that half
+   is moot.)
 5. **Activities** (tenant-worker, hold a Temporal client — `ModelCall` already
    does): `ArmIntention` / `ReviseIntention` / `CancelIntention` behind agent
    tools; `FireIntention` (`SignalWithStart` the coordinator); `CheckCondition`
@@ -220,7 +233,7 @@ activities. Delivery failure fails the turn and is surfaced. No channel fallback
 | thing | where |
 |---|---|
 | intentions | Temporal — `IntentionWorkflow` executions + Schedules. **No table.** |
-| intention provenance on work | `turns.initiated_by` / `episodes.initiated_by` (one column) |
+| intention provenance on work | `turns.initiated_by` (one column; `episodes.initiated_by` was moot from the start — that table was dropped) |
 | a proactive turn's seed | a `system`-role `messages` row |
 | preferences / quiet hours / "stop doing X" | agent-brain memory (already the store) |
 | engagement feedback | agent-brain memory (a deciding turn observing the follow-up writes it — same loop as skill confidence) |
