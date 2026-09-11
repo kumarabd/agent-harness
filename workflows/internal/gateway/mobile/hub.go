@@ -20,8 +20,8 @@ import (
 type hub struct {
 	pool *pgxpool.Pool
 
-	mu     sync.Mutex
-	byKey  map[string]map[*conn]struct{}
+	mu    sync.Mutex
+	byKey map[string]map[*conn]struct{}
 }
 
 func newHub(pool *pgxpool.Pool) *hub {

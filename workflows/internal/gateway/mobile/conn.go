@@ -11,14 +11,18 @@ import (
 	"github.com/gorilla/websocket"
 
 	"agent-harness/workflows/internal/gateway/core"
-	wf "agent-harness/workflows/internal/workflow"
+	"agent-harness/workflows/internal/types"
 )
 
 const (
-	writeWait      = 10 * time.Second
-	pongWait       = 60 * time.Second
-	pingEvery      = 25 * time.Second
-	coldStartTurns = 20 // a client with no cursor gets at most this many trailing turns
+	writeWait       = 10 * time.Second
+	pongWait        = 60 * time.Second
+	pingEvery       = 25 * time.Second
+	coldStartTurns  = 20 // a client with no cursor gets at most this many trailing turns
+	catchupPageSize = 50 // bounded pagination per catchup() round-trip — first-party-plan.md §6:
+	// the old explicit-resume path replayed everything after the cursor in
+	// one unbounded query. catchup() now loops pages until it either hits
+	// the running turn (the tail) or a short page (caught up).
 )
 
 // conn is one WebSocket connection = one device.
@@ -30,8 +34,24 @@ type conn struct {
 	userID     string
 	deviceID   string
 
-	wakeCh  chan struct{}
+	wakeCh chan struct{}
+	// resumeCh carries "resume" frames from the reader goroutine to serve's
+	// main loop. catchup() and every conn field it touches (sentThrough,
+	// curTurnSeq, ...) must only ever run on the main loop — routing resume
+	// requests through a channel instead of calling catchup() directly from
+	// the reader goroutine is what makes that true (it used to call
+	// catchup() inline, racing with the main loop's own wakeCh-triggered
+	// catchup() on every one of those fields).
+	resumeCh chan int
+
 	writeMu sync.Mutex
+	// deadCh is closed the first time a WS write fails, from whichever
+	// goroutine hit it (send() is called from both the main loop and the
+	// reader goroutine's inline error frames; writeMu already serializes
+	// the actual socket write, this just tells serve's main loop to stop
+	// promptly instead of continuing to loop against a dead socket).
+	deadCh   chan struct{}
+	deadOnce sync.Once
 
 	// Resume cursor — advanced as frames are emitted, never persisted server
 	// side (the client sends its own on reconnect).
@@ -116,7 +136,13 @@ func (c *conn) serve(ctx context.Context) {
 				log.Printf("mobile: %s read: %v", c.sessionKey, err)
 			}
 			return
+		case <-c.deadCh:
+			return
 		case <-c.wakeCh:
+			c.catchup(ctx)
+		case seq := <-c.resumeCh:
+			c.sentThrough = seq
+			c.curTurnSeq = -1
 			c.catchup(ctx)
 		case <-ping.C:
 			c.writeMu.Lock()
@@ -130,15 +156,26 @@ func (c *conn) serve(ctx context.Context) {
 	}
 }
 
-func (c *conn) send(v any) {
+// send marshals and writes one frame. On a write failure it marks the
+// connection dead (deadCh) so serve's main loop tears it down promptly
+// instead of continuing to advance cursor state against a socket that isn't
+// actually delivering anything any more — the client's own cursor (persisted
+// only after it applies a frame locally) is the source of truth on
+// reconnect regardless, so this is a promptness/observability fix, not a
+// data-loss one.
+func (c *conn) send(v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return
+		return err
 	}
 	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 	_ = c.ws.SetWriteDeadline(time.Now().Add(writeWait))
-	_ = c.ws.WriteMessage(websocket.TextMessage, b)
+	err = c.ws.WriteMessage(websocket.TextMessage, b)
+	c.writeMu.Unlock()
+	if err != nil {
+		c.deadOnce.Do(func() { close(c.deadCh) })
+	}
+	return err
 }
 
 // --- inbound ---
@@ -169,9 +206,10 @@ func (c *conn) handleInbound(ctx context.Context, f inboundFrame) {
 		c.answerUserInput(ctx, f)
 	case "resume":
 		if f.AfterTurnSeq != nil {
-			c.sentThrough = *f.AfterTurnSeq
-			c.curTurnSeq = -1
-			c.catchup(ctx)
+			select {
+			case c.resumeCh <- *f.AfterTurnSeq:
+			case <-ctx.Done():
+			}
 		}
 	case "pong", "ping":
 		// keepalive handled by the WS control frames; ignore app-level ones
@@ -180,26 +218,30 @@ func (c *conn) handleInbound(ctx context.Context, f inboundFrame) {
 	}
 }
 
+// answerUserInput validates that f.RequestID actually belongs to this
+// connection's OWN session before signaling it (core.AnswerUserInput) —
+// first-party-plan.md §6: this used to look up the request by ID alone, with
+// no check it belonged to the caller's session at all.
 func (c *conn) answerUserInput(ctx context.Context, f inboundFrame) {
 	if f.RequestID == "" {
 		return
 	}
-	var wfID string
-	err := c.h.pool.QueryRow(ctx,
-		"SELECT workflow_id FROM user_input_requests WHERE request_id = $1", f.RequestID,
-	).Scan(&wfID)
-	if err != nil || wfID == "" {
-		c.send(errorFrame{Type: "error", Message: "unknown request_id"})
-		return
-	}
-	resp := map[string]any{"request_id": f.RequestID}
+	resp := types.UserInputResponse{RequestID: f.RequestID}
 	if f.SelectedOptionID != "" {
-		resp["selected_option_id"] = f.SelectedOptionID
+		resp.SelectedOptionID = &f.SelectedOptionID
 	}
 	if f.FreeText != "" {
-		resp["free_text"] = f.FreeText
+		resp.FreeText = &f.FreeText
 	}
-	if err := c.h.temporal.SignalWorkflow(ctx, wfID, "", wf.UserInputResponseSignalName, resp); err != nil {
+	err := core.AnswerUserInput(ctx, c.h.pool, c.h.temporal, c.sessionKey, resp)
+	var already *core.AlreadyAnsweredError
+	switch {
+	case err == nil, errors.As(err, &already):
+		// accepted, or already answered elsewhere (another device, the
+		// 1-hour timeout) — idempotent either way, no error to the client.
+	case errors.Is(err, core.ErrNotOwner):
+		c.send(errorFrame{Type: "error", Message: "unknown request_id"})
+	default:
 		c.send(errorFrame{Type: "error", Message: "failed to deliver answer"})
 	}
 }
@@ -215,15 +257,29 @@ func (c *conn) coldStartCursor(ctx context.Context) int {
 	return trailingCursor(maxSeq, coldStartTurns)
 }
 
+// catchup replays every turn after c.sentThrough, paginated (catchupPageSize
+// per round-trip — first-party-plan.md §6: this used to be one unbounded
+// query on the explicit-resume path). It loops pages until it either hits
+// the running turn (the tail — stop and wait for the next wake) or a
+// short/empty page (genuinely caught up).
 func (c *conn) catchup(ctx context.Context) {
+	for {
+		n, hitRunning := c.catchupPage(ctx)
+		if hitRunning || n < catchupPageSize {
+			return
+		}
+	}
+}
+
+func (c *conn) catchupPage(ctx context.Context) (n int, hitRunning bool) {
 	rows, err := c.h.pool.Query(ctx,
 		"SELECT turn_seq, turn_id, status, COALESCE(initiated_by, 'user') "+
 			"FROM turns WHERE parent_id = $1 AND parent_type = 'session' AND turn_seq > $2 "+
-			"ORDER BY turn_seq",
-		c.sessionKey, c.sentThrough,
+			"ORDER BY turn_seq LIMIT $3",
+		c.sessionKey, c.sentThrough, catchupPageSize,
 	)
 	if err != nil {
-		return
+		return 0, false
 	}
 	type turnRow struct {
 		seq         int
@@ -263,10 +319,11 @@ func (c *conn) catchup(ctx context.Context) {
 			c.sentThrough = t.seq
 			c.curTurnSeq = -1
 		} else {
-			c.emitAskUser(ctx, t.seq, t.id)
-			return // running — this is the tail; wait for the next wake
+			c.emitAskUser(ctx, t.seq)
+			return len(turns), true // running — this is the tail; wait for the next wake
 		}
 	}
+	return len(turns), false
 }
 
 func (c *conn) emitMessages(ctx context.Context, turnSeq int, turnID string) {
@@ -335,21 +392,20 @@ func (c *conn) emitStatus(ctx context.Context, turnSeq int, turnID string) {
 	}
 }
 
-func (c *conn) emitAskUser(ctx context.Context, turnSeq int, turnID string) {
-	var rid, kind, prompt string
-	var opts []byte
-	var free bool
-	err := c.h.pool.QueryRow(ctx,
-		"SELECT request_id, kind, prompt, options, allow_free_text FROM user_input_requests "+
-			"WHERE turn_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
-		turnID,
-	).Scan(&rid, &kind, &prompt, &opts, &free)
-	if err != nil || rid == "" || rid == c.askSent {
+// emitAskUser is session-scoped (core.PendingInputFor), not turn-scoped —
+// matching web/poll.go's own pending-input query. There is only ever one
+// pending request per session at a time (a folded-in message cancels the
+// in-flight one via CloseUserInput), so this is equivalent to the old
+// turn-scoped query in practice and reuses the same shared reader mobile's
+// answer path now goes through.
+func (c *conn) emitAskUser(ctx context.Context, turnSeq int) {
+	p, err := core.PendingInputFor(ctx, c.h.pool, c.sessionKey)
+	if err != nil || p == nil || p.RequestID == c.askSent {
 		return
 	}
 	c.send(askUserFrame{
-		Type: "ask_user", TurnSeq: turnSeq, RequestID: rid, Kind: kind,
-		Prompt: prompt, Options: json.RawMessage(opts), AllowFreeText: free,
+		Type: "ask_user", TurnSeq: turnSeq, RequestID: p.RequestID, Kind: p.Kind,
+		Prompt: p.Prompt, Options: json.RawMessage(p.Options), AllowFreeText: p.AllowFreeText,
 	})
-	c.askSent = rid
+	c.askSent = p.RequestID
 }

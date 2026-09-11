@@ -2,11 +2,11 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"agent-harness/workflows/internal/gateway/core"
 	"agent-harness/workflows/internal/types"
-	wf "agent-harness/workflows/internal/workflow"
 )
 
 type respondRequest struct {
@@ -42,38 +42,28 @@ func (h *Handler) handleRespond(w http.ResponseWriter, r *http.Request) {
 	sessionKey := core.SessionKeyFor("web", userID, webDiscriminator(userID, req.SessionID))
 	ctx := r.Context()
 
-	// Resolve workflow_id AND confirm this request actually belongs to the
-	// caller's own session — same join handlePoll's own pending_input query
-	// uses, so a caller can never answer a request surfaced under a
-	// different user's session_key.
-	var workflowID, status string
-	err := h.pool.QueryRow(ctx,
-		"SELECT r.workflow_id, r.status FROM user_input_requests r "+
-			"JOIN turns t ON t.turn_id = r.turn_id "+
-			"WHERE r.request_id = $1 AND t.parent_id = $2 AND t.parent_type = 'session'",
-		req.RequestID, sessionKey,
-	).Scan(&workflowID, &status)
-	if err != nil {
-		http.Error(w, "no such pending request for this session", http.StatusNotFound)
-		return
-	}
-	if status != "pending" {
-		// Already answered/cancelled/expired elsewhere (e.g. the 1-hour
-		// timeout, or a stale poll response) — same "already_accepted"-style
-		// idempotent ack as /send's own dedup short-circuit, not an error.
-		writeJSON(w, http.StatusOK, respondResponse{Status: "already_" + status})
-		return
-	}
-
+	// core.AnswerUserInput — docs/components/gateway/first-party-plan.md —
+	// the ownership check (this request belongs to sessionKey) and the
+	// signal-or-idempotent-ack logic below used to live only here; mobile
+	// now shares the exact same path.
 	payload := types.UserInputResponse{
 		RequestID:        req.RequestID,
 		SelectedOptionID: req.SelectedOptionID,
 		FreeText:         req.FreeText,
 	}
-	if err := h.temporal.SignalWorkflow(ctx, workflowID, "", wf.UserInputResponseSignalName, payload); err != nil {
+	err := core.AnswerUserInput(ctx, h.pool, h.temporal, sessionKey, payload)
+	var already *core.AlreadyAnsweredError
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, respondResponse{Status: "accepted"})
+	case errors.As(err, &already):
+		// Already answered/cancelled/expired elsewhere (e.g. the 1-hour
+		// timeout, or a stale poll response) — same idempotent ack as
+		// /send's own dedup short-circuit, not an error.
+		writeJSON(w, http.StatusOK, respondResponse{Status: "already_" + already.Status})
+	case errors.Is(err, core.ErrNotOwner):
+		http.Error(w, "no such pending request for this session", http.StatusNotFound)
+	default:
 		http.Error(w, "failed to deliver response", http.StatusInternalServerError)
-		return
 	}
-
-	writeJSON(w, http.StatusOK, respondResponse{Status: "accepted"})
 }

@@ -69,12 +69,14 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 		return // Upgrade already wrote the error response
 	}
 	c := &conn{
-		h:            h,
-		ws:           ws,
-		wakeCh:       make(chan struct{}, 1),
-		sentThrough:  -1,
-		sentMsgSeq:   -1,
-		curTurnSeq:   -1,
+		h:           h,
+		ws:          ws,
+		wakeCh:      make(chan struct{}, 1),
+		resumeCh:    make(chan int),
+		deadCh:      make(chan struct{}),
+		sentThrough: -1,
+		sentMsgSeq:  -1,
+		curTurnSeq:  -1,
 	}
 	c.serve(r.Context())
 }
