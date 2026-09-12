@@ -7,6 +7,7 @@ import (
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/sdk/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
@@ -490,30 +491,55 @@ func statusDeliverActivity(platform string) (activityName string, ok bool) {
 	}
 }
 
+// notifyProgress writes a StatusPing and, only for platforms that need an
+// EXPLICIT push-to-one-connection dispatch (Discord — no live connection to
+// tail, so the gateway has to actively post something), delivers it too.
+// Mobile self-delivers via migration 032/033's NOTIFY triggers: the write
+// alone already reaches every connected device, no dispatch activity needed
+// or wanted. Shared by two call sites with different TRIGGERS for the exact
+// same write: runProgressWatchdog's backoff timer (nothing has happened in a
+// while — a periodic reminder) and the tool-dispatch call site in the fan-out
+// below (something just started — instant, event-driven, not timer-gated).
+// Best-effort throughout: a failure is logged, never surfaced into the turn.
+func notifyProgress(ctx workflow.Context, turnID, sessionKey, connectionID, reason string, logger log.Logger) {
+	platform := platformFromSessionKey(sessionKey)
+	deliverName, deliverOK := statusDeliverActivity(platform)
+	queue, _, queueOK := deliveryTaskQueue(sessionKey, connectionID)
+	dispatch := deliverOK && queueOK
+
+	var line string
+	pctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
+	if err := workflow.ExecuteActivity(pctx, "StatusPing", turnID, reason).Get(pctx, &line); err != nil {
+		logger.Warn("notifyProgress: StatusPing failed", "turn_id", turnID, "reason", reason, "error", err)
+		return
+	}
+	if line == "" || !dispatch {
+		// Self-delivering platforms (mobile) stop here — the write above
+		// already reached every connected device via NOTIFY.
+		return
+	}
+	dctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: activityTimeoutTierA,
+		TaskQueue:           queue,
+	})
+	if err := workflow.ExecuteActivity(dctx, deliverName, turnID).Get(dctx, nil); err != nil {
+		logger.Warn("notifyProgress: status delivery failed", "turn_id", turnID, "reason", reason, "error", err)
+	}
+}
+
 // runProgressWatchdog is the goroutine body. progress is a monotonic counter
 // the turn's main goroutine bumps on every real step (a new reason-act
 // iteration, the final delivery); done is set once the turn's loop has exited.
 // Both are plain shared values — safe here for the same reason
 // deliveryInterruptSource.messages is: workflow goroutines are cooperatively
 // scheduled, never truly concurrent. All activity calls are on the root ctx,
-// independent of the per-iteration cancelCtx, and best-effort: a failed ping
-// is logged, never surfaced into the turn.
+// independent of the per-iteration cancelCtx.
 func runProgressWatchdog(ctx workflow.Context, turnID, sessionKey, connectionID string, progress *int, done *bool) {
 	platform := platformFromSessionKey(sessionKey)
 	steps := statusPingBackoff(platform)
 	if len(steps) == 0 {
 		return
 	}
-	// deliverOK/queueOK gate an EXPLICIT push-to-one-connection dispatch —
-	// Discord's answer to having no live connection to tail. Mobile has one
-	// (migration 032/033's NOTIFY triggers): the StatusPing write below is
-	// self-delivering there — every connected replica gets NOTIFY'd the
-	// moment the row lands, no dispatch activity needed or wanted. So this
-	// only decides whether to ALSO dispatch after writing, never whether to
-	// write at all.
-	deliverName, deliverOK := statusDeliverActivity(platform)
-	queue, _, queueOK := deliveryTaskQueue(sessionKey, connectionID)
-	dispatch := deliverOK && queueOK
 	logger := workflow.GetLogger(ctx)
 
 	stepIdx := 0
@@ -533,21 +559,7 @@ func runProgressWatchdog(ctx workflow.Context, turnID, sessionKey, connectionID 
 			continue
 		}
 
-		var line string
-		pctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
-		if err := workflow.ExecuteActivity(pctx, "StatusPing", turnID, "").Get(pctx, &line); err != nil {
-			logger.Warn("progress watchdog: StatusPing failed", "turn_id", turnID, "error", err)
-		} else if line != "" && dispatch {
-			// Self-delivering platforms (mobile) stop here — the write above
-			// already reached every connected device via NOTIFY.
-			dctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-				StartToCloseTimeout: activityTimeoutTierA,
-				TaskQueue:           queue,
-			})
-			if err := workflow.ExecuteActivity(dctx, deliverName, turnID).Get(dctx, nil); err != nil {
-				logger.Warn("progress watchdog: status delivery failed", "turn_id", turnID, "error", err)
-			}
-		}
+		notifyProgress(ctx, turnID, sessionKey, connectionID, "", logger)
 		if stepIdx < len(steps)-1 {
 			stepIdx++
 		}
@@ -564,25 +576,7 @@ func runProgressWatchdog(ctx workflow.Context, turnID, sessionKey, connectionID 
 // platform has no push channel at all (Web) or a step fails, it's logged and
 // dropped, same as every other bookkeeping call in the coordinator.
 func deliverWedgedFallback(ctx workflow.Context, sessionKey, connectionID, turnID string) {
-	platform := platformFromSessionKey(sessionKey)
-	logger := workflow.GetLogger(ctx)
-	pctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
-	if err := workflow.ExecuteActivity(pctx, "StatusPing", turnID, "wedged").Get(pctx, nil); err != nil {
-		logger.Warn("wedged fallback: StatusPing failed", "turn_id", turnID, "error", err)
-		return
-	}
-	deliverName, deliverOK := statusDeliverActivity(platform)
-	queue, _, queueOK := deliveryTaskQueue(sessionKey, connectionID)
-	if !deliverOK || !queueOK {
-		return
-	}
-	dctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: activityTimeoutTierA,
-		TaskQueue:           queue,
-	})
-	if err := workflow.ExecuteActivity(dctx, deliverName, turnID).Get(dctx, nil); err != nil {
-		logger.Warn("wedged fallback: status delivery failed", "turn_id", turnID, "error", err)
-	}
+	notifyProgress(ctx, turnID, sessionKey, connectionID, "wedged", workflow.GetLogger(ctx))
 }
 
 // connectionDeliveryChunkActivity mirrors deliveryTaskQueue above,
@@ -1280,6 +1274,19 @@ loop:
 				fut := workflow.ExecuteActivity(actx, "ToolCall", types.ToolCallInput{ToolCallID: tc.ToolCallID})
 				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut})
 			}
+		}
+
+		// Event-driven, not timer-gated: the moment this step's tool calls
+		// are actually dispatched (they're already durably minted in
+		// Postgres by ModelCall, before this loop even runs), narrate it
+		// immediately instead of waiting for runProgressWatchdog's backoff
+		// to eventually say something generic. Same write, same delivery —
+		// notifyProgress's own doc comment has the reasoning. Only every
+		// reason-act step already bumps progressGen (below the Await), so
+		// this doesn't fight the watchdog's own collapse-on-progress logic —
+		// they're complementary triggers on the identical mechanism.
+		if len(calls) > 0 {
+			notifyProgress(ctx, input.TurnID, input.SessionKey, input.ConnectionID, "tool_dispatch", logger)
 		}
 
 		allReady := func() bool {

@@ -454,7 +454,7 @@ func (c *conn) emitStatus(ctx context.Context, turnSeq int, turnID string) {
 			return
 		}
 		dtext, replace := deltaFor(c.lastCum, text)
-		c.send(deltaFrame{Type: "delta", TurnSeq: turnSeq, Seq: seq, Text: dtext, Replace: replace})
+		c.send(deltaFrame{Type: "delta", TurnSeq: turnSeq, Seq: seq, Text: dtext, Replace: replace, Progress: true})
 		c.lastCum = text
 		c.sentStSeq = seq
 	}

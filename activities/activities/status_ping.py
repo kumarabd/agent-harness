@@ -18,6 +18,7 @@ be stuck" line instead of a progress-derived one.
 
 from __future__ import annotations
 
+import json
 import logging
 
 from temporalio import activity
@@ -26,6 +27,27 @@ logger = logging.getLogger(__name__)
 
 _WEDGED_LINE = "This is taking longer than expected — still working on it."
 _GENERIC_LINE = "Still working on this…"
+
+# _describe_call — docs/components/gateway/first-party-plan.md, "every
+# progress frame". Different tools name their main argument differently
+# (shell_exec's "command", search_memory/discover_tools' "query",
+# spawn_subagent's "prompt"); tried in priority order, first real string
+# wins. Deliberately generic rather than a per-tool-name switch — a new tool
+# that happens to use one of these key names is covered for free, and one
+# that doesn't just falls back to the bare tool name, same as before this
+# existed.
+_ARG_KEYS_BY_PRIORITY = ("query", "command", "prompt", "content")
+
+
+def _describe_call(tool_name: str, arguments: dict) -> str:
+    for key in _ARG_KEYS_BY_PRIORITY:
+        val = arguments.get(key)
+        if isinstance(val, str) and val.strip():
+            snippet = val.strip()
+            if len(snippet) > 60:
+                snippet = snippet[:57] + "..."
+            return f'{tool_name} — "{snippet}"'
+    return tool_name
 
 
 class StatusPingActivity:
@@ -57,7 +79,7 @@ class StatusPingActivity:
             turn_id,
         )
         latest = await self._pool.fetchrow(
-            "SELECT tc.tool_name, tc.status FROM tool_calls tc "
+            "SELECT tc.tool_name, tc.status, tc.arguments FROM tool_calls tc "
             "JOIN messages m ON m.message_id = tc.message_id "
             "WHERE tc.parent_id = $1 "
             "ORDER BY m.seq DESC, tc.tool_call_id DESC LIMIT 1",
@@ -68,4 +90,5 @@ class StatusPingActivity:
         if latest["status"] == "error":
             return f"…hit a snag on {latest['tool_name']}, retrying."
         n = (steps or 0) + 1
-        return f"Working on it — {latest['tool_name']}, step {n}."
+        arguments = json.loads(latest["arguments"]) if latest["arguments"] else {}
+        return f"Working on it — {_describe_call(latest['tool_name'], arguments)}, step {n}."

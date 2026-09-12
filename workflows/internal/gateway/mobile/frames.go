@@ -40,7 +40,18 @@ type deltaFrame struct {
 	// ping superseding real content or vice versa: status pings share this
 	// same cumulative-buffer state, so they're just more delta traffic, not
 	// a distinct frame type — "a response without a request."
-	Replace bool `json:"replace,omitempty"`
+	//
+	// Progress — true ⇒ this delta is ephemeral progress narration
+	// (conn.go's emitStatus: "Running shell_exec…", "Still working on
+	// this…"), not the model's real, final response. Explicit rather than
+	// left for the client to infer purely from Replace: still delivered
+	// through the identical delta/replace mechanism (no second frame type,
+	// no second client code path to maintain), but a client that wants to
+	// render or speak progress differently from the real answer — dim text,
+	// a distinct tone, skip it in a saved transcript — now has a direct
+	// signal instead of having to guess from timing or content.
+	Progress bool `json:"progress,omitempty"`
+	Replace  bool `json:"replace,omitempty"`
 }
 
 type turnEndFrame struct {

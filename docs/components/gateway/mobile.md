@@ -3,10 +3,11 @@
 > STATUS: SLICE 1 built (text in/out, streaming, multi-device fan-out, cursor
 > resume, `ask_user`). `cancel`/stop, cross-replica presence, `KeepAlive`
 > (coordinator lifetime tied to connection liveness), device_id/speaker_id
-> separation, and status pings (as `delta`, not a frame type) — ALL BUILT +
-> DEPLOYED + LIVE-VERIFIED 2026-09-12. Voice/text mode built same day (NOT
-> yet deployed/verified). Deferred: tool-activity frames, wiring a
-> `Present()` consumer, session list/select.
+> separation, status pings (as `delta`, not a frame type), voice/text mode
+> (+ a voice-identity prompt fix), and event-driven progress narration with
+> an explicit `progress` field — ALL BUILT + DEPLOYED + LIVE-VERIFIED
+> 2026-09-12, except progress narration (built, NOT yet deployed/verified).
+> Deferred: wiring a `Present()` consumer, session list/select.
 
 ## Role
 
@@ -231,7 +232,31 @@ message that triggered a turn, not be fixed once.
   a fast-tier model reliability question, not a prompt gap; not chased
   further yet.
 
-## Deferred
+## Progress narration — DONE 2026-09-12
 
-- **Tool-activity frames** — the app currently sees only messages + deltas +
-  status, not "running search…".
+Two gaps closed together, per the user's own framing ("I want every progress
+frame pushed... maybe a separate field"):
+
+- **Event-driven, not just timer-driven.** `StatusPing` used to fire only
+  from `runProgressWatchdog`'s backoff timer (20s/45s/90s of silence).
+  Extracted the write-then-maybe-dispatch logic into a shared
+  `notifyProgress` helper (also used by `deliverWedgedFallback`, no
+  behavior change there) and added a second call site: the instant a reason-
+  act step's tool calls are dispatched (`turn.go`, right after the fan-out
+  loop mints them — they're already durably in Postgres from `ModelCall` by
+  then), fire a ping immediately instead of waiting for the watchdog to
+  eventually say something generic. Complementary with the watchdog, not a
+  replacement: a long-running tool still gets the periodic reminder if the
+  eager ping wasn't enough. Richer text too — `status_ping.py`'s
+  `_progress_line` now reads the tool call's own arguments
+  (`query`/`command`/`prompt`/`content`, tried in priority order) instead of
+  just the bare tool name — `Working on it — search — "quarterly
+  revenue", step 2.` instead of `Working on it — search, step 2.`
+- **Explicit `progress` field on the `delta` frame**, rather than leaving
+  the client to infer "this is narration, not the real answer" purely from
+  `replace` timing. Still delivered through the identical delta/cumulative
+  mechanism — no second frame type, no second client code path — but now a
+  client that wants to render or speak progress differently from the final
+  answer has a direct signal instead of guessing.
+
+## Deferred
