@@ -2,10 +2,11 @@
 
 > STATUS: SLICE 1 built (text in/out, streaming, multi-device fan-out, cursor
 > resume, `ask_user`). `cancel`/stop, cross-replica presence, `KeepAlive`
-> (coordinator lifetime tied to connection liveness), and device_id/speaker_id
-> separation — BUILT + DEPLOYED + LIVE-VERIFIED 2026-09-12. Status pings
-> fixed same day (NOT yet deployed/verified). Deferred: tool-activity frames,
-> wiring a `Present()` consumer, session list/select.
+> (coordinator lifetime tied to connection liveness), device_id/speaker_id
+> separation, and status pings (as `delta`, not a frame type) — ALL BUILT +
+> DEPLOYED + LIVE-VERIFIED 2026-09-12. Voice/text mode built same day (NOT
+> yet deployed/verified). Deferred: tool-activity frames, wiring a
+> `Present()` consumer, session list/select.
 
 ## Role
 
@@ -76,7 +77,7 @@ message in place); the gateway diffs it to emit deltas.
 ## Wire protocol
 
 Client → server: `{type:"auth", token, device_id, after_turn_seq?}` (first frame,
-required), `{type:"message", client_msg_id, text, device_id?}`,
+required), `{type:"message", client_msg_id, text, device_id?, mode?}`,
 `{type:"answer", request_id, selected_option_id|free_text}`,
 `{type:"resume", after_turn_seq}`.
 
@@ -188,6 +189,33 @@ client needs zero new handling, and for voice, "Still working on this…" is
 simply spoken as one utterance, the real answer as the next. `turn_status_pings`/
 `StatusPing` themselves are unchanged, still shared with Discord's own
 (structurally different) delivery. The `statusFrame` wire type is gone.
+
+## Voice/text mode — DONE 2026-09-12
+
+Text responses lean on markdown (tables, bold, headers) that reads badly
+once spoken. Discord already solved this for its own voice platform, but by
+freezing a whole alternate system prompt (`voiceSystemPromptText`) into
+`sessions.system_prompt` at session genesis — a decision that fits Discord
+(voice and text are structurally separate sessions) but not mobile, where
+**one session serves both typing and speaking**. Mode has to travel with the
+message that triggered a turn, not be fixed once.
+
+- Migration `035`: `messages.mode` (`"voice"` | `"text"`, `NULL` = text).
+- `{"type":"message", ..., "mode":"voice"}` on the client → frame → `MessageEvent.Mode`
+  → `messages.mode`. Never threaded through `ModelCallInput`/the workflow
+  layer — read activity-side, same reference-passing pattern as
+  `speaker_id`/`client_msg_id`.
+- `model_call.py` reads the turn's own most recent user message's `mode`
+  and swaps in `llm.VOICE_SYSTEM_PROMPT` (a Python-side generalization of
+  `prompts.go`'s `voiceSystemPromptText`, plus one new rule: the incoming
+  message may itself be STT output — missing punctuation, mistranscribed
+  words, filler — read it charitably rather than literally). Purely
+  additive: Discord/web never send `mode`, so their behavior is completely
+  unaffected; Discord voice keeps using its own session-genesis path exactly
+  as before.
+- Known, accepted cost: switching mode mid-session is a full system-prompt
+  swap, so it breaks prompt-cache prefix reuse for that call. Unavoidable if
+  the styles are meant to genuinely differ — not something to hide.
 
 ## Deferred
 

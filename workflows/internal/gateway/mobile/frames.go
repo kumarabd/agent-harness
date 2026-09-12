@@ -84,6 +84,13 @@ type inboundFrame struct {
 	// message
 	ClientMsgID string `json:"client_msg_id,omitempty"`
 	Text        string `json:"text,omitempty"`
+	// Mode — "voice" | "text", omitted means text. Per-message: the same
+	// mobile session serves both typing and speaking, so this travels with
+	// each message rather than being fixed for the connection or session.
+	// Selects response style (and how leniently transcription errors in
+	// Text are read) for the turn it triggers — docs/components/gateway/
+	// mobile.md.
+	Mode string `json:"mode,omitempty"`
 	// answer (ask_user)
 	RequestID        string `json:"request_id,omitempty"`
 	SelectedOptionID string `json:"selected_option_id,omitempty"`

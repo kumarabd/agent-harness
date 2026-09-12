@@ -50,6 +50,16 @@ type Message struct {
 	// metadata about the client, not an identity. Empty for any
 	// non-mobile-originated message.
 	ClientDeviceID string `json:"client_device_id,omitempty"`
+	// Mode — "voice" | "text" (empty means text). Per-message, not
+	// per-session: unlike Discord (voice and text are structurally separate
+	// platforms/sessions, so voiceSystemPromptText is a session-genesis
+	// decision in sessions.system_prompt), one mobile session serves both
+	// typing and speaking, so this has to travel with the message that
+	// triggered a given turn, not be frozen once. Read activity-side
+	// (model_call.py) to pick the response style for that turn — never
+	// threaded through ModelCallInput/the workflow layer, same
+	// reference-passing reasoning as SpeakerID/ClientMsgID above.
+	Mode string `json:"mode,omitempty"`
 }
 
 // TurnInput starts a Turn Workflow — top-level or, recursively, a subagent.

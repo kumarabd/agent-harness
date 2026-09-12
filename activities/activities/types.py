@@ -42,6 +42,12 @@ class Message:
     # speaker_id: speaker_id is the human (Clerk sub, Discord user id, ...),
     # this is connection/message metadata about the client, not an identity.
     client_device_id: str = ""
+    # "voice" | "text" (empty means text) — per-message, not per-session:
+    # one mobile session serves both typing and speaking, unlike Discord
+    # voice/text (structurally separate platforms, so voiceSystemPromptText
+    # there is a session-genesis decision). model_call.py reads this off the
+    # turn's own messages to pick response style per-turn.
+    mode: str = ""
 
 
 @dataclass

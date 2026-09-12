@@ -63,6 +63,11 @@ type MessageEvent struct {
 	// deliberately NOT part of User/speaker identity. Empty for any
 	// platform without a device concept (Web, Discord).
 	DeviceID string
+	// Mode — "voice" | "text" (empty means text), threaded into
+	// messages.mode. Per-message, not per-session — see types.Message.Mode's
+	// own doc comment for why this can't be a session-genesis decision the
+	// way Discord voice's system-prompt override is.
+	Mode string
 	// Content is the message text.
 	Content string
 	// PlatformMessageID is the idempotency/dedup key against
@@ -192,6 +197,7 @@ func (i *Ingestor) Ingest(ctx context.Context, event MessageEvent) (string, erro
 		SpeakerID:      event.User,
 		ClientMsgID:    event.PlatformMessageID,
 		ClientDeviceID: event.DeviceID,
+		Mode:           event.Mode,
 	}}
 	if _, err := i.temporal.SignalWithStartWorkflow(
 		ctx, sessionKey, wf.NewMessageSignalName, payload, opts,

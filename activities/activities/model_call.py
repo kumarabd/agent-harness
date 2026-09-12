@@ -148,6 +148,24 @@ class ModelCallActivity:
                 )
                 system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
                 platform = session_row["platform"] if session_row else None
+
+                # docs/components/gateway/first-party-plan.md, "Voice/text
+                # mode" — per-turn, not per-session (see types.Message.mode's
+                # own doc comment for why: one mobile session serves both
+                # typing and speaking, unlike Discord voice/text, which are
+                # structurally separate sessions and get their prompt frozen
+                # once at genesis instead, via the session_row read above).
+                # Reads the turn's own most recent user message — covers a
+                # mid-turn fold-in that changes mode too, not just the seed.
+                # Additive only: platforms that never send mode (Discord,
+                # web) always get NULL here and are completely unaffected.
+                mode_row = await conn.fetchrow(
+                    "SELECT mode FROM messages WHERE parent_id = $1 AND role = 'user' "
+                    "ORDER BY seq DESC LIMIT 1",
+                    input.turn_id,
+                )
+                if mode_row and mode_row["mode"] == "voice":
+                    system_prompt = llm.VOICE_SYSTEM_PROMPT
                 # prompt_assemble_latency_seconds — step 9 (docs/components/
                 # request-pipeline/09-prompt-assembly.md). Only the real path
                 # assembles; the fixture path above returns a scripted response

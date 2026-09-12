@@ -245,6 +245,7 @@ func (c *conn) handleInbound(ctx context.Context, f inboundFrame) {
 			ChannelID:         c.userID,
 			User:              c.userID,
 			DeviceID:          dev,
+			Mode:              f.Mode,
 			Content:           f.Text,
 			PlatformMessageID: f.ClientMsgID,
 			Discriminator:     "channel:" + c.userID,
