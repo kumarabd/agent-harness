@@ -50,15 +50,6 @@ func (h *hub) remove(c *conn) {
 	}
 }
 
-// present reports whether this replica has at least one live connection for
-// the session — a coarse presence signal (a full cross-replica view would
-// need the coordinator's device set; deferred).
-func (h *hub) present(sessionKey string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.byKey[sessionKey]) > 0
-}
-
 func (h *hub) wake(sessionKey string) {
 	h.mu.Lock()
 	conns := make([]*conn, 0, len(h.byKey[sessionKey]))

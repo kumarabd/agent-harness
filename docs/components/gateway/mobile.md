@@ -1,8 +1,9 @@
 # Component: Mobile Gateway
 
 > STATUS: SLICE 1 built (text in/out, streaming, multi-device fan-out, cursor
-> resume, `ask_user`). Deferred: `cancel`/stop, presence via coordinator state,
-> `status` frames tuning, tool-activity frames.
+> resume, `ask_user`). `cancel`/stop and cross-replica presence built
+> 2026-09-12 (neither yet deployed/live-verified). Deferred: `status` frames
+> tuning, tool-activity frames.
 
 ## Role
 
@@ -87,16 +88,47 @@ derived from it, never trusted from the client.
 `internal/gateway/mobile/`: `mobile.go` (Handler, `GET /ws`), `conn.go`
 (per-connection: auth, read pump, tail/catchup), `hub.go` (per-replica LISTEN +
 registry), `frames.go` (wire types), `tail.go` (pure cursor/diff helpers,
-unit-tested in `tail_test.go`). `internal/gateway/clerkauth/` (shared JWT
-verification). Migration `032` (`messages.client_msg_id` + the NOTIFY triggers).
+unit-tested in `tail_test.go`), `presence.go` (cross-replica presence — see
+below). `internal/gateway/clerkauth/` (shared JWT verification). Migration
+`032` (`messages.client_msg_id` + the NOTIFY triggers), `033`
+(`mobile_presence`).
+
+## Cancel / stop
+
+`{"type":"cancel"}` (mobile) / `POST /cancel` (web) → `core.CancelActiveTurn`
+(ownership-checked) → `CancelSignalName`, its own Temporal signal — never a
+`NewMessage` payload, since several turn-loop branches treat "a message
+arrived" as "fold it in and keep reasoning," the opposite of a stop. Ends the
+turn immediately (no further `ModelCall`), `turns.status = "cancelled"` (a
+value mobile/web's `turn_end`/`isTerminal()` already accepted before this was
+built). Full detail: `docs/components/gateway/first-party-plan.md` §7.
+
+## Cross-replica presence
+
+A real table (`mobile_presence`, migration `033`), not a Temporal
+signal/Query on `CoordinatorWorkflow` — the coordinator idles out and exits
+with no active turn while a device stays connected via the NOTIFY tail
+entirely independent of it, which is exactly the state a presence check most
+needs to answer during. Presence is connection-layer, ephemeral,
+non-deterministic state (the same category the NOTIFY mechanism itself is —
+best-effort, self-healing), not durable business state Temporal workflows
+model.
+
+- **Heartbeat rides the existing WS ping** (`conn.go`'s `pingEvery`, 25s) — no
+  new timer. Every read is staleness-filtered
+  (`last_seen_at > now() - interval '90 seconds'`), never trusts row
+  existence alone — a crashed connection (no clean disconnect) ages out on
+  its own, no reaper needed.
+- Connect → upsert; clean disconnect → delete (immediate, but not
+  load-bearing — staleness is the real safety net).
+- `presence.go`'s `Present(ctx, pool, sessionKey)` is the authoritative,
+  cross-replica read. No cross-language RPC — a future consumer (e.g.
+  proactivity's `CheckCondition`, Python) just queries `mobile_presence`
+  directly, same as any other table in this system. Not yet wired to any
+  consumer — the table + write path is built, nothing reads it yet.
 
 ## Deferred
 
-- **`cancel` / stop** — no "cancel turn" primitive exists; needs a coordinator
-  signal or a sentinel follow-up.
-- **Cross-replica presence** — `hub.present()` is replica-local. A full view for
-  proactivity's presence check needs `DeviceConnected/Disconnected` signals into
-  the coordinator + a `devices` Query.
 - **`status` backoff for mobile** — `turn.go`'s `statusPingBackoff` has no
   `"mobile"` case yet, so the watchdog doesn't run for mobile. Decide whether
   the app infers progress from tool activity instead.

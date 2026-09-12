@@ -101,6 +101,18 @@ func (c *conn) serve(ctx context.Context) {
 
 	c.h.hub.add(c)
 	defer c.h.hub.remove(c)
+	presenceUpsert(ctx, c.h.pool, c.sessionKey, c.deviceID)
+	// context.Background(), not ctx: by the time this defer runs, ctx (the
+	// upgrade request's own context) may already be cancelled — a cleanup
+	// write needs its own chance to land regardless. Not load-bearing either
+	// way (a crash skips this defer entirely and the row just ages out via
+	// presenceStaleAfterSeconds), but a clean disconnect should still clean
+	// up promptly when it can.
+	defer func() {
+		dctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		presenceRemove(dctx, c.h.pool, c.sessionKey, c.deviceID)
+	}()
 
 	c.ws.SetPongHandler(func(string) error {
 		_ = c.ws.SetReadDeadline(time.Now().Add(pongWait))
@@ -152,6 +164,10 @@ func (c *conn) serve(ctx context.Context) {
 			if err != nil {
 				return
 			}
+			// Presence heartbeat rides this same tick — no separate timer.
+			// last_seen_at only needs to move roughly as often as the socket
+			// itself proves alive.
+			presenceUpsert(ctx, c.h.pool, c.sessionKey, c.deviceID)
 		}
 	}
 }
