@@ -48,14 +48,21 @@ type MessageEvent struct {
 	// group channel as belonging to whichever user happened to post last.
 	ChannelID string
 	// User is who sent THIS message, within ChannelID — orthogonal to
-	// session scoping. For Web, User and ChannelID are currently the same
-	// Clerk user_id (no group-chat concept there), but kept as a separate
-	// field so a group-chat platform doesn't need this struct to change
-	// shape later. Not yet persisted anywhere past this struct — messages
-	// has no author/platform_user_id column today, only role; a real gap
-	// for group-chat attribution, but nothing exposes it yet since Web has
-	// no group chats.
+	// session scoping. The real human identity (a Clerk sub, a Discord user
+	// id, ...), threaded into messages.speaker_id. For Web and Mobile, User
+	// and ChannelID are currently the same Clerk user_id (no group-chat
+	// concept on either), but kept as a separate field so a group-chat
+	// platform doesn't need this struct to change shape later. (This
+	// comment used to say "not yet persisted" — stale since migration 027
+	// added messages.speaker_id; corrected 2026-09-12 when it was found
+	// mobile had been putting DeviceID's value here instead of the real
+	// human identity, exactly what this field's own doc was warning against.)
 	User string
+	// DeviceID — docs/components/gateway/first-party-plan.md §2. Which
+	// device sent this, threaded into messages.client_device_id —
+	// deliberately NOT part of User/speaker identity. Empty for any
+	// platform without a device concept (Web, Discord).
+	DeviceID string
 	// Content is the message text.
 	Content string
 	// PlatformMessageID is the idempotency/dedup key against
@@ -180,10 +187,11 @@ func (i *Ingestor) Ingest(ctx context.Context, event MessageEvent) (string, erro
 		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
 	}
 	payload := types.SignalPayload{Message: types.Message{
-		Role:        "user",
-		Content:     event.Content,
-		SpeakerID:   event.User,
-		ClientMsgID: event.PlatformMessageID,
+		Role:           "user",
+		Content:        event.Content,
+		SpeakerID:      event.User,
+		ClientMsgID:    event.PlatformMessageID,
+		ClientDeviceID: event.DeviceID,
 	}}
 	if _, err := i.temporal.SignalWithStartWorkflow(
 		ctx, sessionKey, wf.NewMessageSignalName, payload, opts,

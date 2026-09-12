@@ -236,10 +236,15 @@ func (c *conn) handleInbound(ctx context.Context, f inboundFrame) {
 		if dev == "" {
 			dev = c.deviceID
 		}
+		// first-party-plan.md §2: User is the human (the verified Clerk
+		// sub), never the device — that was the bug (User used to carry
+		// dev here, so speaker_id never actually held the human's identity
+		// for a mobile message). DeviceID is separate, optional metadata.
 		_, err := c.h.ingestor.Ingest(ctx, core.MessageEvent{
 			Platform:          "mobile",
 			ChannelID:         c.userID,
-			User:              dev,
+			User:              c.userID,
+			DeviceID:          dev,
 			Content:           f.Text,
 			PlatformMessageID: f.ClientMsgID,
 			Discriminator:     "channel:" + c.userID,
@@ -377,8 +382,8 @@ func (c *conn) catchupPage(ctx context.Context) (n int, hitRunning bool) {
 
 func (c *conn) emitMessages(ctx context.Context, turnSeq int, turnID string) {
 	rows, err := c.h.pool.Query(ctx,
-		"SELECT seq, role, COALESCE(content,''), COALESCE(speaker_id,''), COALESCE(client_msg_id,'') "+
-			"FROM messages WHERE parent_id = $1 AND seq > $2 ORDER BY seq",
+		"SELECT seq, role, COALESCE(content,''), COALESCE(speaker_id,''), COALESCE(client_msg_id,''), "+
+			"COALESCE(client_device_id,'') FROM messages WHERE parent_id = $1 AND seq > $2 ORDER BY seq",
 		turnID, c.sentMsgSeq,
 	)
 	if err != nil {
@@ -387,13 +392,13 @@ func (c *conn) emitMessages(ctx context.Context, turnSeq int, turnID string) {
 	defer rows.Close()
 	for rows.Next() {
 		var seq int
-		var role, content, speaker, cmid string
-		if rows.Scan(&seq, &role, &content, &speaker, &cmid) != nil {
+		var role, content, speaker, cmid, devID string
+		if rows.Scan(&seq, &role, &content, &speaker, &cmid, &devID) != nil {
 			return
 		}
 		c.send(messageFrame{
 			Type: "message", TurnSeq: turnSeq, Seq: seq, Role: role,
-			Content: content, SpeakerID: speaker, ClientMsgID: cmid,
+			Content: content, SpeakerID: speaker, DeviceID: devID, ClientMsgID: cmid,
 		})
 		c.sentMsgSeq = seq
 	}

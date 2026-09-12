@@ -37,6 +37,11 @@ class Message:
     # when the message comes back over the fan-out stream. Empty for anything
     # this process synthesizes.
     client_msg_id: str = ""
+    # docs/components/gateway/first-party-plan.md §2 — which device sent
+    # this (multi-device UI attribution), deliberately separate from
+    # speaker_id: speaker_id is the human (Clerk sub, Discord user id, ...),
+    # this is connection/message metadata about the client, not an identity.
+    client_device_id: str = ""
 
 
 @dataclass

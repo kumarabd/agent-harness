@@ -123,20 +123,36 @@ separate features.
 
 Source inspection identified these differences to address:
 
-- Web lists only web-origin sessions; mobile derives a fixed mobile session
-  rather than selecting from a shared authorized list.
-- Mobile answers look up request IDs without web's session-ownership check.
-  Consolidate this check immediately in shared response handling.
-- Mobile attributes the human message to a client-supplied device ID, despite
-  speaker IDs already being persisted. Separate device and human attribution.
-- Web history returns only the first user and last assistant message per terminal
-  turn. The shared reader must include the other public messages already stored.
-- Mobile's explicit resume query is unbounded despite its documented replay cap.
-  Specify bounded pagination without silently skipping older history.
-- Mobile ignores write errors and modifies tail state from multiple goroutines.
-  Correct connection-state ownership and verify with the race detector.
-- The current mobile live smoke test exercises upgrade/auth rejection only.
-  Add authenticated, cross-client session/history/answer/reconnect verification.
+- **OPEN** — Web lists only web-origin sessions; mobile derives a fixed mobile
+  session rather than selecting from a shared authorized list. Deferred by
+  the user 2026-09-11 ("no need for now") — `core.ListSessions` is ready
+  whenever this is revisited.
+- **DONE 2026-09-11** (`97333c3`) — Mobile answers looked up request IDs
+  without web's session-ownership check. Consolidated into
+  `core.AnswerUserInput`, shared by both adapters.
+- **DONE 2026-09-12** (migration `034`) — Mobile attributed the human message
+  to a client-supplied device ID instead of the real (Clerk-verified) human
+  identity, so `speaker_id` never actually held the human for a mobile
+  message. New `messages.client_device_id` column holds the device
+  separately; `speaker_id` now uniformly means the human on every platform.
+  `mobile.messageFrame`/`core.HistoryMessage` carry `DeviceID` for "from your
+  iPad" rendering, no longer overloading `SpeakerID` for it.
+- **OPEN** — Web history returns only the first user and last assistant
+  message per terminal turn. `core.ReadHistory` (built, unused) already
+  returns the full list; wiring `web/poll.go` to it is blocked on a
+  coordinated agent-web frontend change (same wire-shape-break reasoning as
+  the session-list item above).
+- **DONE 2026-09-11** (`97333c3`) — Mobile's explicit resume query was
+  unbounded despite its documented replay cap. `catchup()` now paginates
+  (`catchupPageSize`, loops until caught up or hits the running turn).
+- **DONE 2026-09-11** (`97333c3`) — Mobile ignored write errors and modified
+  tail state from multiple goroutines (confirmed via `go test -race`).
+  `resumeCh` serializes all `catchup()`-touching state onto one goroutine;
+  `send()` marks the connection dead on the first write failure.
+- **OPEN** — The mobile live smoke test still exercises upgrade/auth
+  rejection only. No authenticated, cross-client session/history/answer/
+  reconnect test exists — needs a real Clerk token, which can't be minted
+  from this environment (see `mobile.md`).
 
 ## 7. Separate execution-reliability findings
 

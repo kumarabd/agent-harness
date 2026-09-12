@@ -93,11 +93,12 @@ func AuthorizeSession(ctx context.Context, pool *pgxpool.Pool, userID, sessionKe
 // first/last per turn (web's old poll behavior truncated this; mobile's
 // catchup already read it in full — this is that same completeness, shared).
 type HistoryMessage struct {
-	Seq         int
-	Role        string
-	Content     string
-	SpeakerID   string
-	ClientMsgID string
+	Seq            int
+	Role           string
+	Content        string
+	SpeakerID      string
+	ClientMsgID    string
+	ClientDeviceID string
 }
 
 // HistoryTurn is one turn plus its full message list.
@@ -150,8 +151,8 @@ func ReadHistory(ctx context.Context, pool *pgxpool.Pool, sessionKey string, aft
 
 	for i := range turns {
 		msgRows, err := pool.Query(ctx,
-			"SELECT seq, role, COALESCE(content,''), COALESCE(speaker_id,''), COALESCE(client_msg_id,'') "+
-				"FROM messages WHERE parent_id = $1 ORDER BY seq",
+			"SELECT seq, role, COALESCE(content,''), COALESCE(speaker_id,''), COALESCE(client_msg_id,''), "+
+				"COALESCE(client_device_id,'') FROM messages WHERE parent_id = $1 ORDER BY seq",
 			turns[i].TurnID,
 		)
 		if err != nil {
@@ -159,7 +160,7 @@ func ReadHistory(ctx context.Context, pool *pgxpool.Pool, sessionKey string, aft
 		}
 		for msgRows.Next() {
 			var m HistoryMessage
-			if err := msgRows.Scan(&m.Seq, &m.Role, &m.Content, &m.SpeakerID, &m.ClientMsgID); err != nil {
+			if err := msgRows.Scan(&m.Seq, &m.Role, &m.Content, &m.SpeakerID, &m.ClientMsgID, &m.ClientDeviceID); err != nil {
 				msgRows.Close()
 				return nil, err
 			}

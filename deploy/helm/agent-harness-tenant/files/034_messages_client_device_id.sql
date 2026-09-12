@@ -1,0 +1,12 @@
+-- docs/components/gateway/first-party-plan.md §2 — "Human speaker identity
+-- comes from authentication. Device ID and web/mobile origin are
+-- connection/message metadata, separate from the human and session
+-- identities." messages.speaker_id was being used for both: mobile's
+-- MessageEvent.User carried the device id, not the verified Clerk sub, so
+-- speaker_id never actually held the human's identity for mobile messages.
+--
+-- client_device_id is the correction: a separate, optional column for
+-- "which device sent this" (multi-device UI attribution — "from your
+-- iPad"), independent of speaker_id, which now uniformly holds the real
+-- human identity across every platform.
+ALTER TABLE messages ADD COLUMN client_device_id text;

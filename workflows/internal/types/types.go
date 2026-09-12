@@ -43,6 +43,13 @@ type Message struct {
 	// optimistic echo can dedupe when the message fans back out over the
 	// stream. Empty for anything this process synthesizes.
 	ClientMsgID string `json:"client_msg_id,omitempty"`
+	// ClientDeviceID — docs/components/gateway/first-party-plan.md §2.
+	// Which device sent this (multi-device UI attribution — "from your
+	// iPad"), deliberately separate from SpeakerID: SpeakerID is the human
+	// (Clerk sub, Discord user id, ...), this is connection/message
+	// metadata about the client, not an identity. Empty for any
+	// non-mobile-originated message.
+	ClientDeviceID string `json:"client_device_id,omitempty"`
 }
 
 // TurnInput starts a Turn Workflow — top-level or, recursively, a subagent.

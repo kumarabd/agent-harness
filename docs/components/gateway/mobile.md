@@ -34,7 +34,13 @@ re-reasons). Same as two people in a Discord channel.
 Echo: a device shows its own message optimistically, then receives it back over
 the fan-out. `messages.client_msg_id` (stamped by the sender, threaded through
 the signal payload) is echoed in the `message` frame so the sender dedupes;
-`speaker_id` (the device id) lets other devices render "from another device".
+`messages.client_device_id` (migration `034`) lets other devices render "from
+another device". **Corrected 2026-09-12**: this used to be `speaker_id`
+holding the device id — wrong, since `speaker_id` is supposed to be the human
+(the same across every one of a user's devices), per
+`first-party-plan.md` §2. `speaker_id` now always carries the verified Clerk
+sub; device attribution is its own column and its own `DeviceID` field on the
+wire (`messageFrame`), never conflated with identity again.
 
 ## The cursor is client-owned
 

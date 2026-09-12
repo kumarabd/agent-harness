@@ -18,12 +18,15 @@ type turnStartFrame struct {
 }
 
 type messageFrame struct {
-	Type        string `json:"type"` // "message"
-	TurnSeq     int    `json:"turn_seq"`
-	Seq         int    `json:"seq"` // ordering within the turn
-	Role        string `json:"role"`
-	Content     string `json:"content"`
-	SpeakerID   string `json:"speaker_id,omitempty"`
+	Type      string `json:"type"` // "message"
+	TurnSeq   int    `json:"turn_seq"`
+	Seq       int    `json:"seq"` // ordering within the turn
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	SpeakerID string `json:"speaker_id,omitempty"` // the human (Clerk sub) — same across every one of this user's devices
+	// DeviceID — first-party-plan.md §2. Which device sent this; use this
+	// (not SpeakerID) for "sent from your iPad" multi-device rendering.
+	DeviceID    string `json:"device_id,omitempty"`
 	ClientMsgID string `json:"client_msg_id,omitempty"` // echoes the sender's id for optimistic-echo dedupe
 }
 
