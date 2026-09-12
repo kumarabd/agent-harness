@@ -35,13 +35,12 @@ type deltaFrame struct {
 	TurnSeq int    `json:"turn_seq"`
 	Seq     int    `json:"seq"`
 	Text    string `json:"text"`
-	Replace bool   `json:"replace,omitempty"` // true ⇒ reset the streamed buffer to Text (resume snapshot / provider backtrack)
-}
-
-type statusFrame struct {
-	Type    string `json:"type"` // "status" — a transient progress ping, not a chat message
-	TurnSeq int    `json:"turn_seq"`
-	Text    string `json:"text"`
+	// Replace — true ⇒ reset the streamed buffer to Text. Fires on a resume
+	// snapshot, a provider backtrack, OR (conn.go's emitStatus) a progress
+	// ping superseding real content or vice versa: status pings share this
+	// same cumulative-buffer state, so they're just more delta traffic, not
+	// a distinct frame type — "a response without a request."
+	Replace bool `json:"replace,omitempty"`
 }
 
 type turnEndFrame struct {

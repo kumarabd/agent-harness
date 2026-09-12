@@ -426,6 +426,17 @@ func (c *conn) emitDeltas(ctx context.Context, turnSeq int, turnID string) {
 	}
 }
 
+// emitStatus — a status ping delivered as a `delta`, not its own frame type.
+// Treated as "a response without a request": it shares c.lastCum with
+// emitDeltas, so when real streamed content eventually arrives it won't
+// extend a status line's text, and deltaFor naturally emits replace:true —
+// the exact mechanism already built for reconnect snapshots/provider
+// backtracks, reused here for free. The client needs no separate status
+// handling at all: it's speaking/rendering "Still working on this…" as one
+// utterance, then the real answer as the next, through the one delta path.
+// turn_status_pings/StatusPing themselves are unchanged and still shared
+// with Discord's own (structurally different — post a channel message)
+// delivery.
 func (c *conn) emitStatus(ctx context.Context, turnSeq int, turnID string) {
 	rows, err := c.h.pool.Query(ctx,
 		"SELECT seq, content FROM turn_status_pings WHERE turn_id = $1 AND seq > $2 ORDER BY seq",
@@ -441,7 +452,9 @@ func (c *conn) emitStatus(ctx context.Context, turnSeq int, turnID string) {
 		if rows.Scan(&seq, &text) != nil {
 			return
 		}
-		c.send(statusFrame{Type: "status", TurnSeq: turnSeq, Text: text})
+		dtext, replace := deltaFor(c.lastCum, text)
+		c.send(deltaFrame{Type: "delta", TurnSeq: turnSeq, Seq: seq, Text: dtext, Replace: replace})
+		c.lastCum = text
 		c.sentStSeq = seq
 	}
 }

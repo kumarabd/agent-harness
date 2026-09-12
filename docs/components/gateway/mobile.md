@@ -80,9 +80,10 @@ required), `{type:"message", client_msg_id, text, device_id?}`,
 `{type:"answer", request_id, selected_option_id|free_text}`,
 `{type:"resume", after_turn_seq}`.
 
-Server → client: `turn_start`, `message`, `delta` (`replace?`), `status`,
-`ask_user`, `turn_end` (`status`), `resumed`, `error`. Keepalive is WS
-ping/pong (25s).
+Server → client: `turn_start`, `message`, `delta` (`replace?`), `ask_user`,
+`turn_end` (`status`), `resumed`, `error`. Keepalive is WS ping/pong (25s).
+No separate `status` frame — a progress ping arrives as a `delta` (see
+"Status pings" below).
 
 ## Auth
 
@@ -171,11 +172,22 @@ concern.
 per-connection embedded worker queue) — the wrong coupling for mobile, which
 never needed a dispatch step at all: migration 032/033's
 `mobile_notify_status_pings` NOTIFY trigger already fires the moment
-`StatusPing` writes a row, and `emitStatus()` (already built) already reads
-it. So mobile only needed `statusPingBackoff("mobile")` to return real steps
-and the write to stop being gated on a dispatch mechanism it doesn't use —
-both fixed; no Python change needed (`status_ping.py` was already
-platform-neutral).
+`StatusPing` writes a row. So mobile only needed `statusPingBackoff("mobile")`
+to return real steps and the write to stop being gated on a dispatch
+mechanism it doesn't use — both fixed; no Python change needed
+(`status_ping.py` was already platform-neutral).
+
+**Delivered as a `delta`, not a separate `status` frame** (same day,
+following user direction — "treat this as a response without a request").
+`emitStatus()` shares `c.lastCum` with `emitDeltas()`: a status line is just
+more delta traffic through the identical cumulative-buffer/replace-on-mismatch
+mechanism (`deltaFor`) already built for reconnect snapshots and provider
+backtracks. When real streamed content eventually arrives, it won't extend
+the status text, so it naturally supersedes it via `replace:true` — the
+client needs zero new handling, and for voice, "Still working on this…" is
+simply spoken as one utterance, the real answer as the next. `turn_status_pings`/
+`StatusPing` themselves are unchanged, still shared with Discord's own
+(structurally different) delivery. The `statusFrame` wire type is gone.
 
 ## Deferred
 
