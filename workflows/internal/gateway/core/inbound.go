@@ -194,3 +194,25 @@ func (i *Ingestor) Ingest(ctx context.Context, event MessageEvent) (string, erro
 
 	return "accepted", nil
 }
+
+// KeepAlive — docs/components/gateway/first-party-plan.md's cross-replica
+// presence, KeepAliveSignalName's own doc comment has the full reasoning.
+// SignalWithStart, not a plain signal: a device connecting to a session
+// whose coordinator has already idled out should still be able to hold it
+// open (the harness restarting cheaply on demand is the intended behavior,
+// not something to avoid). Deliberately minimal CoordinatorInput — no
+// ParentSessionKey (only meaningful at true genesis, which a keepalive never
+// is) and no ConnectionID (that's a Discord/connection-based-delivery
+// concept this signal has nothing to do with).
+func (i *Ingestor) KeepAlive(ctx context.Context, sessionKey string) error {
+	opts := client.StartWorkflowOptions{
+		ID:                    sessionKey,
+		TaskQueue:             i.taskQueue,
+		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+	}
+	_, err := i.temporal.SignalWithStartWorkflow(
+		ctx, sessionKey, wf.KeepAliveSignalName, nil, opts,
+		wf.CoordinatorWorkflow, wf.CoordinatorInput{SessionKey: sessionKey},
+	)
+	return err
+}

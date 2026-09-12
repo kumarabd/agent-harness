@@ -31,6 +31,20 @@ const NewMessageSignalName = "NewMessage"
 // exactly like NewMessage forwarding (coordinator.go).
 const CancelSignalName = "Cancel"
 
+// KeepAliveSignalName — docs/components/gateway/first-party-plan.md's
+// cross-replica presence discussion. Deliberately harness-agnostic: the
+// coordinator has no concept of a "device" or a "connection", only that
+// something wants this session's idle timer held off a while longer. No
+// payload, no tracking of who or why — a gateway sends this on its own
+// schedule for as long as it has a live connection watching the session, and
+// simply stops when that connection ends; there is no corresponding
+// "disconnect" signal. Absence of KeepAlive for one idleTTL window IS
+// "nobody needs this anymore," symmetric with how turn-activity idle-exit
+// already works — a crashed gateway pod just stops sending it, no explicit
+// cleanup required. Coordinator-only: never forwarded into the active Turn
+// Workflow (unlike NewMessage/Cancel/Wake) — it has nothing to act on.
+const KeepAliveSignalName = "KeepAlive"
+
 // WakeSignalName — docs/components/proactivity.md, "The fire path". A fired
 // IntentionWorkflow's FireIntention activity sends this to the session
 // CoordinatorWorkflow (payload: types.WakePayload). The coordinator handles it

@@ -12,6 +12,7 @@ import (
 
 	"agent-harness/workflows/internal/gateway/core"
 	"agent-harness/workflows/internal/types"
+	wf "agent-harness/workflows/internal/workflow"
 )
 
 const (
@@ -23,6 +24,17 @@ const (
 	// the old explicit-resume path replayed everything after the cursor in
 	// one unbounded query. catchup() now loops pages until it either hits
 	// the running turn (the tail) or a short page (caught up).
+
+	// keepAliveEvery — derived from wf.IdleTTL (not a separate hardcoded
+	// number that has to be remembered to move in lockstep with it): a
+	// KeepAlive needs to land comfortably before the coordinator's own idle
+	// timer would otherwise fire. /3 gives real margin for one missed or
+	// delayed signal without the coordinator exiting while this connection
+	// is still live. Deliberately its own timer, not the WS ping's 25s
+	// cadence — that interval is tuned for connection health, this one for
+	// however long IdleTTL happens to be (5-15min in the real design; a
+	// separate concern that shouldn't force this one's tuning along with it).
+	keepAliveEvery = wf.IdleTTL / 3
 )
 
 // conn is one WebSocket connection = one device.
@@ -102,6 +114,15 @@ func (c *conn) serve(ctx context.Context) {
 	c.h.hub.add(c)
 	defer c.h.hub.remove(c)
 	presenceUpsert(ctx, c.h.pool, c.sessionKey, c.deviceID)
+	// docs/components/gateway/first-party-plan.md's cross-replica presence —
+	// KeepAliveSignalName's own doc comment. Harness-agnostic on purpose: the
+	// coordinator has no idea this is a WebSocket, only that something wants
+	// its idle timer held off. Sent once now (this connection may be the
+	// thing that wakes an already-idled-out coordinator back up — intended,
+	// not a cost to avoid) and again every keepAliveEvery for as long as the
+	// connection lives (the ticker below); stops the moment this function
+	// returns, with no corresponding "disconnect" signal needed at all.
+	_ = c.h.ingestor.KeepAlive(ctx, c.sessionKey)
 	// context.Background(), not ctx: by the time this defer runs, ctx (the
 	// upgrade request's own context) may already be cancelled — a cleanup
 	// write needs its own chance to land regardless. Not load-bearing either
@@ -139,6 +160,8 @@ func (c *conn) serve(ctx context.Context) {
 
 	ping := time.NewTicker(pingEvery)
 	defer ping.Stop()
+	keepAlive := time.NewTicker(keepAliveEvery)
+	defer keepAlive.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -168,6 +191,12 @@ func (c *conn) serve(ctx context.Context) {
 			// last_seen_at only needs to move roughly as often as the socket
 			// itself proves alive.
 			presenceUpsert(ctx, c.h.pool, c.sessionKey, c.deviceID)
+		case <-keepAlive.C:
+			// Its own, coarser timer — sized against wf.IdleTTL, not the WS
+			// ping's connection-health cadence. Best-effort like everything
+			// else here: a missed one just means the next tick catches up,
+			// same self-healing posture as presenceUpsert.
+			_ = c.h.ingestor.KeepAlive(ctx, c.sessionKey)
 		}
 	}
 }

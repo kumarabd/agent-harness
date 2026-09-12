@@ -1,9 +1,10 @@
 # Component: Mobile Gateway
 
 > STATUS: SLICE 1 built (text in/out, streaming, multi-device fan-out, cursor
-> resume, `ask_user`). `cancel`/stop and cross-replica presence built
-> 2026-09-12 (neither yet deployed/live-verified). Deferred: `status` frames
-> tuning, tool-activity frames.
+> resume, `ask_user`). `cancel`/stop, cross-replica presence, and `KeepAlive`
+> (coordinator lifetime tied to connection liveness) built 2026-09-12 (none
+> yet deployed/live-verified). Deferred: `status` frames tuning,
+> tool-activity frames.
 
 ## Role
 
@@ -86,12 +87,16 @@ derived from it, never trusted from the client.
 ## Files
 
 `internal/gateway/mobile/`: `mobile.go` (Handler, `GET /ws`), `conn.go`
-(per-connection: auth, read pump, tail/catchup), `hub.go` (per-replica LISTEN +
-registry), `frames.go` (wire types), `tail.go` (pure cursor/diff helpers,
-unit-tested in `tail_test.go`), `presence.go` (cross-replica presence — see
-below). `internal/gateway/clerkauth/` (shared JWT verification). Migration
-`032` (`messages.client_msg_id` + the NOTIFY triggers), `033`
-(`mobile_presence`).
+(per-connection: auth, read pump, tail/catchup, presence + `KeepAlive`
+tickers), `hub.go` (per-replica LISTEN + registry), `frames.go` (wire types),
+`tail.go` (pure cursor/diff helpers, unit-tested in `tail_test.go`),
+`presence.go` (cross-replica presence table — see below).
+`internal/gateway/core/`: `access.go` (`CancelActiveTurn`, ownership checks),
+`inbound.go`'s `Ingestor.KeepAlive`. `internal/gateway/clerkauth/` (shared JWT
+verification). Migration `032` (`messages.client_msg_id` + the NOTIFY
+triggers), `033` (`mobile_presence`). `internal/workflow/{coordinator,turn}.go`
+carry `CancelSignalName` and `KeepAliveSignalName` — see each's own doc
+comment.
 
 ## Cancel / stop
 
@@ -126,6 +131,30 @@ model.
   proactivity's `CheckCondition`, Python) just queries `mobile_presence`
   directly, same as any other table in this system. Not yet wired to any
   consumer — the table + write path is built, nothing reads it yet.
+
+### `KeepAlive` — a related but distinct mechanism
+
+The table answers "is a device connected." A separate question — "should the
+session's `CoordinatorWorkflow` itself stay alive" — is answered by
+`KeepAliveSignalName` (`turn.go`'s own doc comment has the full reasoning),
+sent by `conn.go` via `core.Ingestor.KeepAlive` (`SignalWithStart`, so it can
+wake an already-idled-out coordinator) every `keepAliveEvery` — derived as
+`wf.IdleTTL / 3`, not a separately-tuned constant — for as long as the
+connection lives. Deliberately harness-agnostic: the coordinator has no
+concept of a "device" or "connection," only that something wants its idle
+timer held off; there is no corresponding disconnect signal; absence of
+`KeepAlive` for one `IdleTTL` window is what "nobody needs this anymore"
+means, symmetric with how turn-activity idle-exit already worked. One real,
+deliberate behavior change: `WriteMemoryWorkflow` (session-completion memory
+consolidation) now waits for "no turn *and* no keepalive," not just
+conversational idleness — the app actually closing, not just going quiet.
+
+These two mechanisms are NOT redundant: workflow-liveness alone would be a
+wrong presence proxy (`CoordinatorWorkflow` also stays alive for active-turn
+reasons that have nothing to do with any connection — the device could have
+disconnected mid-turn), so `mobile_presence` remains the precise source of
+truth for "is anyone there," while `KeepAlive` is purely a lifecycle/scheduling
+concern.
 
 ## Deferred
 

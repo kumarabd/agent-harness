@@ -9,11 +9,14 @@ import (
 	"agent-harness/workflows/internal/types"
 )
 
-// idleTTL is deliberately short in this local-dev slice so the coordinator's
+// IdleTTL is deliberately short in this local-dev slice so the coordinator's
 // self-termination behavior is easy to observe without a long wait. The real
 // design's resolved default is 5-15 minutes (components/session-coordinator.md);
-// 30s here is a dev-loop convenience, not a design change.
-const idleTTL = 30 * time.Second
+// 30s here is a dev-loop convenience, not a design change. Exported so a
+// gateway's own KeepAlive cadence (mobile/conn.go) can be derived as a
+// fraction of it rather than hardcoding a second, possibly-stale constant
+// that has to be remembered to move in lockstep with this one.
+const IdleTTL = 30 * time.Second
 
 // CoordinatorInput starts (or is ignored by, if the workflow already exists —
 // SignalWithStart handles that) a Session Coordinator.
@@ -102,6 +105,13 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 	cancelChan := workflow.GetSignalChannel(ctx, CancelSignalName)
 	haveCancel := false
 
+	// docs/components/gateway/first-party-plan.md's cross-replica presence —
+	// KeepAliveSignalName's own doc comment has the full reasoning. Widens
+	// the idle-exit condition below; needs no forwarding, no payload, no
+	// tracking of who sent it.
+	keepAliveChan := workflow.GetSignalChannel(ctx, KeepAliveSignalName)
+	haveKeepAlive := false
+
 	for {
 		// Were we actually idle-waiting on entry to this iteration? Only then
 		// can the idle timer be what wakes us — a turn completing (which also
@@ -111,7 +121,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 		// real post-turn grace window (idleTTL).
 		wasIdle := !workActive
 		idleTimerCtx, cancelIdleTimer := workflow.WithCancel(ctx)
-		idleTimer := workflow.NewTimer(idleTimerCtx, idleTTL)
+		idleTimer := workflow.NewTimer(idleTimerCtx, IdleTTL)
 
 		sel := workflow.NewSelector(ctx)
 		sel.AddReceive(signalChan, func(c workflow.ReceiveChannel, more bool) {
@@ -130,6 +140,11 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			var ignored struct{}
 			c.Receive(ctx, &ignored)
 			haveCancel = true
+		})
+		sel.AddReceive(keepAliveChan, func(c workflow.ReceiveChannel, more bool) {
+			var ignored struct{}
+			c.Receive(ctx, &ignored)
+			haveKeepAlive = true
 		})
 		if workActive {
 			sel.AddFuture(workHandle, func(f workflow.Future) {
@@ -174,10 +189,15 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 		sel.Select(ctx)
 		cancelIdleTimer()
 
-		if wasIdle && !workActive && !haveSignal && !haveWake && !haveCancel {
+		if wasIdle && !workActive && !haveSignal && !haveWake && !haveCancel && !haveKeepAlive {
 			// The idle timer fired while we were genuinely idle (no turn just
-			// completed into this branch) — self-terminate per the resolved TTL
-			// design (components/session-coordinator.md). A fresh
+			// completed into this branch, and nothing has sent a KeepAlive
+			// recently either — first-party-plan.md's cross-replica
+			// presence: as long as some gateway connection keeps one
+			// arriving, this branch never fires, so WriteMemoryWorkflow
+			// below waits for "nobody needs this any more," not just "the
+			// conversation went quiet") — self-terminate per the resolved
+			// TTL design (components/session-coordinator.md). A fresh
 			// SignalWithStart recreates this workflow on demand. A turn
 			// finishing instead falls through to the `!haveSignal` continue
 			// below, which loops back and arms a fresh idle timer — so there IS
@@ -204,7 +224,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			return nil
 		}
 
-		if !haveSignal && !haveWake && !haveCancel {
+		if !haveSignal && !haveWake && !haveCancel && !haveKeepAlive {
 			// Turn completion path looped back around with nothing new yet;
 			// go wait again.
 			continue
@@ -255,31 +275,43 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			continue
 		}
 
-		// docs/components/proactivity.md — a fired intention.
-		wake := *pendingWake
-		pendingWake = nil
-		haveWake = false
+		if haveWake {
+			// docs/components/proactivity.md — a fired intention.
+			wake := *pendingWake
+			pendingWake = nil
+			haveWake = false
 
-		if workActive {
-			// Fold the objective into the live turn as an ordinary follow-up;
-			// that turn's model decides whether/where to surface it — it has the
-			// live conversation, this workflow does not.
-			fold := types.SignalPayload{Message: types.Message{Role: "user", Content: proactiveFoldText(wake)}}
-			if err := workflow.SignalExternalWorkflow(ctx, workID, "", NewMessageSignalName, fold).Get(ctx, nil); err != nil {
-				logger.Error("failed to fold wake into active turn", "turn_id", workID, "intention_id", wake.IntentionID, "error", err)
+			if workActive {
+				// Fold the objective into the live turn as an ordinary follow-up;
+				// that turn's model decides whether/where to surface it — it has the
+				// live conversation, this workflow does not.
+				fold := types.SignalPayload{Message: types.Message{Role: "user", Content: proactiveFoldText(wake)}}
+				if err := workflow.SignalExternalWorkflow(ctx, workID, "", NewMessageSignalName, fold).Get(ctx, nil); err != nil {
+					logger.Error("failed to fold wake into active turn", "turn_id", workID, "intention_id", wake.IntentionID, "error", err)
+				}
+				continue
 			}
+
+			turnSeq++
+			h, id, err := startTurn(ctx, input.SessionKey, input.ConnectionID, turnSeq,
+				types.Message{Role: "user", Content: proactiveSeedText(wake)}, "intn:"+wake.IntentionID)
+			if err != nil {
+				logger.Error("startTurn (proactive) failed", "intention_id", wake.IntentionID, "error", err)
+				continue
+			}
+			workHandle, workID = h, id
+			workActive = true
 			continue
 		}
 
-		turnSeq++
-		h, id, err := startTurn(ctx, input.SessionKey, input.ConnectionID, turnSeq,
-			types.Message{Role: "user", Content: proactiveSeedText(wake)}, "intn:"+wake.IntentionID)
-		if err != nil {
-			logger.Error("startTurn (proactive) failed", "intention_id", wake.IntentionID, "error", err)
-			continue
-		}
-		workHandle, workID = h, id
-		workActive = true
+		// The only remaining possibility per the continue-guard above —
+		// nothing to do beyond having looped: the idle timer was already
+		// cancelled on entry and gets re-armed fresh next iteration, which
+		// is the whole mechanism (idle-exit becomes N seconds from the LAST
+		// KeepAlive, not from session start). Lowest priority of the four
+		// signal kinds on purpose — it never delays a real cancel, message,
+		// or wake even by one iteration.
+		haveKeepAlive = false
 	}
 }
 
