@@ -216,6 +216,20 @@ message that triggered a turn, not be fixed once.
 - Known, accepted cost: switching mode mid-session is a full system-prompt
   swap, so it breaks prompt-cache prefix reuse for that call. Unavoidable if
   the styles are meant to genuinely differ — not something to hide.
+- **Live-verified 2026-09-12, and one real gap found + fixed the same day**:
+  the mechanism fired correctly (`messages.mode='voice'` written and read
+  exactly as designed, confirmed by directly querying a real 26-turn mobile
+  conversation), and a real-model test showed clean style compliance
+  ("0.4 percent", "three forty-five"). But that same real conversation kept
+  answering "I'm text-based" when asked directly whether it could speak —
+  the prompt *described* a voice persona but never gave an explicit
+  instruction for how to answer that specific meta-question, and the
+  model's trained "I'm a text-based AI" default won out over framing alone.
+  Added a direct rule: told to say yes, it's speaking right now, in real
+  time, and never claim to be text-based, whenever asked. Occasional
+  markdown slip-through was also observed in the same conversation — likely
+  a fast-tier model reliability question, not a prompt gap; not chased
+  further yet.
 
 ## Deferred
 
