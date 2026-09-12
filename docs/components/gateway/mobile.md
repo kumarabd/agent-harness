@@ -1,10 +1,11 @@
 # Component: Mobile Gateway
 
 > STATUS: SLICE 1 built (text in/out, streaming, multi-device fan-out, cursor
-> resume, `ask_user`). `cancel`/stop, cross-replica presence, and `KeepAlive`
-> (coordinator lifetime tied to connection liveness) built 2026-09-12 (none
-> yet deployed/live-verified). Deferred: `status` frames tuning,
-> tool-activity frames.
+> resume, `ask_user`). `cancel`/stop, cross-replica presence, `KeepAlive`
+> (coordinator lifetime tied to connection liveness), and device_id/speaker_id
+> separation — BUILT + DEPLOYED + LIVE-VERIFIED 2026-09-12. Status pings
+> fixed same day (NOT yet deployed/verified). Deferred: tool-activity frames,
+> wiring a `Present()` consumer, session list/select.
 
 ## Role
 
@@ -162,10 +163,21 @@ disconnected mid-turn), so `mobile_presence` remains the precise source of
 truth for "is anyone there," while `KeepAlive` is purely a lifecycle/scheduling
 concern.
 
+## Status pings — DONE 2026-09-12
+
+`turn.go`'s `runProgressWatchdog`/`deliverWedgedFallback` used to gate
+*writing* a status line on having an explicit push-to-one-connection
+*dispatch* activity (Discord's `DiscordDeliverStatus`, routed through a
+per-connection embedded worker queue) — the wrong coupling for mobile, which
+never needed a dispatch step at all: migration 032/033's
+`mobile_notify_status_pings` NOTIFY trigger already fires the moment
+`StatusPing` writes a row, and `emitStatus()` (already built) already reads
+it. So mobile only needed `statusPingBackoff("mobile")` to return real steps
+and the write to stop being gated on a dispatch mechanism it doesn't use —
+both fixed; no Python change needed (`status_ping.py` was already
+platform-neutral).
+
 ## Deferred
 
-- **`status` backoff for mobile** — `turn.go`'s `statusPingBackoff` has no
-  `"mobile"` case yet, so the watchdog doesn't run for mobile. Decide whether
-  the app infers progress from tool activity instead.
 - **Tool-activity frames** — the app currently sees only messages + deltas +
   status, not "running search…".

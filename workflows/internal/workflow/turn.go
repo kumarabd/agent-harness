@@ -471,7 +471,7 @@ func deliveryTaskQueue(sessionKey, connectionID string) (queue string, timeout t
 // adjust with real latency data.
 func statusPingBackoff(platform string) []time.Duration {
 	switch platform {
-	case "discord":
+	case "discord", "mobile":
 		return []time.Duration{20 * time.Second, 45 * time.Second, 90 * time.Second}
 	default:
 		return nil
@@ -501,11 +501,19 @@ func statusDeliverActivity(platform string) (activityName string, ok bool) {
 func runProgressWatchdog(ctx workflow.Context, turnID, sessionKey, connectionID string, progress *int, done *bool) {
 	platform := platformFromSessionKey(sessionKey)
 	steps := statusPingBackoff(platform)
-	deliverName, deliverOK := statusDeliverActivity(platform)
-	queue, _, queueOK := deliveryTaskQueue(sessionKey, connectionID)
-	if len(steps) == 0 || !deliverOK || !queueOK {
+	if len(steps) == 0 {
 		return
 	}
+	// deliverOK/queueOK gate an EXPLICIT push-to-one-connection dispatch —
+	// Discord's answer to having no live connection to tail. Mobile has one
+	// (migration 032/033's NOTIFY triggers): the StatusPing write below is
+	// self-delivering there — every connected replica gets NOTIFY'd the
+	// moment the row lands, no dispatch activity needed or wanted. So this
+	// only decides whether to ALSO dispatch after writing, never whether to
+	// write at all.
+	deliverName, deliverOK := statusDeliverActivity(platform)
+	queue, _, queueOK := deliveryTaskQueue(sessionKey, connectionID)
+	dispatch := deliverOK && queueOK
 	logger := workflow.GetLogger(ctx)
 
 	stepIdx := 0
@@ -529,7 +537,9 @@ func runProgressWatchdog(ctx workflow.Context, turnID, sessionKey, connectionID 
 		pctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
 		if err := workflow.ExecuteActivity(pctx, "StatusPing", turnID, "").Get(pctx, &line); err != nil {
 			logger.Warn("progress watchdog: StatusPing failed", "turn_id", turnID, "error", err)
-		} else if line != "" {
+		} else if line != "" && dispatch {
+			// Self-delivering platforms (mobile) stop here — the write above
+			// already reached every connected device via NOTIFY.
 			dctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 				StartToCloseTimeout: activityTimeoutTierA,
 				TaskQueue:           queue,
@@ -547,21 +557,23 @@ func runProgressWatchdog(ctx workflow.Context, turnID, sessionKey, connectionID 
 // deliverWedgedFallback is the coordinator's path (coordinator.go holds the
 // TurnWorkflow child future) for the one case turn.go's own failTurn can't
 // cover: the workflow was killed outright by its WorkflowRunTimeout, so no
-// in-workflow code ran to tell the user. Writes a 'wedged' status ping and
-// pushes it, entirely best-effort — if the platform has no push channel
-// (Web) or a step fails, it's logged and dropped, same as every other
-// bookkeeping call in the coordinator.
+// in-workflow code ran to tell the user. Writes a 'wedged' status ping —
+// self-delivering on mobile via NOTIFY, no explicit push needed there (see
+// runProgressWatchdog's own doc comment) — and, for platforms that need an
+// explicit dispatch (Discord), pushes it too. Entirely best-effort — if the
+// platform has no push channel at all (Web) or a step fails, it's logged and
+// dropped, same as every other bookkeeping call in the coordinator.
 func deliverWedgedFallback(ctx workflow.Context, sessionKey, connectionID, turnID string) {
 	platform := platformFromSessionKey(sessionKey)
-	deliverName, deliverOK := statusDeliverActivity(platform)
-	queue, _, queueOK := deliveryTaskQueue(sessionKey, connectionID)
-	if !deliverOK || !queueOK {
-		return
-	}
 	logger := workflow.GetLogger(ctx)
 	pctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
 	if err := workflow.ExecuteActivity(pctx, "StatusPing", turnID, "wedged").Get(pctx, nil); err != nil {
 		logger.Warn("wedged fallback: StatusPing failed", "turn_id", turnID, "error", err)
+		return
+	}
+	deliverName, deliverOK := statusDeliverActivity(platform)
+	queue, _, queueOK := deliveryTaskQueue(sessionKey, connectionID)
+	if !deliverOK || !queueOK {
 		return
 	}
 	dctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
