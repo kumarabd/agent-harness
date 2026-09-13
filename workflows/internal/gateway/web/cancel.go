@@ -26,7 +26,7 @@ func (h *Handler) handleCancel(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req) // an empty body means "cancel my main session" — same default as /send's own empty session_id
 
 	userID := userIDFromContext(r.Context())
-	sessionKey := core.SessionKeyFor("web", userID, webDiscriminator(userID, req.SessionID))
+	sessionKey := core.SessionKeyFor(h.platform, userID, sessionDiscriminator(userID, req.SessionID))
 
 	if err := core.CancelActiveTurn(r.Context(), h.pool, h.temporal, userID, sessionKey); err != nil {
 		if errors.Is(err, core.ErrNotOwner) {

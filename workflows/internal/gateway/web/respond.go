@@ -39,7 +39,7 @@ func (h *Handler) handleRespond(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := userIDFromContext(r.Context())
-	sessionKey := core.SessionKeyFor("web", userID, webDiscriminator(userID, req.SessionID))
+	sessionKey := core.SessionKeyFor(h.platform, userID, sessionDiscriminator(userID, req.SessionID))
 	ctx := r.Context()
 
 	// core.AnswerUserInput — docs/components/gateway/first-party-plan.md —

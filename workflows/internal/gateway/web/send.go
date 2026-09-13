@@ -41,7 +41,7 @@ func (h *Handler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := userIDFromContext(r.Context())
-	discriminator := webDiscriminator(userID, req.SessionID)
+	discriminator := sessionDiscriminator(userID, req.SessionID)
 	parentSessionKey := ""
 	if discriminator != "channel:"+userID {
 		// A branched session — resolve its parent (defaults to "main" if
@@ -49,10 +49,10 @@ func (h *Handler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// (core.Ingest's own ON CONFLICT DO NOTHING), so computing
 		// this unconditionally on every message for an existing session is
 		// harmless.
-		parentSessionKey = core.SessionKeyFor("web", userID, webDiscriminator(userID, req.ParentSessionID))
+		parentSessionKey = core.SessionKeyFor(h.platform, userID, sessionDiscriminator(userID, req.ParentSessionID))
 	}
 	event := core.MessageEvent{
-		Platform:          "web",
+		Platform:          h.platform,
 		ChannelID:         userID,
 		User:              userID,
 		Content:           req.Content,

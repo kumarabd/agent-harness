@@ -140,6 +140,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	web.New(ctx, ingestor, pool, temporalClient, clerkCfg).Register(mux)
+	web.NewMacOS(ctx, ingestor, pool, temporalClient, clerkCfg).RegisterMacOS(mux)
 	mobile.New(ctx, ingestor, pool, temporalClient, clerkCfg).Register(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 

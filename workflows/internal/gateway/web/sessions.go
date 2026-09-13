@@ -48,9 +48,9 @@ func (h *Handler) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			"  AND m.role IN ('user', 'assistant') AND NULLIF(BTRIM(m.content), '') IS NOT NULL "+
 			"  ORDER BY t.turn_seq DESC, m.seq DESC LIMIT 1"+
 			") latest_message ON true "+
-			"WHERE s.platform = 'web' AND s.channel_id = $1 "+
+			"WHERE s.platform = $2 AND s.channel_id = $1 "+
 			"ORDER BY CASE WHEN s.parent_session_key IS NULL THEN 0 ELSE 1 END, updated_at DESC, s.created_at DESC",
-		userID,
+		userID, h.platform,
 	)
 	if err != nil {
 		http.Error(w, "failed to list sessions", http.StatusInternalServerError)
@@ -71,11 +71,11 @@ func (h *Handler) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		var parentSessionID *string
 		if parentKey != nil {
-			id := webSessionIDFromKey(userID, *parentKey)
+			id := sessionIDFromKey(h.platform, userID, *parentKey)
 			parentSessionID = &id
 		}
 		sessions = append(sessions, sessionSummary{
-			SessionID:       webSessionIDFromKey(userID, sessionKey),
+			SessionID:       sessionIDFromKey(h.platform, userID, sessionKey),
 			ParentSessionID: parentSessionID,
 			CreatedAt:       createdAt.Format(time.RFC3339),
 			UpdatedAt:       updatedAt.Format(time.RFC3339),

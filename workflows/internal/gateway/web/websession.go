@@ -11,7 +11,7 @@ import "strings"
 // Internally still maps to the exact unchanged "channel:{channelID}"
 // discriminator / "agent:main:web:user:{id}" session_key format — nothing
 // about the real, already-verified production session changes.
-const webMainSessionID = "main"
+const mainSessionID = "main"
 
 // webDiscriminator maps an opaque, client-supplied Web session_id (empty or
 // "main" both mean the default) to a MessageEvent.Discriminator. sessionID
@@ -24,8 +24,8 @@ const webMainSessionID = "main"
 // resends it on every later message for that session, same "no server-side
 // lookup needed to resolve it" property Discord's deterministic reply-chain
 // root has, just sourced differently.
-func webDiscriminator(channelID, sessionID string) string {
-	if sessionID == "" || sessionID == webMainSessionID {
+func sessionDiscriminator(channelID, sessionID string) string {
+	if sessionID == "" || sessionID == mainSessionID {
 		return "channel:" + channelID
 	}
 	return "session:" + sessionID
@@ -36,10 +36,10 @@ func webDiscriminator(channelID, sessionID string) string {
 // user back into the opaque session_id the client understands. Only ever
 // called on rows already filtered to this exact user's own channel_id
 // (handleListSessions's own query), so the prefix match is guaranteed.
-func webSessionIDFromKey(channelID, sessionKey string) string {
-	mainKey := "agent:main:web:user:" + channelID
+func sessionIDFromKey(platform, channelID, sessionKey string) string {
+	mainKey := "agent:main:" + platform + ":user:" + channelID
 	if sessionKey == mainKey {
-		return webMainSessionID
+		return mainSessionID
 	}
 	return strings.TrimPrefix(sessionKey, mainKey+":session:")
 }

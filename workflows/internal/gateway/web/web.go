@@ -30,21 +30,33 @@ type Handler struct {
 	temporal client.Client
 	clerk    clerkauth.Config
 	realtime *realtime.Handler
+	platform string
 }
 
 // New wires a Web Handler to its dependencies.
 func New(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config) *Handler {
-	h := &Handler{ingestor: ingestor, pool: pool, temporal: temporal, clerk: clerk}
+	return newHandler(ctx, ingestor, pool, temporal, clerk, "web", webSocketOriginAllowed)
+}
+
+// NewMacOS wires the native desktop adapter. It intentionally uses the same
+// operations and wire protocol as Web while selecting a different platform
+// namespace, so desktop and browser histories remain independent.
+func NewMacOS(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config) *Handler {
+	return newHandler(ctx, ingestor, pool, temporal, clerk, "macos", nativeSocketOriginAllowed)
+}
+
+func newHandler(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config, platform string, checkOrigin func(*http.Request) bool) *Handler {
+	h := &Handler{ingestor: ingestor, pool: pool, temporal: temporal, clerk: clerk, platform: platform}
 	h.realtime = realtime.New(ctx, ingestor, pool, temporal, clerk, realtime.Config{
-		CheckOrigin: webSocketOriginAllowed,
+		CheckOrigin: checkOrigin,
 		ResolveScope: func(userID, sessionID, parentSessionID string) (realtime.Scope, error) {
-			discriminator := webDiscriminator(userID, sessionID)
+			discriminator := sessionDiscriminator(userID, sessionID)
 			parentSessionKey := ""
 			if discriminator != "channel:"+userID {
-				parentSessionKey = core.SessionKeyFor("web", userID, webDiscriminator(userID, parentSessionID))
+				parentSessionKey = core.SessionKeyFor(platform, userID, sessionDiscriminator(userID, parentSessionID))
 			}
 			return realtime.Scope{
-				Platform:         "web",
+				Platform:         platform,
 				Discriminator:    discriminator,
 				ParentSessionKey: parentSessionKey,
 			}, nil
@@ -65,6 +77,21 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	// the upgrader rather than HTTP middleware.
 	mux.HandleFunc("GET /web/ws", h.realtime.HandleWS)
 }
+
+// RegisterMacOS exposes a namespaced native API. Keeping these routes explicit
+// prevents a desktop release from changing the established browser endpoints.
+func (h *Handler) RegisterMacOS(mux *http.ServeMux) {
+	mux.Handle("POST /macos/send", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleSend)))
+	mux.Handle("GET /macos/poll", requireClerkAuth(h.clerk, http.HandlerFunc(h.handlePoll)))
+	mux.Handle("POST /macos/respond", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleRespond)))
+	mux.Handle("POST /macos/cancel", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleCancel)))
+	mux.Handle("GET /macos/sessions", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleListSessions)))
+	mux.HandleFunc("GET /macos/ws", h.realtime.HandleWS)
+}
+
+// URLSessionWebSocketTask does not send a browser Origin header. Rejecting
+// requests that do keeps the native endpoint unavailable to arbitrary pages.
+func nativeSocketOriginAllowed(r *http.Request) bool { return r.Header.Get("Origin") == "" }
 
 // webSocketOriginAllowed accepts the same origin by default. Deployments that
 // host the UI separately can list additional exact origins in
