@@ -16,6 +16,14 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// errorWireFrame intentionally mirrors the public JSON wire shape rather than
+// importing an internal transport implementation detail. The smoke test
+// protects the stable mobile route during realtime transport refactors.
+type errorWireFrame struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
 func TestLiveSmoke(t *testing.T) {
 	base := os.Getenv("MOBILE_SMOKE_URL")
 	if base == "" {
@@ -36,10 +44,10 @@ func TestLiveSmoke(t *testing.T) {
 		return c
 	}
 
-	readErr := func(t *testing.T, c *websocket.Conn) errorFrame {
+	readErr := func(t *testing.T, c *websocket.Conn) errorWireFrame {
 		t.Helper()
 		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
-		var f errorFrame
+		var f errorWireFrame
 		if err := c.ReadJSON(&f); err != nil {
 			t.Fatalf("read frame: %v", err)
 		}

@@ -139,7 +139,7 @@ func main() {
 	leaseMgr := lease.NewManager(pool)
 
 	mux := http.NewServeMux()
-	web.New(ingestor, pool, temporalClient, clerkCfg).Register(mux)
+	web.New(ctx, ingestor, pool, temporalClient, clerkCfg).Register(mux)
 	mobile.New(ctx, ingestor, pool, temporalClient, clerkCfg).Register(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 

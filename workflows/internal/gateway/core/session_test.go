@@ -13,6 +13,8 @@ func TestSessionKeyFor(t *testing.T) {
 		{"discord", "123", "channel:123", "agent:main:discord:channel:123"},
 		{"discord", "123", "reply_to_platform_message_id:root9", "agent:main:discord:channel:123:thread:root9"},
 		{"discord-voice", "456", "channel:456", "agent:main:discord-voice:channel:456"},
+		{"macos", "user_abc", "channel:user_abc", "agent:main:macos:user:user_abc"},
+		{"macos", "user_abc", "session:brnch1", "agent:main:macos:user:user_abc:session:brnch1"},
 	}
 	for _, c := range cases {
 		if got := SessionKeyFor(c.platform, c.channelID, c.discriminator); got != c.want {

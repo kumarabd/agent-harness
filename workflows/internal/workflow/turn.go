@@ -458,11 +458,10 @@ func deliveryTaskQueue(sessionKey, connectionID string) (queue string, timeout t
 // --- Progress watchdog (docs/components/turn-pipeline.md, "Progress
 // watchdog"). A workflow.Go goroutine, scoped to the turn's lifetime, that
 // narrates "still working" while the model is heads-down — so the model never
-// has to. Only connection-based text platforms need it: voice already has its
-// own filler-audio player (voice_filler_player.go) covering the same gap
-// better, and Web surfaces progress through its poll. So it's Discord-text
-// only today; a third platform is a one-line addition here, same as
-// deliveryTaskQueue.
+// has to. Voice already has its own filler-audio player
+// (voice_filler_player.go) covering the same gap better. Discord and the
+// first-party realtime clients self-deliver persisted status rows through
+// their own delivery paths.
 
 // statusPingBackoff is the per-fire delay ladder: arm this long, and if no
 // user-visible delivery landed in the meantime, ping and step to the next
@@ -472,7 +471,7 @@ func deliveryTaskQueue(sessionKey, connectionID string) (queue string, timeout t
 // adjust with real latency data.
 func statusPingBackoff(platform string) []time.Duration {
 	switch platform {
-	case "discord", "mobile":
+	case "discord", "mobile", "web":
 		return []time.Duration{20 * time.Second, 45 * time.Second, 90 * time.Second}
 	default:
 		return nil
@@ -494,8 +493,8 @@ func statusDeliverActivity(platform string) (activityName string, ok bool) {
 // notifyProgress writes a StatusPing and, only for platforms that need an
 // EXPLICIT push-to-one-connection dispatch (Discord — no live connection to
 // tail, so the gateway has to actively post something), delivers it too.
-// Mobile self-delivers via migration 032/033's NOTIFY triggers: the write
-// alone already reaches every connected device, no dispatch activity needed
+// Mobile and Web self-deliver via migration 032's NOTIFY triggers: the write
+// alone already reaches every connected client, no dispatch activity needed
 // or wanted. Shared by two call sites with different TRIGGERS for the exact
 // same write: runProgressWatchdog's backoff timer (nothing has happened in a
 // while — a periodic reminder) and the tool-dispatch call site in the fan-out
@@ -514,8 +513,8 @@ func notifyProgress(ctx workflow.Context, turnID, sessionKey, connectionID, reas
 		return
 	}
 	if line == "" || !dispatch {
-		// Self-delivering platforms (mobile) stop here — the write above
-		// already reached every connected device via NOTIFY.
+		// Self-delivering platforms (mobile/Web) stop here — the write above
+		// already reached every connected client via NOTIFY.
 		return
 	}
 	dctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
@@ -570,10 +569,10 @@ func runProgressWatchdog(ctx workflow.Context, turnID, sessionKey, connectionID 
 // TurnWorkflow child future) for the one case turn.go's own failTurn can't
 // cover: the workflow was killed outright by its WorkflowRunTimeout, so no
 // in-workflow code ran to tell the user. Writes a 'wedged' status ping —
-// self-delivering on mobile via NOTIFY, no explicit push needed there (see
+// self-delivering on mobile/Web via NOTIFY, no explicit push needed there (see
 // runProgressWatchdog's own doc comment) — and, for platforms that need an
 // explicit dispatch (Discord), pushes it too. Entirely best-effort — if the
-// platform has no push channel at all (Web) or a step fails, it's logged and
+// platform has no push channel or a step fails, it's logged and
 // dropped, same as every other bookkeeping call in the coordinator.
 func deliverWedgedFallback(ctx workflow.Context, sessionKey, connectionID, turnID string) {
 	notifyProgress(ctx, turnID, sessionKey, connectionID, "wedged", workflow.GetLogger(ctx))

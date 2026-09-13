@@ -220,14 +220,14 @@ class ModelCallActivity:
                 provider = llm_client.get_provider(model_config)
                 # Streaming platforms, first call only. discord/voice have
                 # turn.go drain MODEL_CALL_CHUNK_SIGNAL and dispatch a
-                # per-connection delivery activity; mobile (fan-out, no
-                # connection) has the gateway tail turn_deliveries via a NOTIFY
-                # trigger, so it must NOT signal the workflow (nothing drains
-                # it — the signals would just pile into history).
-                if input.context_seq == 0 and platform in ("discord", "discord-voice", "mobile"):
+                # per-connection delivery activity; mobile and Web fan out
+                # from their gateway's durable NOTIFY-backed tail instead, so
+                # they must NOT signal the workflow (nothing drains those
+                # signals — they would just pile into history).
+                if input.context_seq == 0 and platform in ("discord", "discord-voice", "mobile", "web"):
                     real = await self._call_model_streaming_with_delivery(
                         input.turn_id, conversation, provider, model_config.model, model_config.max_tokens,
-                        tools_schema, signal_workflow=platform != "mobile",
+                        tools_schema, signal_workflow=platform not in ("mobile", "web"),
                     )
                 else:
                     real = await provider.call_model(

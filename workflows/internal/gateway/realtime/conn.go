@@ -1,4 +1,4 @@
-package mobile
+package realtime
 
 import (
 	"context"
@@ -42,9 +42,13 @@ type conn struct {
 	h  *Handler
 	ws *websocket.Conn
 
-	sessionKey string
-	userID     string
-	deviceID   string
+	sessionKey       string
+	userID           string
+	deviceID         string
+	platform         string
+	discriminator    string
+	parentSessionKey string
+	emitTools        bool
 
 	wakeCh chan struct{}
 	// resumeCh carries "resume" frames from the reader goroutine to serve's
@@ -67,14 +71,15 @@ type conn struct {
 
 	// Resume cursor — advanced as frames are emitted, never persisted server
 	// side (the client sends its own on reconnect).
-	sentThrough int    // highest turn_seq fully emitted (turn_end sent)
-	curTurnSeq  int    // the turn currently being tailed (-1 = none)
-	curStarted  bool   // turn_start emitted for curTurnSeq
-	sentMsgSeq  int    // highest messages.seq emitted for curTurnSeq
-	sentDelSeq  int    // highest turn_deliveries.seq emitted for curTurnSeq
-	sentStSeq   int    // highest turn_status_pings.seq emitted for curTurnSeq
-	lastCum     string // last cumulative streamed content for curTurnSeq
-	askSent     string // request_id of the ask_user already surfaced for curTurnSeq
+	sentThrough int               // highest turn_seq fully emitted (turn_end sent)
+	curTurnSeq  int               // the turn currently being tailed (-1 = none)
+	curStarted  bool              // turn_start emitted for curTurnSeq
+	sentMsgSeq  int               // highest messages.seq emitted for curTurnSeq
+	sentDelSeq  int               // highest turn_deliveries.seq emitted for curTurnSeq
+	sentStSeq   int               // highest turn_status_pings.seq emitted for curTurnSeq
+	lastCum     string            // last cumulative streamed content for curTurnSeq
+	askSent     string            // request_id of the ask_user already surfaced for curTurnSeq
+	sentTools   map[string]string // last serialized snapshot per tool call for curTurnSeq
 }
 
 func (c *conn) notify() {
@@ -95,14 +100,28 @@ func (c *conn) serve(ctx context.Context) {
 		c.send(errorFrame{Type: "error", Message: "first frame must be {type:auth, token}"})
 		return
 	}
-	sub, err := clerkVerify(ctx, c.h, first.Token)
+	sub, err := c.h.verify(ctx, first.Token)
 	if err != nil {
 		c.send(errorFrame{Type: "error", Message: "invalid token"})
 		return
 	}
 	c.userID = sub
 	c.deviceID = first.DeviceID
-	c.sessionKey = core.SessionKeyFor("mobile", c.userID, "channel:"+c.userID)
+	scope, err := c.h.resolveScope(c.userID, first.SessionID, first.ParentSessionID)
+	if err != nil {
+		c.send(errorFrame{Type: "error", Message: "invalid session_id"})
+		return
+	}
+	c.platform = scope.Platform
+	c.discriminator = scope.Discriminator
+	c.parentSessionKey = scope.ParentSessionKey
+	c.sessionKey = core.SessionKeyFor(c.platform, c.userID, c.discriminator)
+	for _, capability := range first.Capabilities {
+		if capability == "tool_calls" {
+			c.emitTools = true
+			break
+		}
+	}
 
 	// resume cursor from the auth frame, else cold start
 	if first.AfterTurnSeq != nil {
@@ -113,7 +132,9 @@ func (c *conn) serve(ctx context.Context) {
 
 	c.h.hub.add(c)
 	defer c.h.hub.remove(c)
-	presenceUpsert(ctx, c.h.pool, c.sessionKey, c.deviceID)
+	if c.h.trackPresence {
+		presenceUpsert(ctx, c.h.pool, c.sessionKey, c.deviceID)
+	}
 	// docs/components/gateway/first-party-plan.md's cross-replica presence —
 	// KeepAliveSignalName's own doc comment. Harness-agnostic on purpose: the
 	// coordinator has no idea this is a WebSocket, only that something wants
@@ -129,11 +150,13 @@ func (c *conn) serve(ctx context.Context) {
 	// way (a crash skips this defer entirely and the row just ages out via
 	// presenceStaleAfterSeconds), but a clean disconnect should still clean
 	// up promptly when it can.
-	defer func() {
-		dctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		presenceRemove(dctx, c.h.pool, c.sessionKey, c.deviceID)
-	}()
+	if c.h.trackPresence {
+		defer func() {
+			dctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			presenceRemove(dctx, c.h.pool, c.sessionKey, c.deviceID)
+		}()
+	}
 
 	c.ws.SetPongHandler(func(string) error {
 		_ = c.ws.SetReadDeadline(time.Now().Add(pongWait))
@@ -190,7 +213,9 @@ func (c *conn) serve(ctx context.Context) {
 			// Presence heartbeat rides this same tick — no separate timer.
 			// last_seen_at only needs to move roughly as often as the socket
 			// itself proves alive.
-			presenceUpsert(ctx, c.h.pool, c.sessionKey, c.deviceID)
+			if c.h.trackPresence {
+				presenceUpsert(ctx, c.h.pool, c.sessionKey, c.deviceID)
+			}
 		case <-keepAlive.C:
 			// Its own, coarser timer — sized against wf.IdleTTL, not the WS
 			// ping's connection-health cadence. Best-effort like everything
@@ -241,14 +266,15 @@ func (c *conn) handleInbound(ctx context.Context, f inboundFrame) {
 		// dev here, so speaker_id never actually held the human's identity
 		// for a mobile message). DeviceID is separate, optional metadata.
 		_, err := c.h.ingestor.Ingest(ctx, core.MessageEvent{
-			Platform:          "mobile",
+			Platform:          c.platform,
 			ChannelID:         c.userID,
 			User:              c.userID,
 			DeviceID:          dev,
 			Mode:              f.Mode,
 			Content:           f.Text,
 			PlatformMessageID: f.ClientMsgID,
-			Discriminator:     "channel:" + c.userID,
+			Discriminator:     c.discriminator,
+			ParentSessionKey:  c.parentSessionKey,
 		})
 		if err != nil {
 			c.send(errorFrame{Type: "error", Message: "failed to submit message"})
@@ -360,12 +386,16 @@ func (c *conn) catchupPage(ctx context.Context) (n int, hitRunning bool) {
 			c.sentStSeq = 0
 			c.lastCum = ""
 			c.askSent = ""
+			c.sentTools = make(map[string]string)
 		}
 		if !c.curStarted {
 			c.send(turnStartFrame{Type: "turn_start", TurnSeq: t.seq, TurnID: t.id, InitiatedBy: t.initiatedBy})
 			c.curStarted = true
 		}
 		c.emitMessages(ctx, t.seq, t.id)
+		if c.emitTools {
+			c.emitToolCalls(ctx, t.seq, t.id)
+		}
 		c.emitDeltas(ctx, t.seq, t.id)
 		c.emitStatus(ctx, t.seq, t.id)
 
@@ -402,6 +432,47 @@ func (c *conn) emitMessages(ctx context.Context, turnSeq int, turnID string) {
 			Content: content, SpeakerID: speaker, DeviceID: devID, ClientMsgID: cmid,
 		})
 		c.sentMsgSeq = seq
+	}
+}
+
+// emitToolCalls sends the current durable snapshot for each changed call.
+// Updates reuse tool_call_id, so clients can replace an in-progress card with
+// its terminal result without manufacturing another activity item.
+func (c *conn) emitToolCalls(ctx context.Context, turnSeq int, turnID string) {
+	rows, err := c.h.pool.Query(ctx,
+		"SELECT tc.tool_call_id, m.seq, tc.tool_name, tc.arguments, tc.is_subagent, tc.status, "+
+			"tc.result, COALESCE(tc.partial_output, ''), COALESCE(tc.reason, ''), tc.started_at, tc.completed_at "+
+			"FROM tool_calls tc JOIN messages m ON m.message_id = tc.message_id "+
+			"WHERE tc.parent_id = $1 ORDER BY m.seq, tc.started_at, tc.tool_call_id",
+		turnID,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var frame toolCallFrame
+		var arguments, result []byte
+		if rows.Scan(
+			&frame.ToolCallID, &frame.MessageSeq, &frame.ToolName, &arguments,
+			&frame.IsSubagent, &frame.Status, &result, &frame.PartialOutput,
+			&frame.Reason, &frame.StartedAt, &frame.CompletedAt,
+		) != nil {
+			return
+		}
+		frame.Type = "tool_call"
+		frame.TurnSeq = turnSeq
+		frame.Arguments = json.RawMessage(arguments)
+		if len(result) > 0 {
+			frame.Result = json.RawMessage(result)
+		}
+		snapshot, err := json.Marshal(frame)
+		if err != nil || c.sentTools[frame.ToolCallID] == string(snapshot) {
+			continue
+		}
+		if c.send(frame) == nil {
+			c.sentTools[frame.ToolCallID] = string(snapshot)
+		}
 	}
 }
 

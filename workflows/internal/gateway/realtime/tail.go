@@ -1,4 +1,4 @@
-package mobile
+package realtime
 
 // Pure helpers for the outbound tail (conn.go). Kept separate so the cursor
 // math and the cumulative→delta diffing are unit-testable without a socket or

@@ -1,4 +1,4 @@
-package mobile
+package realtime
 
 import "testing"
 

@@ -1,6 +1,9 @@
-package mobile
+package realtime
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // The WebSocket wire protocol — docs/components/gateway/mobile.md.
 //
@@ -70,6 +73,25 @@ type askUserFrame struct {
 	AllowFreeText bool            `json:"allow_free_text"`
 }
 
+// toolCallFrame is opt-in realtime activity metadata. It is emitted only to
+// clients that advertise the "tool_calls" capability in their auth frame, so
+// existing native clients keep their exact pre-existing wire surface.
+type toolCallFrame struct {
+	Type          string          `json:"type"` // "tool_call"
+	TurnSeq       int             `json:"turn_seq"`
+	MessageSeq    int             `json:"message_seq"`
+	ToolCallID    string          `json:"tool_call_id"`
+	ToolName      string          `json:"tool_name"`
+	Arguments     json.RawMessage `json:"arguments"`
+	IsSubagent    bool            `json:"is_subagent,omitempty"`
+	Status        string          `json:"status"`
+	Result        json.RawMessage `json:"result,omitempty"`
+	PartialOutput string          `json:"partial_output,omitempty"`
+	Reason        string          `json:"reason,omitempty"`
+	StartedAt     time.Time       `json:"started_at"`
+	CompletedAt   *time.Time      `json:"completed_at,omitempty"`
+}
+
 type errorFrame struct {
 	Type    string `json:"type"` // "error"
 	Message string `json:"message"`
@@ -90,6 +112,16 @@ type inboundFrame struct {
 	Type string `json:"type"`
 	// auth
 	Token string `json:"token,omitempty"`
+	// SessionID is accepted only by adapters that expose selectable sessions
+	// (Web and macOS). The mobile adapter rejects any non-main value.
+	SessionID string `json:"session_id,omitempty"`
+	// ParentSessionID is genesis metadata for selectable child sessions. The
+	// adapter resolves it to a server-owned parent key; clients never send a
+	// full internal session key.
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	// Capabilities opt newer clients into additive frame types. A missing list
+	// preserves the original mobile protocol exactly.
+	Capabilities []string `json:"capabilities,omitempty"`
 	// resume (sent with auth, or standalone)
 	AfterTurnSeq *int `json:"after_turn_seq,omitempty"`
 	// message

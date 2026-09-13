@@ -1,4 +1,4 @@
-package mobile
+package realtime
 
 // Cross-replica presence — docs/components/gateway/mobile.md's "Deferred:
 // Cross-replica presence". Backed by a real table (migration 033), not a

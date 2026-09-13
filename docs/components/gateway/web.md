@@ -12,7 +12,22 @@ Each gateway kind talks to its client completely differently (a browser polling 
 ### Resolved: Not a Third-Party Platform — A New Category
 `gateway.md`'s existing split (connection-based vs. webhook-based) was designed around third-party platforms with their own redelivery/partitioning semantics (Discord's shards, WhatsApp's webhook retries). Neither fits: this is a first-party client, so there's no external redelivery to defend against — a client-generated message ID handles idempotent resends instead of a platform's own at-least-once guarantee. **Resolved as its own category, webhook-like for infrastructure purposes**: stateless `Deployment` (not `StatefulSet`), no shard concept, any replica serves any request — it just gets there because we control both ends, not because a platform's own protocol happens to be stateless.
 
-### Resolved: Delivery — Short-Polling, Not a Live Connection
+### Realtime delivery — built 2026-09-13
+
+`GET /web/ws` now exposes the shared first-party realtime transport described
+in `realtime.md`. It authenticates using the same first-frame Clerk JWT and
+accepts Web's optional `session_id`; catch-up replays durable turns before the
+live tail starts. Browser origin checks allow same-origin by default, with
+additional exact origins configured by `GATEWAY_WEB_ALLOWED_ORIGINS`.
+
+The existing `/send`, `/poll`, `/respond`, `/cancel`, and `/sessions` endpoints
+remain supported as compatibility and recovery APIs. `agent-web` uses the
+socket for low-latency delivery and falls back to polling when it is unavailable.
+Web's first model call now persists stream snapshots to `turn_deliveries`, so
+the realtime socket can emit `delta` and progress frames without using a
+separate delivery worker.
+
+### Legacy delivery decision — short-polling
 **Considered:** a live push connection (WebSocket/SSE) so a response appears the instant a turn completes. **Rejected**, because a browser landing on an arbitrary replica behind a load balancer has no deterministic formula for "which replica holds this connection" the way Discord's `guild_id % num_shards` does — making live push work would require building a new dynamic connection registry (e.g. Redis pub/sub, or a Postgres-backed registry translating "connection X" → "replica Y"), which is exactly the kind of extra coordination machinery this project has repeatedly chosen not to build when a simpler mechanism suffices (static StatefulSet shard identity over a dynamic lease table; task-queue routing over a message broker — both `gateway.md`).
 
 **Resolved instead: the browser short-polls an HTTP endpoint.** Any replica can serve any poll request — same statelessness as the webhook-like inbound path. Trade-off stated plainly: a small poll-interval delay instead of instant push. Exact poll interval not yet decided — see Open Questions.
@@ -37,7 +52,7 @@ Each gateway kind talks to its client completely differently (a browser polling 
 - `webDiscriminator(channelID, sessionID)` — empty or `"main"` → `"channel:{channelID}"` (the default session); anything else → `"session:{sessionID}"`, embedded directly into the key as `agent:main:web:user:{channelID}:session:{sessionID}`. Unlike Discord, Web has no platform-native reply/thread concept to deterministically derive a discriminator from — `sessionID` is simply whatever opaque value the client generated itself when the user branched, remembered and resent by the client on every later message for that session (no server-side lookup needed to resolve it, same property Discord's deterministic reply-chain root has, just sourced differently: client-generated instead of computed from platform data).
 - `webSessionIDFromKey` — the reverse mapping, `GET /sessions`' own need.
 
-**API surface**: `/send` gains `session_id`/`parent_session_id` (both optional; empty reproduces today's exact single-session behavior); `/poll` gains a `session_id` query param; `/respond` gains a `session_id` field; new `GET /sessions` lists this authenticated user's own sessions only (`WHERE platform='web' AND channel_id={their own Clerk user_id}` — never another user's). `parent_session_id` is only meaningful the first time a given `session_id` is sent — `submitMessageEvent`'s own genesis detection (`../gateway.md`) is what actually makes this take effect, so the client doesn't need to be careful about sending it exactly once.
+**API surface**: `/send` gains `session_id`/`parent_session_id` (both optional; empty reproduces today's exact single-session behavior); `/poll` gains a `session_id` query param; `/respond` gains a `session_id` field; new `GET /sessions` lists this authenticated user's own sessions only (`WHERE platform='web' AND channel_id={their own Clerk user_id}` — never another user's). Each summary includes a first-message-derived title, latest-message preview, `updated_at`, and whether a turn is running, all read from durable server state rather than browser storage. `parent_session_id` is only meaningful the first time a given `session_id` is sent — `submitMessageEvent`'s own genesis detection (`../gateway.md`) is what actually makes this take effect, so the client doesn't need to be careful about sending it exactly once.
 
 ~~`GET /skills` (2026-09-01) ...~~ — **REMOVED (2026-09-11).** The whole skill
 subsystem it read from (`skill_procedures`, `../skill-subsystem.md`) was

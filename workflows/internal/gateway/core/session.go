@@ -67,6 +67,17 @@ func SessionKeyFor(platform, channelID, discriminator string) string {
 			panic("SessionKeyFor: malformed discriminator " + discriminator)
 		}
 		return "agent:main:mobile:user:" + channelID + ":session:" + id
+	case "macos":
+		// The desktop client has Web's selectable-session model, but its
+		// conversations remain intentionally separate from browser history.
+		if discriminator == "channel:"+channelID {
+			return "agent:main:macos:user:" + channelID
+		}
+		_, id, ok := strings.Cut(discriminator, ":")
+		if !ok {
+			panic("SessionKeyFor: malformed discriminator " + discriminator)
+		}
+		return "agent:main:macos:user:" + channelID + ":session:" + id
 	default:
 		panic("SessionKeyFor: unsupported platform " + platform)
 	}

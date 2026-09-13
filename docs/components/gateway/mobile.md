@@ -96,11 +96,10 @@ derived from it, never trusted from the client.
 
 ## Files
 
-`internal/gateway/mobile/`: `mobile.go` (Handler, `GET /ws`), `conn.go`
-(per-connection: auth, read pump, tail/catchup, presence + `KeepAlive`
-tickers), `hub.go` (per-replica LISTEN + registry), `frames.go` (wire types),
-`tail.go` (pure cursor/diff helpers, unit-tested in `tail_test.go`),
-`presence.go` (cross-replica presence table — see below).
+`internal/gateway/mobile/`: `mobile.go` (the stable `GET /ws` adapter).
+`internal/gateway/realtime/`: the shared connection, tail/catchup, hub, frame,
+and cursor machinery used by mobile and Web; mobile alone enables presence.
+See `realtime.md` for the shared transport boundary.
 `internal/gateway/core/`: `access.go` (`CancelActiveTurn`, ownership checks),
 `inbound.go`'s `Ingestor.KeepAlive`. `internal/gateway/clerkauth/` (shared JWT
 verification). Migration `032` (`messages.client_msg_id` + the NOTIFY
