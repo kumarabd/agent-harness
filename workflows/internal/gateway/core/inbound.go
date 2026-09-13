@@ -131,6 +131,20 @@ func (i *Ingestor) Ingest(ctx context.Context, event MessageEvent) (string, erro
 	if p := platformSystemPrompts[event.Platform]; p != "" {
 		systemPrompt = &p
 	}
+	// A selectable client can create its first child before it has ever sent
+	// a message in the synthetic "main" conversation. Materialize that
+	// server-derived parent first so sessions.parent_session_key's foreign key
+	// remains valid. The key, platform, and channel all came from the
+	// authenticated adapter; no client-supplied internal key is trusted here.
+	if parentSessionKey != nil {
+		if _, err := i.pool.Exec(ctx,
+			"INSERT INTO sessions (session_key, platform, channel_id, system_prompt) VALUES ($1, $2, $3, $4) "+
+				"ON CONFLICT (session_key) DO NOTHING",
+			*parentSessionKey, event.Platform, event.ChannelID, systemPrompt,
+		); err != nil {
+			return "", err
+		}
+	}
 	// gateway.md's "Resolved: Multi-Session Channels" — genesis detection is
 	// free from state already being written: RowsAffected() > 0 means this
 	// is genuinely the first message this session_key has ever seen. This

@@ -471,7 +471,7 @@ func deliveryTaskQueue(sessionKey, connectionID string) (queue string, timeout t
 // adjust with real latency data.
 func statusPingBackoff(platform string) []time.Duration {
 	switch platform {
-	case "discord", "mobile", "web":
+	case "discord", "mobile", "web", "macos":
 		return []time.Duration{20 * time.Second, 45 * time.Second, 90 * time.Second}
 	default:
 		return nil
