@@ -2,7 +2,8 @@ package core
 
 // Shared session-access handlers — docs/components/gateway/first-party-plan.md.
 // "Clients access sessions; clients do not define them." Every client-facing
-// platform (web, mobile, macOS — never Discord, which is channel- not user-scoped)
+// platform (web, iOS, Android, macOS, plus legacy mobile — never Discord,
+// which is channel- rather than user-scoped)
 // calls these instead of hand-rolling its own list/read/answer SQL, so
 // ownership checks and read completeness live in exactly one place. Takes a
 // *pgxpool.Pool directly (not an Ingestor) — this is the read/response side,
@@ -45,7 +46,7 @@ type SessionSummary struct {
 func ListSessions(ctx context.Context, pool *pgxpool.Pool, userID string) ([]SessionSummary, error) {
 	rows, err := pool.Query(ctx,
 		"SELECT session_key, parent_session_key, platform, created_at FROM sessions "+
-			"WHERE channel_id = $1 AND platform IN ('web', 'mobile', 'macos') ORDER BY created_at",
+			"WHERE channel_id = $1 AND platform IN ('web', 'ios', 'android', 'mobile', 'macos') ORDER BY created_at",
 		userID,
 	)
 	if err != nil {
@@ -77,7 +78,7 @@ func AuthorizeSession(ctx context.Context, pool *pgxpool.Pool, userID, sessionKe
 	var parentKey *string
 	err := pool.QueryRow(ctx,
 		"SELECT session_key, parent_session_key, platform, created_at FROM sessions "+
-			"WHERE session_key = $1 AND channel_id = $2 AND platform IN ('web', 'mobile', 'macos')",
+			"WHERE session_key = $1 AND channel_id = $2 AND platform IN ('web', 'ios', 'android', 'mobile', 'macos')",
 		sessionKey, userID,
 	).Scan(&s.SessionKey, &parentKey, &s.Platform, &s.CreatedAt)
 	if err != nil {

@@ -218,16 +218,19 @@ class ModelCallActivity:
                 # Provider ABC — no shape awareness leaks into this call
                 # site.
                 provider = llm_client.get_provider(model_config)
-                # Streaming platforms, first call only. discord/voice have
-                # turn.go drain MODEL_CALL_CHUNK_SIGNAL and dispatch a
-                # per-connection delivery activity; mobile and Web fan out
-                # from their gateway's durable NOTIFY-backed tail instead, so
-                # they must NOT signal the workflow (nothing drains those
-                # signals — they would just pile into history).
-                if input.context_seq == 0 and platform in ("discord", "discord-voice", "mobile", "web"):
+                # Streaming platforms, first call only. Discord text/voice
+                # drain MODEL_CALL_CHUNK_SIGNAL and dispatch a per-connection
+                # delivery activity. First-party clients fan out from their
+                # gateway's durable NOTIFY-backed tail instead, so they must
+                # NOT signal the workflow (nothing drains those signals).
+                self_delivering = platform in ("ios", "android", "mobile", "web", "macos")
+                streaming_platform = platform in (
+                    "discord", "discord-voice", "ios", "android", "mobile", "web", "macos",
+                )
+                if input.context_seq == 0 and streaming_platform:
                     real = await self._call_model_streaming_with_delivery(
                         input.turn_id, conversation, provider, model_config.model, model_config.max_tokens,
-                        tools_schema, signal_workflow=platform not in ("mobile", "web"),
+                        tools_schema, signal_workflow=not self_delivering,
                     )
                 else:
                     real = await provider.call_model(

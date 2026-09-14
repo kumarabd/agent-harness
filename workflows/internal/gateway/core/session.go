@@ -55,18 +55,18 @@ func SessionKeyFor(platform, channelID, discriminator string) string {
 		// discord_voice.go never sets anything else), so this is the whole
 		// story: one session per joined voice channel, no thread variant.
 		return "agent:main:discord-voice:channel:" + channelID
-	case "mobile":
-		// docs/components/gateway/mobile.md — one session per user, fanned
-		// out to every connected device. No channel or thread concept;
-		// channelID is the Clerk user id (same as web). Mirrors web's format.
+	case "ios", "android", "mobile":
+		// Native clients have one session per user and no branch/thread
+		// concept. iOS and Android are distinct histories; mobile remains only
+		// for compatibility with already-installed clients on the legacy route.
 		if discriminator == "channel:"+channelID {
-			return "agent:main:mobile:user:" + channelID
+			return "agent:main:" + platform + ":user:" + channelID
 		}
 		_, id, ok := strings.Cut(discriminator, ":")
 		if !ok {
 			panic("SessionKeyFor: malformed discriminator " + discriminator)
 		}
-		return "agent:main:mobile:user:" + channelID + ":session:" + id
+		return "agent:main:" + platform + ":user:" + channelID + ":session:" + id
 	case "macos":
 		// The desktop client has Web's selectable-session model, but its
 		// conversations remain intentionally separate from browser history.

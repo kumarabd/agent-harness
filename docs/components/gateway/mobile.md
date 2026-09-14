@@ -1,4 +1,4 @@
-# Component: Mobile Gateway
+# Component: Native Mobile Gateway
 
 > STATUS: SLICE 1 built (text in/out, streaming, multi-device fan-out, cursor
 > resume, `ask_user`). `cancel`/stop, cross-replica presence, `KeepAlive`
@@ -7,15 +7,19 @@
 > (+ a voice-identity prompt fix), and event-driven progress narration with
 > an explicit `progress` field — ALL BUILT + DEPLOYED + LIVE-VERIFIED
 > 2026-09-12, except progress narration (built, NOT yet deployed/verified).
+> iOS/Android platform separation (`/ios/ws`, `/android/ws`) is BUILT
+> 2026-09-13 and awaits deployment/client verification; legacy `/ws` remains
+> available for old releases.
 > Deferred: wiring a `Present()` consumer, session list/select.
 
 ## Role
 
-An authenticated WebSocket (`GET /ws` on the gateway process) that an iOS /
-iPadOS app connects to. STT/TTS are out of scope — this is text only, realtime,
-bidirectional.
+Authenticated WebSockets on the gateway process: `GET /ios/ws` for iOS,
+iPadOS, and CarPlay; `GET /android/ws` for Android and Android Auto. STT/TTS
+remain on-device — this transport is text only, realtime, and bidirectional.
 
-- **Inbound** frames normalize into a `core.MessageEvent{Platform:"mobile"}` and
+- **Inbound** frames normalize into `core.MessageEvent{Platform:"ios"}` or
+  `core.MessageEvent{Platform:"android"}` and
   go through the shared `core.Ingestor` (session resolve → dedup → `SignalWithStart`)
   — identical to web.
 - **Outbound** is a live stream. The turn workflow writes to `messages` /
@@ -23,12 +27,17 @@ bidirectional.
   (`mobile_stream`, payload = session_key) wakes the gateway replica's hub; each
   WS connection re-reads *its own tail* and pushes frames.
 
-## Session model — one per user, fanned out
+## Session model — one per user and platform, fanned out
 
-Session key: `agent:main:mobile:user:<clerkUserID>` (mirrors web). Every device a
-user has connects to the **same** session and tails the same turns — continue a
-conversation across iPhone and iPad, and a proactive turn (`IntentionWorkflow` →
-`Wake`) is delivered once and seen everywhere.
+Session keys are `agent:main:ios:user:<clerkUserID>` and
+`agent:main:android:user:<clerkUserID>`. Apple surfaces share the iOS history;
+Android surfaces share the Android history. The two histories never resolve to
+the same coordinator. Web and macOS retain their own separate scopes as well.
+
+The former `agent:main:mobile:user:<clerkUserID>` history is retained, not
+deleted or rewritten. `GET /ws` continues resolving to it for compatibility
+with installed clients. Updated clients use fresh platform-specific cursor keys
+so a high legacy cursor cannot skip early turns in a new history.
 
 Concurrency: two devices sending within the same window → the coordinator's
 active-turn guard folds the second in as an interrupt (cancels in-flight work,

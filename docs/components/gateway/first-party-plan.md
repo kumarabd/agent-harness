@@ -1,6 +1,15 @@
 # Shared client gateway: design and delivery plan
 
-Status: CURRENT PLANNING DIRECTION, revised 2026-09-11. No runtime changes.
+Status: HISTORICAL PLAN, superseded in part 2026-09-13 by the explicit client
+scope decision below.
+
+Current requirement: conversation histories are platform-scoped. The four
+first-party scopes are `web`, `macos`, `ios`, and `android`. Web and macOS expose
+selectable sessions; iOS/iPadOS/CarPlay use one natural iOS session; Android and
+Android Auto use one natural Android session. The shared handlers and wire
+protocol remain reused, but clients do not receive a cross-platform session
+list. Statements below proposing one shared web/mobile history are retained as
+historical reasoning and are no longer the implementation direction.
 
 User requirements: sessions and histories are independent of the client; the same
 authenticated user sees the same authorized session list across web and mobile.
