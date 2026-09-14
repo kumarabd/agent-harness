@@ -143,7 +143,6 @@ func main() {
 	web.NewMacOS(ctx, ingestor, pool, temporalClient, clerkCfg).RegisterMacOS(mux)
 	mobile.NewIOS(ctx, ingestor, pool, temporalClient, clerkCfg).Register(mux)
 	mobile.NewAndroid(ctx, ingestor, pool, temporalClient, clerkCfg).Register(mux)
-	mobile.New(ctx, ingestor, pool, temporalClient, clerkCfg).Register(mux) // legacy /ws
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	// One goroutine per configured Discord bot (gateway.md's per-tenant,

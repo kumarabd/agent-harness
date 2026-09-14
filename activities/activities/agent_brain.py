@@ -1,37 +1,32 @@
-"""Thin async clients for agent-brain's two separate MCP servers (docs/components/
+"""Thin async client for agent-brain's retain MCP server (docs/components/
 memory-slot.md — "This component *is* the agent-brain integration, directly"). No
-generic backend abstraction: this module calls each server's tools by name, over MCP's
+generic backend abstraction: this module calls that server's tools by name, over MCP's
 streamable-HTTP transport.
 
-agent-brain now ships as two independent processes with two independent tool surfaces,
-not one:
-
-- The **Go server** — `memory_write`/`memory_system_status`/`memory_audit_tail`. Nothing
-  in this project calls it after the retain/recall/reflect rewrite (`memory_write` is a
-  dead end on agent-brain's own side — nothing downstream extracts from it anymore), but
-  `call_tool`/`AGENT_BRAIN_BASE_URL`/`AGENT_BRAIN_API_KEY` are kept as-is rather than
-  ripped out this pass, in case ops tooling still wants `memory_system_status`/
-  `memory_audit_tail` directly.
-- The **retain MCP server** (`mcp_server.py`) — `memory_retain`/`memory_recall`/
-  `memory_reflect`/mental-models. This is the one `tools.py`/`write_memory.py` actually
-  use now, via `call_retain_tool`.
+**2026-09-13: the Go server connection is gone, not just unused.** agent-brain's Go
+server (`memory_write`/`memory_system_status`/`memory_audit_tail`) is a separate process
+this project no longer talks to at all — `memory_write` was a dead end on agent-brain's
+own side even before this (nothing downstream extracted from it anymore) once the
+retain/recall/reflect rewrite landed. Removed outright rather than kept-but-unused: the
+old `call_tool`/`AGENT_BRAIN_BASE_URL`/`AGENT_BRAIN_API_KEY` client, and the matching
+Helm env/secret wiring (`docs/components/memory-slot.md`'s Notes Log). The Go server
+itself still exists and still serves `memory_system_status`/`memory_audit_tail`/`agent-web`'s
+own Explorer UI — just not called from this codebase.
 
 Config read from env vars at point of use, same convention as tools.py's
 resolve_session_dir — no shared config module:
 
-    AGENT_BRAIN_BASE_URL          Go server, e.g. http://<release>-agent-brain-server:8080
-    AGENT_BRAIN_API_KEY           Go server's X-API-Key header.
-    AGENT_BRAIN_AGENT_ID          Go server's X-Agent-ID header. Doubles as the retain
-                                   server's bank_id (see retain_bank_id()) — one bank
-                                   per tenant, and this value already identifies the
-                                   tenant/deployment the same way.
     AGENT_BRAIN_RETAIN_BASE_URL   retain MCP server, e.g.
                                    http://<release>-agent-brain-retain-mcp:8890
     AGENT_BRAIN_RETAIN_API_KEY    retain server's X-API-Key header (empty if the
                                    deployment runs it with no auth check).
+    AGENT_BRAIN_AGENT_ID          Doubles as the retain server's bank_id (see
+                                   retain_bank_id()) — one bank per tenant, and this
+                                   value already identifies the tenant/deployment.
 
-Raises AgentBrainNotConfiguredError if the relevant base URL isn't set, so a call site
-can distinguish "memory isn't configured for this deployment" from a real call failure.
+Raises AgentBrainNotConfiguredError if AGENT_BRAIN_RETAIN_BASE_URL isn't set, so a call
+site can distinguish "memory isn't configured for this deployment" from a real call
+failure.
 """
 
 from __future__ import annotations
@@ -59,14 +54,24 @@ def retain_bank_id() -> str:
     return os.environ.get("AGENT_BRAIN_AGENT_ID", "")
 
 
-async def _call(url: str, headers: dict[str, str], tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Opens a fresh MCP session per call rather than holding one open across the
-    worker's lifetime — these are infrequent, latency-tolerant calls (a session-start
-    retrieval, a mid-turn tool call, a fire-and-forget write), not a hot path where
-    connection reuse would matter; a fresh session also sidesteps any
-    session-affinity/expiry handling this module would otherwise need to get right."""
+async def call_retain_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Calls a tool on the retain MCP server (memory_retain/memory_recall/
+    memory_reflect/mental models) and returns its parsed JSON result. Callers pass
+    bank_id explicitly in arguments — use retain_bank_id() to fill it in, this function
+    doesn't inject it implicitly.
+
+    Opens a fresh MCP session per call rather than holding one open across the worker's
+    lifetime — these are infrequent, latency-tolerant calls (a mid-turn tool call, a
+    fire-and-forget write), not a hot path where connection reuse would matter; a fresh
+    session also sidesteps any session-affinity/expiry handling this module would
+    otherwise need to get right.
+    """
+    base_url = os.environ.get("AGENT_BRAIN_RETAIN_BASE_URL", "").rstrip("/")
+    if not base_url:
+        raise AgentBrainNotConfiguredError("AGENT_BRAIN_RETAIN_BASE_URL is not set")
+    headers = {"X-API-Key": os.environ.get("AGENT_BRAIN_RETAIN_API_KEY", "")}
     http_client = create_mcp_http_client(headers=headers)
-    async with streamable_http_client(url, http_client=http_client) as (read, write):
+    async with streamable_http_client(f"{base_url}/mcp", http_client=http_client) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(tool_name, arguments)
@@ -80,29 +85,6 @@ async def _call(url: str, headers: dict[str, str], tool_name: str, arguments: di
     if result.content and hasattr(result.content[0], "text"):
         return json.loads(result.content[0].text)
     raise AgentBrainCallError(f"{tool_name}: response had no content")
-
-
-async def call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Calls a tool on the Go server (memory_write/memory_system_status/memory_audit_tail)."""
-    base_url = os.environ.get("AGENT_BRAIN_BASE_URL", "").rstrip("/")
-    if not base_url:
-        raise AgentBrainNotConfiguredError("AGENT_BRAIN_BASE_URL is not set")
-    headers = {
-        "X-API-Key": os.environ.get("AGENT_BRAIN_API_KEY", ""),
-        "X-Agent-ID": os.environ.get("AGENT_BRAIN_AGENT_ID", ""),
-    }
-    return await _call(f"{base_url}/mcp", headers, tool_name, arguments)
-
-
-async def call_retain_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Calls a tool on the retain MCP server (memory_retain/memory_recall/
-    memory_reflect/mental models). Callers pass bank_id explicitly in arguments —
-    use retain_bank_id() to fill it in, this function doesn't inject it implicitly."""
-    base_url = os.environ.get("AGENT_BRAIN_RETAIN_BASE_URL", "").rstrip("/")
-    if not base_url:
-        raise AgentBrainNotConfiguredError("AGENT_BRAIN_RETAIN_BASE_URL is not set")
-    headers = {"X-API-Key": os.environ.get("AGENT_BRAIN_RETAIN_API_KEY", "")}
-    return await _call(f"{base_url}/mcp", headers, tool_name, arguments)
 
 
 _PERSONA_MENTAL_MODEL_ID = "persona"

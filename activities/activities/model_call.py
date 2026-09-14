@@ -223,9 +223,9 @@ class ModelCallActivity:
                 # delivery activity. First-party clients fan out from their
                 # gateway's durable NOTIFY-backed tail instead, so they must
                 # NOT signal the workflow (nothing drains those signals).
-                self_delivering = platform in ("ios", "android", "mobile", "web", "macos")
+                self_delivering = platform in ("ios", "android", "web", "macos")
                 streaming_platform = platform in (
-                    "discord", "discord-voice", "ios", "android", "mobile", "web", "macos",
+                    "discord", "discord-voice", "ios", "android", "web", "macos",
                 )
                 if input.context_seq == 0 and streaming_platform:
                     real = await self._call_model_streaming_with_delivery(

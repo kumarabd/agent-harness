@@ -18,7 +18,7 @@ import (
 
 // errorWireFrame intentionally mirrors the public JSON wire shape rather than
 // importing an internal transport implementation detail. The smoke test
-// protects the stable mobile route during realtime transport refactors.
+// protects both native routes during realtime transport refactors.
 type errorWireFrame struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
@@ -30,16 +30,16 @@ func TestLiveSmoke(t *testing.T) {
 		t.Skip("set MOBILE_SMOKE_URL to run (e.g. ws://localhost:18090)")
 	}
 
-	dial := func(t *testing.T) *websocket.Conn {
+	dial := func(t *testing.T, route string) *websocket.Conn {
 		t.Helper()
 		d := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
-		c, resp, err := d.Dial(base+"/ws", nil)
+		c, resp, err := d.Dial(base+route, nil)
 		if err != nil {
 			code := 0
 			if resp != nil {
 				code = resp.StatusCode
 			}
-			t.Fatalf("dial %s/ws: %v (http %d)", base, err, code)
+			t.Fatalf("dial %s%s: %v (http %d)", base, route, err, code)
 		}
 		return c
 	}
@@ -57,34 +57,38 @@ func TestLiveSmoke(t *testing.T) {
 		return f
 	}
 
-	t.Run("upgrade succeeds", func(t *testing.T) {
-		c := dial(t)
-		c.Close()
-	})
+	for _, route := range []string{"/ios/ws", "/android/ws"} {
+		t.Run(route, func(t *testing.T) {
+			t.Run("upgrade succeeds", func(t *testing.T) {
+				c := dial(t, route)
+				c.Close()
+			})
 
-	t.Run("first frame must be auth", func(t *testing.T) {
-		c := dial(t)
-		defer c.Close()
-		if err := c.WriteJSON(map[string]any{"type": "message", "text": "hi"}); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		f := readErr(t, c)
-		if f.Message == "" {
-			t.Fatalf("empty error message")
-		}
-		t.Logf("rejected non-auth first frame: %q", f.Message)
-	})
+			t.Run("first frame must be auth", func(t *testing.T) {
+				c := dial(t, route)
+				defer c.Close()
+				if err := c.WriteJSON(map[string]any{"type": "message", "text": "hi"}); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				f := readErr(t, c)
+				if f.Message == "" {
+					t.Fatalf("empty error message")
+				}
+				t.Logf("rejected non-auth first frame: %q", f.Message)
+			})
 
-	t.Run("bad token rejected", func(t *testing.T) {
-		c := dial(t)
-		defer c.Close()
-		if err := c.WriteJSON(map[string]any{"type": "auth", "token": "not-a-real-jwt"}); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		f := readErr(t, c)
-		if f.Message != "invalid token" {
-			t.Fatalf("want %q, got %q", "invalid token", f.Message)
-		}
-		t.Logf("rejected bad token: %q", f.Message)
-	})
+			t.Run("bad token rejected", func(t *testing.T) {
+				c := dial(t, route)
+				defer c.Close()
+				if err := c.WriteJSON(map[string]any{"type": "auth", "token": "not-a-real-jwt"}); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				f := readErr(t, c)
+				if f.Message != "invalid token" {
+					t.Fatalf("want %q, got %q", "invalid token", f.Message)
+				}
+				t.Logf("rejected bad token: %q", f.Message)
+			})
+		})
+	}
 }

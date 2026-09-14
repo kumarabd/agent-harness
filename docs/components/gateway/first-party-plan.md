@@ -10,6 +10,8 @@ Android Auto use one natural Android session. The shared handlers and wire
 protocol remain reused, but clients do not receive a cross-platform session
 list. Statements below proposing one shared web/mobile history are retained as
 historical reasoning and are no longer the implementation direction.
+The obsolete `mobile` platform and `/ws` compatibility endpoint have been
+removed; only the four scopes above are accepted for first-party clients.
 
 User requirements: sessions and histories are independent of the client; the same
 authenticated user sees the same authorized session list across web and mobile.

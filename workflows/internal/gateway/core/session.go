@@ -55,10 +55,9 @@ func SessionKeyFor(platform, channelID, discriminator string) string {
 		// discord_voice.go never sets anything else), so this is the whole
 		// story: one session per joined voice channel, no thread variant.
 		return "agent:main:discord-voice:channel:" + channelID
-	case "ios", "android", "mobile":
+	case "ios", "android":
 		// Native clients have one session per user and no branch/thread
-		// concept. iOS and Android are distinct histories; mobile remains only
-		// for compatibility with already-installed clients on the legacy route.
+		// concept. iOS and Android are distinct histories.
 		if discriminator == "channel:"+channelID {
 			return "agent:main:" + platform + ":user:" + channelID
 		}

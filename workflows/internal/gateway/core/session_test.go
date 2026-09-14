@@ -15,7 +15,6 @@ func TestSessionKeyFor(t *testing.T) {
 		{"discord-voice", "456", "channel:456", "agent:main:discord-voice:channel:456"},
 		{"ios", "user_abc", "channel:user_abc", "agent:main:ios:user:user_abc"},
 		{"android", "user_abc", "channel:user_abc", "agent:main:android:user:user_abc"},
-		{"mobile", "user_abc", "channel:user_abc", "agent:main:mobile:user:user_abc"},
 		{"macos", "user_abc", "channel:user_abc", "agent:main:macos:user:user_abc"},
 		{"macos", "user_abc", "session:brnch1", "agent:main:macos:user:user_abc:session:brnch1"},
 	}

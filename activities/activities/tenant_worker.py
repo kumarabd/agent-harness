@@ -60,11 +60,6 @@ deploy/docker/tenant-worker.Dockerfile and deploy/helm/agent-harness-tenant:
                          these set; search_memory/reflect_on_entity/WriteMemory
                          all degrade to a no-op (or, for a mid-session tool call,
                          a clear error observation) rather than failing the turn.
-    AGENT_BRAIN_BASE_URL/AGENT_BRAIN_API_KEY
-                         agent-brain's Go server (memory_write/
-                         memory_system_status/memory_audit_tail) — unused by
-                         this project's own code post-retain-rewrite, kept only
-                         for ops tooling that might still want it directly.
     MCP_HUB_URL          docs/components/tool-registry.md's mcp-hub-mediated
                          tool tier (mcp_hub.py, tools.py's search_tools/
                          call_tool). Not required — search_tools degrades to

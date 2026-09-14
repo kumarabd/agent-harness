@@ -1,8 +1,7 @@
 # Component: First-Party Realtime Gateway
 
-> STATUS: BUILT — shared WebSocket transport for native mobile and browser
-> clients. Existing mobile `/ws` clients remain compatible; Web uses
-> `GET /web/ws` with polling retained as its durable recovery path.
+> STATUS: BUILT — shared WebSocket transport for iOS, Android, Web, and macOS.
+> Web and macOS retain polling as their durable recovery path.
 
 ## Role
 
@@ -16,13 +15,14 @@ Each platform adapter supplies a server-owned scope resolver:
 
 | Route | Conversation scope | Selectable sessions |
 | --- | --- | --- |
-| `GET /ws` | `mobile` + authenticated user + main | No |
+| `GET /ios/ws` | `ios` + authenticated user + main | No |
+| `GET /android/ws` | `android` + authenticated user + main | No |
 | `GET /web/ws` | `web` + authenticated user + requested session | Yes |
-| future macOS route | `macos` + authenticated user + requested session | Yes |
+| `GET /macos/ws` | `macos` + authenticated user + requested session | Yes |
 
 Client type never comes from an inbound frame, and no adapter can use a
 client-supplied full session key. This preserves intentionally separate Web,
-mobile, and macOS histories.
+iOS, Android, and macOS histories.
 
 ## Recovery and delivery
 
@@ -31,8 +31,8 @@ the gateway replays every later durable turn, then emits `resumed`, then tails
 new rows. `NOTIFY mobile_stream` is only a wake hint, so a dropped socket or
 missed notification delays delivery but cannot lose a completed turn.
 
-Web's first-call model output now writes the same durable `turn_deliveries`
-records as mobile. The realtime route tails those records as `delta` frames;
+Every first-party client's first-call model output writes durable
+`turn_deliveries` records. The realtime route tails them as `delta` frames;
 status pings are also surfaced as `delta` frames with `progress: true`.
 
 Web opts into structured `tool_call` frames by advertising the `tool_calls`
@@ -43,13 +43,11 @@ same Postgres notification channel; reconnect catch-up reads the rows again, so
 tool activity has the same recovery semantics as messages. Clients replace an
 earlier snapshot with a later one for the same ID.
 
-## Wire compatibility
+## Wire protocol variants
 
-Mobile's existing frames remain unchanged. `auth` gains optional `session_id`,
-`parent_session_id`, and `capabilities` fields. The session fields are used only
-by adapters that permit session selection; the parent is genesis metadata and
-defaults to Web's main session. Mobile rejects either non-main session field.
-Additive outbound frames are capability-gated, so clients that omit
-`capabilities` keep the original protocol. The WebSocket handshake itself is
-browser-origin checked for the Web route; extra UI origins are configured with
-`GATEWAY_WEB_ALLOWED_ORIGINS` as a comma-separated list.
+`auth` accepts optional `session_id`, `parent_session_id`, and `capabilities`
+fields. The session fields are used only by Web and macOS; iOS and Android
+reject either non-main session field. Additive outbound frames are
+capability-gated. The WebSocket handshake is browser-origin checked for the Web
+route; extra UI origins are configured with `GATEWAY_WEB_ALLOWED_ORIGINS` as a
+comma-separated list.

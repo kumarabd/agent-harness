@@ -149,39 +149,19 @@ spec:
             {{- end }}
           {{- end }}
           {{- if .Values.agentBrain.enabled }}
-            # components/memory-slot.md — WriteMemory/search/expand calls
-            # only; nothing here if a session never touches memory. Computed,
-            # not a value — the agent-brain subchart is installed under
-            # nameOverride "memory" (values.yaml's agent-brain.nameOverride),
-            # so its Service renders as <release>-memory-server
-            # (charts/agent-brain/templates/service-server.yaml), deterministic
-            # from this release's own name. No /sse or /mcp suffix here —
-            # activities/activities/agent_brain.py appends /mcp itself
-            # (streamable-HTTP transport, not the classic SSE transport that
-            # chart's own TRANSPORT=sse config also serves alongside it at
-            # /sse).
-            - name: AGENT_BRAIN_BASE_URL
-              value: "http://{{ .Release.Name }}-memory-server:8080"
-            - name: AGENT_BRAIN_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "agent-harness.fullname" . }}-agent-brain
-                  key: AGENT_BRAIN_API_KEY
-            # -- REQUIRED by agent-brain's own auth (internal/mcp/tenant.go's
-            # "agent_id required" check, whenever that chart's
-            # AUTH_REQUIRED=true) — not a secret, a plain per-install
-            # identifier ("the same for every install" per agent-brain's own
-            # domain.TenantContext.AgentID comment).
+            # components/memory-slot.md's actual memory backend — agent-brain's retain
+            # MCP server (memory_retain/memory_recall/memory_reflect/mental models),
+            # NOT the Go server's memory_write (that connection was removed outright
+            # 2026-09-13, not merely left unused — see memory-slot.md's Notes Log).
+            # -- REQUIRED by the retain server for bank_id (one bank per tenant) —
+            # not a secret, a plain per-install identifier.
             - name: AGENT_BRAIN_AGENT_ID
               value: {{ .Values.agentBrain.agentID | quote }}
-            # docs/components/memory-slot.md's actual memory backend — agent-brain's
-            # retain MCP server (memory_retain/memory_recall/memory_reflect/mental
-            # models), a second Deployment within the SAME agent-brain subchart release
-            # above, not the Go server's memory_write. Service name computed the same
-            # way AGENT_BRAIN_BASE_URL's is (nameOverride "memory" ->
-            # <release>-memory-retain-mcp, charts/agent-brain/templates/
-            # service-retain-mcp.yaml). AGENT_BRAIN_AGENT_ID above doubles as bank_id
-            # (one bank per tenant) — no separate value needed.
+            # Service name computed, not a value — the agent-brain subchart is
+            # installed under nameOverride "memory" (values.yaml's
+            # agent-brain.nameOverride), so this Deployment's Service renders as
+            # <release>-memory-retain-mcp (charts/agent-brain/templates/
+            # service-retain-mcp.yaml), deterministic from this release's own name.
             - name: AGENT_BRAIN_RETAIN_BASE_URL
               value: "http://{{ .Release.Name }}-memory-retain-mcp:8890"
             - name: AGENT_BRAIN_RETAIN_API_KEY
@@ -205,8 +185,8 @@ spec:
             # <release>-tools (charts/mcp-hub/templates/_helpers.tpl's
             # mcp-hub.fullname), deterministic from this release's own name.
             # Port 8000 hardcoded matching that chart's own service.port
-            # default, same convention as AGENT_BRAIN_BASE_URL's hardcoded
-            # 8080 above — if mcp-hub.service.port is ever overridden
+            # default, same convention as AGENT_BRAIN_RETAIN_BASE_URL's hardcoded
+            # 8890 above — if mcp-hub.service.port is ever overridden
             # per-tenant, update this too.
             - name: MCP_HUB_URL
               value: "http://{{ .Release.Name }}-tools:8000"

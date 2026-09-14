@@ -22,12 +22,6 @@ type Handler struct {
 	route    string
 }
 
-// New keeps the original mobile endpoint available for already-installed
-// clients while iOS and Android releases move to their explicit routes.
-func New(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config) *Handler {
-	return newHandler(ctx, ingestor, pool, temporal, clerk, "mobile", "/ws")
-}
-
 // NewIOS wires the Apple mobile namespace. iPadOS and CarPlay intentionally
 // share the iOS history because they are surfaces of the same Apple client.
 func NewIOS(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config) *Handler {

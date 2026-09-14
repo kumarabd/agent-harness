@@ -285,16 +285,18 @@ agentBrain:
   # commit a real value here.
   postgres:
     password: ""
-  # -- tenant-worker's own calling credential (AGENT_BRAIN_API_KEY,
-  # agent-brain-secret.yaml) AND the single source
-  # templates/agent-brain-creds-secret.yaml uses to build agent-brain's own
-  # api-keys bootstrap value ("<this value>:tenant-worker") — one value,
-  # both sides. Do NOT commit a real value here.
+  # -- The Go server's own IAM bootstrap credential (templates/
+  # agent-brain-creds-secret.yaml's api-keys value, "<this value>:tenant-worker")
+  # — for whoever calls that server directly (ops tooling, agent-web's Explorer
+  # UI), NOT tenant-worker's own calling credential (that connection was removed
+  # outright 2026-09-13 — see docs/components/memory-slot.md's Notes Log). Do NOT
+  # commit a real value here.
   apiKey: ""
-  # -- Not a secret — the X-Agent-ID header agent-brain's own auth requires
-  # on every call (internal/mcp/tenant.go's "agent_id required" check).
-  # Identifies this calling product, not a per-tenant value in the usual
-  # sense — fine to leave at the chart default for every tenant.
+  # -- Not a secret — doubles as the retain server's bank_id (one bank per
+  # tenant, docs/components/memory-slot.md). Was also the X-Agent-ID header the
+  # Go server's own auth required; that connection is gone (2026-09-13), this
+  # value's other use (bank_id) is why it's kept. Not a per-tenant value in the
+  # usual sense — fine to leave at the chart default for every tenant.
   agentID: "agent-harness"
   # -- Not a secret — the user_id agent-brain's IAM binds tenant-worker's
   # apiKey to at bootstrap (templates/agent-brain-creds-secret.yaml's
@@ -430,12 +432,13 @@ agent-brain:
   # instead of the default <release>-agent-brain — this tenant's memory
   # instance, named for what it does rather than the vendored chart's own
   # name. Referenced directly (not computed) by
-  # templates/tenant-worker-deployment.yaml's AGENT_BRAIN_BASE_URL.
+  # templates/tenant-worker-deployment.yaml's AGENT_BRAIN_RETAIN_BASE_URL and
+  # templates/agent-web-deployment.yaml's AGENT_BRAIN_API_URL.
   nameOverride: "memory"
   image:
     registry: "ghcr.io"
     repositoryOwner: "realnighthawk"
-    tag: "latest"
+    tag: "internal"
   secret:
     # -- create: false + existingSecret below — postgres-dsn and api-keys are
     # NOT set here. Helm values can't reference other values (no

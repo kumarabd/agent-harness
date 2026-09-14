@@ -8,8 +8,8 @@
 > an explicit `progress` field — ALL BUILT + DEPLOYED + LIVE-VERIFIED
 > 2026-09-12, except progress narration (built, NOT yet deployed/verified).
 > iOS/Android platform separation (`/ios/ws`, `/android/ws`) is BUILT
-> 2026-09-13 and awaits deployment/client verification; legacy `/ws` remains
-> available for old releases.
+> 2026-09-13 and awaits deployment/client verification. The obsolete `/ws`
+> route and `mobile` platform have been removed.
 > Deferred: wiring a `Present()` consumer, session list/select.
 
 ## Role
@@ -34,10 +34,9 @@ Session keys are `agent:main:ios:user:<clerkUserID>` and
 Android surfaces share the Android history. The two histories never resolve to
 the same coordinator. Web and macOS retain their own separate scopes as well.
 
-The former `agent:main:mobile:user:<clerkUserID>` history is retained, not
-deleted or rewritten. `GET /ws` continues resolving to it for compatibility
-with installed clients. Updated clients use fresh platform-specific cursor keys
-so a high legacy cursor cannot skip early turns in a new history.
+Existing `agent:main:mobile:user:<clerkUserID>` rows are not deleted, but no
+route resolves to them. Clients use platform-specific cursor keys so a cursor
+from the former shared history cannot skip early turns in a new history.
 
 Concurrency: two devices sending within the same window → the coordinator's
 active-turn guard folds the second in as an interrupt (cancels in-flight work,
@@ -77,12 +76,12 @@ connection per gateway replica, not one per socket.
 ## Streaming
 
 `model_call.py` streams token chunks into `turn_deliveries` (cumulative content)
-for `platform in (discord, discord-voice, mobile)` on the turn's first call.
-For discord/voice it also signals the workflow (`MODEL_CALL_CHUNK_SIGNAL`, drained
-by `turn.go` to dispatch a per-connection delivery activity). **Mobile does not
-signal** — there's no connection to dispatch to; the gateway tails the table via
-the NOTIFY trigger. `turn_deliveries.content` stays cumulative (Discord edits a
-message in place); the gateway diffs it to emit deltas.
+for Discord and all four first-party platforms on the turn's first call. For
+Discord text/voice it also signals the workflow (`MODEL_CALL_CHUNK_SIGNAL`,
+drained by `turn.go` to dispatch a per-connection delivery activity). First-party
+clients do not signal—their gateways tail the table through the NOTIFY trigger.
+`turn_deliveries.content` stays cumulative (Discord edits a message in place);
+the gateway diffs it to emit deltas.
 
 ## Wire protocol
 
@@ -105,7 +104,8 @@ derived from it, never trusted from the client.
 
 ## Files
 
-`internal/gateway/mobile/`: `mobile.go` (the stable `GET /ws` adapter).
+`internal/gateway/mobile/`: `mobile.go` (the `/ios/ws` and `/android/ws`
+adapters).
 `internal/gateway/realtime/`: the shared connection, tail/catchup, hub, frame,
 and cursor machinery used by mobile and Web; mobile alone enables presence.
 See `realtime.md` for the shared transport boundary.
@@ -182,9 +182,9 @@ concern.
 per-connection embedded worker queue) — the wrong coupling for mobile, which
 never needed a dispatch step at all: migration 032/033's
 `mobile_notify_status_pings` NOTIFY trigger already fires the moment
-`StatusPing` writes a row. So mobile only needed `statusPingBackoff("mobile")`
-to return real steps and the write to stop being gated on a dispatch
-mechanism it doesn't use — both fixed; no Python change needed
+`StatusPing` writes a row. So iOS and Android only needed real
+`statusPingBackoff` steps and the write to stop being gated on a dispatch
+mechanism they do not use — both fixed; no Python change needed
 (`status_ping.py` was already platform-neutral).
 
 **Delivered as a `delta`, not a separate `status` frame** (same day,
