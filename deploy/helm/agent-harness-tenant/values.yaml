@@ -313,6 +313,21 @@ agentBrain:
   # chart level.
   ownerUserID: "tenant-worker"
 
+# -- agent-brain's retain MCP server (memory_retain/memory_recall/memory_reflect/
+# mental models) — a second Deployment WITHIN the same agent-brain subchart release
+# above (charts/agent-brain/templates/deployment-retain-mcp.yaml), not a separate
+# release; there's no separate `enabled` flag here because it follows agentBrain.enabled.
+agentBrainRetain:
+  # -- tenant-worker's own calling credential (AGENT_BRAIN_RETAIN_API_KEY,
+  # agent-brain-secret.yaml) AND the single source templates/
+  # agent-brain-creds-secret.yaml uses to populate that Deployment's own
+  # RETAIN_MCP_API_KEY — one value, both sides, same pattern as agentBrain.apiKey
+  # above. Unlike agentBrain.apiKey this is genuinely optional — the retain-mcp
+  # server runs with no auth check at all when unset (its own local-dev
+  # convention, matching agentBrain's own auth.required=false posture). Do NOT
+  # commit a real value here.
+  apiKey: ""
+
 # -- Real LLM config for ModelCall (activities/activities/llm.py). Only
 # needed for turns with no _test_scripted_responses fixture row — pure
 # fixture-based usage (e.g. workflows/scenarios/) never touches this, so

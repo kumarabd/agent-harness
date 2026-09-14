@@ -6,7 +6,7 @@ Everything the model can emit in a response falls into one of three layers:
   - INTERFACE  — open-ended external reach: shell_exec, discover_tools, and the
                  per-task *resolved* tools (built per turn from discover_tools's
                  rows, not listed here).
-  - COGNITION  — reading the agent's own substrate: search_memory / memory_expand
+  - COGNITION  — reading the agent's own substrate: search_memory / reflect_on_entity
                  (agent-brain), lcm_grep /
                  lcm_describe / lcm_expand (this session's history + compaction DAG).
   - CONTROL    — steering the constructs the agent lives inside: report_status
@@ -91,7 +91,7 @@ CAPABILITIES: list[Capability] = [
     Capability("shell_exec", Layer.INTERFACE, _MAIN, handler_ref="shell_exec", timing=HEAVY),
     Capability("merge_subagent_output", Layer.CONTROL, _MAIN, handler_ref="merge_subagent_output", timing=HEAVY),
     Capability("search_memory", Layer.COGNITION, _MAIN, handler_ref="search_memory", meta=True),
-    Capability("memory_expand", Layer.COGNITION, _MAIN, handler_ref="memory_expand"),
+    Capability("reflect_on_entity", Layer.COGNITION, _MAIN, handler_ref="reflect_on_entity"),
     Capability("discover_tools", Layer.INTERFACE, _MAIN, handler_ref="discover_tools", meta=True),
     # call_tool is internal-only since the 2026-09-04 per-task-resolution
     # revision (tool-registry.md, "Resolved: Three-Layer Tool Taxonomy") —

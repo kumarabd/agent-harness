@@ -50,15 +50,21 @@ deploy/docker/tenant-worker.Dockerfile and deploy/helm/agent-harness-tenant:
                          on. Default: 0.0.0.0:9090. See
                          docs/components/budget-guardrails.md, "Resolved:
                          Metrics Export" — plain scrape, no ServiceMonitor.
-    AGENT_BRAIN_BASE_URL/AGENT_BRAIN_API_KEY/AGENT_BRAIN_AGENT_ID
-                         docs/components/memory-slot.md's memory backend
-                         (agent_brain.py, tools.py's memory_search/
-                         memory_expand, write_memory.py). Not required —
-                         a session that never touches memory works fine
-                         without these set; memory_search/memory_expand/
-                         WriteMemory all degrade to a no-op (or, for a
-                         mid-session tool call, a clear error observation)
-                         rather than failing the turn.
+    AGENT_BRAIN_RETAIN_BASE_URL/AGENT_BRAIN_RETAIN_API_KEY/AGENT_BRAIN_AGENT_ID
+                         docs/components/memory-slot.md's memory backend —
+                         agent-brain's retain MCP server (agent_brain.py's
+                         call_retain_tool, tools.py's search_memory/
+                         reflect_on_entity, write_memory.py). AGENT_BRAIN_AGENT_ID
+                         doubles as bank_id (one bank per tenant). Not required —
+                         a session that never touches memory works fine without
+                         these set; search_memory/reflect_on_entity/WriteMemory
+                         all degrade to a no-op (or, for a mid-session tool call,
+                         a clear error observation) rather than failing the turn.
+    AGENT_BRAIN_BASE_URL/AGENT_BRAIN_API_KEY
+                         agent-brain's Go server (memory_write/
+                         memory_system_status/memory_audit_tail) — unused by
+                         this project's own code post-retain-rewrite, kept only
+                         for ops tooling that might still want it directly.
     MCP_HUB_URL          docs/components/tool-registry.md's mcp-hub-mediated
                          tool tier (mcp_hub.py, tools.py's search_tools/
                          call_tool). Not required — search_tools degrades to
@@ -83,7 +89,7 @@ from temporalio.client import Client
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
-from . import llm_client, shell_hub
+from . import agent_brain, llm_client, shell_hub
 from .metrics import LATENCY_BUCKETS_SECONDS, SECONDS_LATENCY_METRICS
 from .compress_context import CompressContextActivity
 from .db import create_pool
@@ -114,6 +120,17 @@ async def main() -> None:
     # builds shell_hub's in-process zvec index once at startup.
     # No-op if shell_hub.CATALOG is empty or EMBEDDING_BASE_URL isn't set.
     await shell_hub.init()
+
+    # docs/components/memory-slot.md, "Resolved: Persona/Directive Content via Mental
+    # Models" — one per-tenant persona mental model, ensured (not recreated) once per
+    # process start. Not required — a deployment without agent-brain's retain server
+    # configured just skips this, same degrade-gracefully stance as the memory tools
+    # themselves.
+    try:
+        await agent_brain.ensure_persona_mental_model()
+    except agent_brain.AgentBrainNotConfiguredError:
+        logging.getLogger(__name__).info("agent-brain retain server not configured, skipping persona mental model bootstrap")
+
     # AsyncOpenAI clients are no longer constructed here (2026-08-28,
     # per-tier provider revision) — every activity that needs one
     # resolves it via llm_client.get_client(model_config), keyed on the

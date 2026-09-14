@@ -21,12 +21,14 @@ that already-verified scenario suite. This is NOT a fallback for arbitrary
 unregistered names — tool_call.py's "unknown tool" error path is real and
 applies to anything not explicitly listed here.
 
-`memory_search`/`memory_expand` (docs/components/memory-slot.md, "Resolved:
-Search/Expand Tools — Both Unrestricted") are named to match agent-brain's
-own MCP tool names directly, NOT memory-slot.md's proposed generic
-`search`/`expand` — that generic `search` name is already taken by the
-fixture stub above (predates this feature, and workflows/scenarios/ depends
-on it staying a stub). No tier of its own: both are quick request/response
+`search_memory`/`reflect_on_entity` (docs/components/memory-slot.md,
+"Resolved: agent-brain Is the Memory Backend") wrap agent-brain's retain MCP
+server's own `memory_recall`/`memory_reflect` tools — model-facing names
+differ from agent-brain's own (the generic `search` name is already taken by
+the fixture stub above, predating this feature; `reflect_on_entity` is more
+descriptive to the model than the bare `memory_reflect`), but `bank_id` is
+injected here rather than model-controlled, since it's one bank per tenant,
+not a per-call choice. No tier of its own: both are quick request/response
 network calls with no cancellable subprocess or session-filesystem lease to
 hold, so they fall back to tool_tiers.go's defaultToolTiming on the Go side
 (no entry needed there) and don't call activity.heartbeat() here.
@@ -34,7 +36,7 @@ hold, so they fall back to tool_tiers.go's defaultToolTiming on the Go side
 `search_tools`/`call_tool` (docs/components/tool-registry.md, "Resolved:
 mcp-hub-Mediated Integration Mechanism") are the mcp-hub-mediated tier's own
 tools, named to match mcp-hub's real MCP tool names directly, same reasoning
-as memory_search/memory_expand above — same no-tier-of-its-own treatment.
+as search_memory/reflect_on_entity above — same no-tier-of-its-own treatment.
 search_tools additionally fans out to shell_hub.py's local, in-process
 discovery ("Resolved: Native-Tool Discovery") and returns the combined
 result.
@@ -391,19 +393,22 @@ async def memory_search(arguments: dict, ctx: ToolContext) -> dict:
     """docs/components/memory-slot.md's `search` — shallow, unrestricted
     (available to both the main agent and subagents; tool-level access
     control, if ever added, is components/tool-registry.md's concern, not
-    this handler's). arguments passed straight through as agent-brain's own
-    memory_search params (query, limit) — the model already speaks
-    agent-brain's schema directly, no reshaping needed."""
-    return await agent_brain.call_tool("memory_search", arguments)
+    this handler's). Model passes `query`; bank_id (one bank per tenant) is
+    injected here, not model-controlled."""
+    return await agent_brain.call_retain_tool(
+        "memory_recall", {"bank_id": agent_brain.retain_bank_id(), "query": arguments["query"]}
+    )
 
 
-async def memory_expand(arguments: dict, ctx: ToolContext) -> dict:
-    """docs/components/memory-slot.md's `expand` — deep, also unrestricted
-    (agent-brain's memory_expand has no depth parameter to escalate through,
-    so the unbounded-re-expansion risk that would motivate a subagent-only
-    restriction doesn't apply — see that doc's "Resolved: Search/Expand
-    Tools"). arguments passed straight through (node_id, node_type, limit)."""
-    return await agent_brain.call_tool("memory_expand", arguments)
+async def reflect_on_entity(arguments: dict, ctx: ToolContext) -> dict:
+    """docs/components/memory-slot.md's `reflect` — also unrestricted (no
+    depth parameter to escalate through, so the unbounded-re-expansion risk
+    that would motivate a subagent-only restriction doesn't apply). Model
+    passes `entity_name`/`query`; bank_id injected here."""
+    return await agent_brain.call_retain_tool(
+        "memory_reflect",
+        {"bank_id": agent_brain.retain_bank_id(), "entity_name": arguments["entity_name"], "query": arguments["query"]},
+    )
 
 
 async def discover_tools(query: str, top_k: int = 5) -> list[dict]:
@@ -551,7 +556,7 @@ async def lcm_describe(arguments: dict, ctx: ToolContext) -> dict:
     came from either lcm_grep's own output or a summary block lcm.assemble
     rendered into THIS session's context, so in practice it never crosses a
     session boundary; no explicit ctx.session_key check added on top of
-    that, matching memory_search/memory_expand's own "unrestricted" stance
+    that, matching search_memory/reflect_on_entity's own "unrestricted" stance
     just above."""
     id_arg = arguments.get("id")
     if not isinstance(id_arg, str) or not id_arg:
@@ -612,7 +617,7 @@ _HANDLERS: dict[str, Any] = {
     "shell_exec": shell_exec,
     "merge_subagent_output": merge_subagent_output,
     "search_memory": memory_search,
-    "memory_expand": memory_expand,
+    "reflect_on_entity": reflect_on_entity,
     "discover_tools": search_tools,
     "call_tool": call_tool,
     "lcm_grep": lcm_grep,

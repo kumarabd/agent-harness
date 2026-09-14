@@ -240,7 +240,7 @@ async def _summarize_text(text: str, provider, model: str) -> dict:
     deterministic-only summary. The tool call itself must keep
     succeeding regardless of an external service's availability, same
     graceful-degradation pattern agent_brain.py already uses for
-    memory_search failures."""
+    search_memory failures."""
     lines = text.splitlines()
     result: dict = {
         "type": "text",

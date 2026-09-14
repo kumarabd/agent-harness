@@ -94,8 +94,20 @@ const modelCallChunkSignalName = "ModelCallChunk"
 // coordinator.go's idle-timeout exit (session completion) and turn.go's
 // hard-compression path below (context compaction) — no longer from every
 // turn's own end-of-turn block.
+//
+// RetryPolicy.MaximumAttempts: 3 (matching every other activity call in this
+// file) — NOT the default unlimited retries this call ran with under the old
+// memory_write contract, where a content-hash event_id made a retried call a
+// free no-op. The new agent-brain retain server's memory_retain has no
+// idempotency key at all (docs/components/memory-slot.md, "Resolved:
+// Write-Path Construction") — an unbounded-retry transient failure would now
+// re-run real fact/entity extraction on the same merged text more than once,
+// not silently no-op.
 func WriteMemoryWorkflow(ctx workflow.Context, sessionKey string) error {
-	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
+	ao := workflow.ActivityOptions{
+		StartToCloseTimeout: activityTimeoutTierA,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+	}
 	actx := workflow.WithActivityOptions(ctx, ao)
 	return workflow.ExecuteActivity(actx, "WriteMemory", sessionKey).Get(actx, nil)
 }

@@ -174,6 +174,22 @@ spec:
             # domain.TenantContext.AgentID comment).
             - name: AGENT_BRAIN_AGENT_ID
               value: {{ .Values.agentBrain.agentID | quote }}
+            # docs/components/memory-slot.md's actual memory backend — agent-brain's
+            # retain MCP server (memory_retain/memory_recall/memory_reflect/mental
+            # models), a second Deployment within the SAME agent-brain subchart release
+            # above, not the Go server's memory_write. Service name computed the same
+            # way AGENT_BRAIN_BASE_URL's is (nameOverride "memory" ->
+            # <release>-memory-retain-mcp, charts/agent-brain/templates/
+            # service-retain-mcp.yaml). AGENT_BRAIN_AGENT_ID above doubles as bank_id
+            # (one bank per tenant) — no separate value needed.
+            - name: AGENT_BRAIN_RETAIN_BASE_URL
+              value: "http://{{ .Release.Name }}-memory-retain-mcp:8890"
+            - name: AGENT_BRAIN_RETAIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-harness.fullname" . }}-agent-brain
+                  key: AGENT_BRAIN_RETAIN_API_KEY
+                  optional: true
           {{- end }}
           {{- if .Values.mcpHub.enabled }}
             # docs/components/tool-registry.md's mcp-hub-mediated tier — no

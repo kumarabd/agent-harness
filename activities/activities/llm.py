@@ -76,7 +76,7 @@ _SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"
 
 # Rewritten 2026-08-29 — the original ("autonomous coding assistant... use
 # shell_exec") was a scaffolding-era placeholder from before search_tools/
-# call_tool/memory_search/memory_expand existed at all, and it actively
+# call_tool/search_memory/reflect_on_entity existed at all, and it actively
 # misdescribed what this deployment actually is: a general-purpose personal
 # assistant with a discoverable-tool surface (real, per-tenant third-party
 # APIs via mcp-hub — maps, notes, health, finance, code hosting, and
@@ -122,7 +122,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "PROVISIONING. Some capabilities are already offered to you directly this turn — call them "
     "by name like any other tool. To reach beyond what you have:\n"
     "- search_memory — recall context about the user, people, or past decisions from long-term "
-    "memory (memory_expand for the raw detail behind a result).\n"
+    "memory (reflect_on_entity for a synthesized answer about one specific person or thing, "
+    "rather than a raw result list).\n"
     "- discover_tools — find a tool that isn't already offered; a match becomes callable by its "
     "own name on your NEXT step, not the response that found it.\n"
     "- spawn_subagent — delegate a self-contained slice of work to its own focused turn.\n"
@@ -276,20 +277,19 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "search_memory",
             # Description mirrors agent-brain's own tool description
-            # (internal/mcp/tools.go) verbatim-ish — the model is calling
+            # (mcp_server.py's memory_recall) verbatim-ish — the model is calling
             # agent-brain directly, not a paraphrased wrapper.
             "description": (
-                "Recall relevant context from past conversations and long-term memory. "
-                "Searches the full semantic layer at once: episodic memory units, promoted "
-                "generalized facts and relationships, raw asserted facts and relationships, "
-                "rules/constraints, and concept definitions, fused into one ranked list. "
-                "Use memory_expand on a result's id to recover the raw episodes behind it."
+                "Recall relevant context from past conversations and long-term memory. Fuses "
+                "semantic, keyword, graph, and temporal signals into one ranked list of memory "
+                "units. A plain, fast read — never writes anything. Use reflect_on_entity instead "
+                "when you want a synthesized answer about one specific person or thing, not a list "
+                "of raw memory units."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Natural language recall query."},
-                    "limit": {"type": "number", "description": "Max results to return (default 10)."},
                 },
                 "required": ["query"],
             },
@@ -298,23 +298,21 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "memory_expand",
+            "name": "reflect_on_entity",
             "description": (
-                "Recover raw, verbatim episodes backing a search_memory result. Always "
-                "full-depth — the raw events and facts, in chronological order. Use when the "
-                "content already attached to a search_memory result isn't specific enough."
+                "Ask a question answered from long-term memory about a specific, already-known "
+                "entity (a person, project, or thing) — synthesizes an answer from everything "
+                "recalled about it, rather than returning raw memory units like search_memory "
+                "does. Does not create the entity if it doesn't already exist — search_memory or "
+                "plain conversation must have established it first."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "node_id": {"type": "string", "description": "id returned by memory_search."},
-                    "node_type": {
-                        "type": "string",
-                        "description": '"emu" (default) or "semantic" — which kind node_id is.',
-                    },
-                    "limit": {"type": "number", "description": "Max episodes to return (default 20, max 50)."},
+                    "entity_name": {"type": "string", "description": "Name of the entity to reflect on."},
+                    "query": {"type": "string", "description": "The question to answer about this entity."},
                 },
-                "required": ["node_id"],
+                "required": ["entity_name", "query"],
             },
         },
     },
