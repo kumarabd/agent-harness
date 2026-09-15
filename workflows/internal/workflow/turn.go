@@ -1088,14 +1088,25 @@ loop:
 		// --- No-progress guard (future-work.md §4). A step with no content and
 		// no tool calls that still isn't "done" produced nothing actionable —
 		// two running means the model is stuck (a report_status "working" call
-		// gets peeled, so it reads as an empty step here). End the turn rather
-		// than loop to the ceiling.
+		// gets peeled, so it reads as an empty step here). This is a genuine
+		// failure, not a quiet completion: the user must never be left with
+		// silence just because the model couldn't produce anything after a
+		// real second chance (model_call.py already coerces a false "done"
+		// claim — empty content or a dropped tool call — to "working" once;
+		// two such steps in a row means that retry didn't help). Routed
+		// through the same failTurn() used for genuine infra errors —
+		// turns.status='failed', a visible notice, no silent "completed" —
+		// rather than falling into the generic egress path below, which
+		// treats every non-cancelled stop as an ordinary success.
 		if !mcOut.HasContent && len(mcOut.ToolCalls) == 0 && mcOut.Status != "done" {
 			emptyStreak++
 			if emptyStreak >= 2 {
-				stopReason = "no_progress"
 				cancel()
-				break
+				return failTurn(
+					ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType,
+					errors.New("model made no progress: two consecutive steps with no content and no tool calls"),
+					interrupts,
+				)
 			}
 		} else {
 			emptyStreak = 0

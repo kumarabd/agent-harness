@@ -1,0 +1,18 @@
+{
+  "_comment": "future-work.md's no-progress guard (turn.go) — two consecutive steps with no content, no tool calls, and status!=done mean the model is stuck. This must surface as a genuine turn failure (turns.status='failed', a visible failTurn notice), never as a silent 'completed' turn with nothing delivered — the harness must be as vocal as possible about a real failure, but the visible text is a system notice about the failure, never a fabricated stand-in for what the model would have said.",
+  "message": { "role": "user", "content": "do something" },
+  "scripted_model_responses": [
+    {
+      "content": "",
+      "tool_calls": [],
+      "status": "working",
+      "usage": { "input_tokens": 20, "output_tokens": 0 }
+    },
+    {
+      "content": "",
+      "tool_calls": [],
+      "status": "working",
+      "usage": { "input_tokens": 20, "output_tokens": 0 }
+    }
+  ]
+}

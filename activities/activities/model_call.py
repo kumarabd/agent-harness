@@ -410,19 +410,26 @@ class ModelCallActivity:
             # raw_tool_calls stays non-empty, and that must keep the loop going
             # ("working") so the model sees the rejection observation.
             status = model_status or ("done" if not raw_tool_calls else "working")
+            has_content = bool((content or "").strip())
             # Invariant every downstream consumer of ModelCallOutput.status
             # relies on (turn.go's `done` branch trusts it unconditionally):
-            # "done" never coexists with a pending tool call. A model can
-            # still emit both in one step — report_status(done) alongside a
-            # real action like create_intention — which is self-contradictory
-            # (the task can't be "the answer" while an unobserved action is
-            # still outstanding). Coerced here, the one place both signals are
-            # known together, rather than left for every reader of `status`
-            # downstream to re-derive its own defensive check. Same
-            # "tolerate imperfect model adherence" posture as the missing-
-            # report_status fallback in the comment above — found via a real
-            # reminder request whose create_intention call was minted and then
-            # silently dropped because nothing reconciled the two signals.
+            # "done" means exactly what report_status's own schema documents
+            # — "the task is complete and your message is the answer" — which
+            # is false if either (a) a real action is still pending
+            # observation, or (b) there is no message. A model can author
+            # either contradiction: report_status(done) alongside a real tool
+            # call like create_intention, or report_status(done) with an
+            # empty response. Both are coerced to "working" here, the one
+            # place every signal (status, tool calls, content) is known
+            # together, rather than left for each downstream reader of
+            # `status` to re-derive its own defensive check — turn.go's
+            # no-progress guard already exists to bound a genuine retry, so
+            # reusing it (instead of trusting a false "done") turns a silent
+            # failure into an honest one. Same "tolerate imperfect model
+            # adherence" posture as the missing-report_status fallback above.
+            # Found via two real bugs from one live reminder request: (a) a
+            # create_intention call minted then silently dropped, (b) a
+            # "done" turn whose final message was empty, delivering nothing.
             if status == "done" and raw_tool_calls:
                 logger.warning(
                     "ModelCall[%s:%d]: model reported status=done alongside %d tool call(s) (%s) "
@@ -431,11 +438,19 @@ class ModelCallActivity:
                     ", ".join(tc.get("name", "?") for tc in raw_tool_calls),
                 )
                 status = "working"
+            elif status == "done" and not has_content:
+                logger.warning(
+                    "ModelCall[%s:%d]: model reported status=done with an empty message "
+                    "— treating as 'working' so the no-progress guard can give it one real "
+                    "retry instead of ending the turn with nothing delivered",
+                    input.turn_id, input.context_seq,
+                )
+                status = "working"
             return ModelCallOutput(
                 status=status,
                 tool_calls=refs,
                 usage=usage,
-                has_content=bool((content or "").strip()),
+                has_content=has_content,
                 context_tokens=context_tokens,
                 context_window=context_window,
                 next_step=NextStep(

@@ -126,16 +126,31 @@ output field; the tool call is just the wire. When the model omits it,
 `model_call.py` synthesizes `status` from tool-call presence (the Phase-2
 fallback — removed once model adherence is proven).
 
-**Invariant: `status: done` never coexists with a pending tool call.** A model
-can still author both in one step (`report_status(done)` alongside a real
-action like `create_intention`) — self-contradictory, since the task can't be
-"the answer" while an unobserved action is still outstanding. `model_call.py`
-coerces this to `working` at the one point both signals are known together
-(logged as a warning — a real model-adherence gap, not a silent fallback);
-every downstream reader of `status` (`turn.go`'s loop included) trusts the
-invariant rather than re-deriving it. Found via a live reminder request whose
-`create_intention` call was minted, then silently dropped, because nothing
-reconciled the two signals before this fix.
+**Invariant: `status: done` means exactly what `report_status` documents —
+"the task is complete and your message is the answer."** Two ways a model can
+author a `done` that contradicts this, both self-inflicted: pairing it with a
+real pending tool call (e.g. `create_intention` in the same step — the task
+isn't "the answer" while an unobserved action is still outstanding), or
+pairing it with an empty message (there is no answer). `model_call.py` coerces
+either case to `working` at the one point every signal (`status`, tool calls,
+content) is known together (logged as a warning — a real model-adherence gap,
+not a silent fallback); every downstream reader of `status` (`turn.go`'s loop
+included) trusts the invariant rather than re-deriving it. Found via a live
+reminder request that hit both cases in successive turns: a `create_intention`
+call minted then silently dropped, and later a `done` turn whose final message
+was empty, delivering nothing to the user.
+
+**A stuck model fails loudly, never silently.** The coercion above buys the
+model exactly one real retry (the existing no-progress guard: two consecutive
+steps with no content and no tool calls). If that retry also produces
+nothing, the turn is a genuine failure, not a quiet completion — it fails via
+the same `failTurn` path a hard infrastructure error takes (`turns.status =
+'failed'`, a visible system notice), never the ordinary "completed" egress
+that would otherwise treat persistent model silence as an unremarkable
+success. The notice is a system-authored failure notice, not a fabricated
+stand-in for the model's answer — content the user sees as "the assistant
+said X" stays the model's responsibility; the harness's only content is the
+explicit, out-of-band statement that it failed.
 
 ---
 
