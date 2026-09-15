@@ -223,8 +223,14 @@ async def list_intentions(arguments: dict, ctx: "ToolContext") -> dict:
             out.append({"intention_id": wf.id, "state": "unknown"})
 
     # Schedules aren't workflow executions until they fire, so they carry no
-    # Search Attributes — scope them by id prefix as before.
-    async for sched in client.list_schedules():
+    # Search Attributes — scope them by id prefix as before. Unlike
+    # list_workflows (a plain method returning a WorkflowExecutionAsyncIterator
+    # directly), list_schedules is itself `async def` in temporalio — it must
+    # be awaited first to get the ScheduleAsyncIterator, then iterated;
+    # `async for` directly on the coroutine is a real bug ("'async for'
+    # requires an object with __aiter__ method, got coroutine"), verified
+    # against the actual installed SDK (temporalio 1.32.0) in the live pod.
+    async for sched in await client.list_schedules():
         if not sched.id.startswith(sched_prefix):
             continue
         out.append(await _describe_schedule(client, sched.id))
