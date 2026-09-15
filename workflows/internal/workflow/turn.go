@@ -1118,6 +1118,12 @@ loop:
 				cancel()
 				continue
 			}
+			// Safe to break unconditionally: activities/activities/model_call.py
+			// guarantees status=="done" never coexists with a pending tool
+			// call (a model pairing report_status(done) with e.g.
+			// create_intention in the same step is coerced to "working"
+			// there, the one place both signals are known together) — no
+			// need to re-derive that check on every reader of mcOut.Status.
 			stopReason = "no_tool_calls"
 			cancel()
 			break

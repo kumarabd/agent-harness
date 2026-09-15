@@ -410,6 +410,27 @@ class ModelCallActivity:
             # raw_tool_calls stays non-empty, and that must keep the loop going
             # ("working") so the model sees the rejection observation.
             status = model_status or ("done" if not raw_tool_calls else "working")
+            # Invariant every downstream consumer of ModelCallOutput.status
+            # relies on (turn.go's `done` branch trusts it unconditionally):
+            # "done" never coexists with a pending tool call. A model can
+            # still emit both in one step — report_status(done) alongside a
+            # real action like create_intention — which is self-contradictory
+            # (the task can't be "the answer" while an unobserved action is
+            # still outstanding). Coerced here, the one place both signals are
+            # known together, rather than left for every reader of `status`
+            # downstream to re-derive its own defensive check. Same
+            # "tolerate imperfect model adherence" posture as the missing-
+            # report_status fallback in the comment above — found via a real
+            # reminder request whose create_intention call was minted and then
+            # silently dropped because nothing reconciled the two signals.
+            if status == "done" and raw_tool_calls:
+                logger.warning(
+                    "ModelCall[%s:%d]: model reported status=done alongside %d tool call(s) (%s) "
+                    "— treating as 'working' so they aren't silently dropped",
+                    input.turn_id, input.context_seq, len(raw_tool_calls),
+                    ", ".join(tc.get("name", "?") for tc in raw_tool_calls),
+                )
+                status = "working"
             return ModelCallOutput(
                 status=status,
                 tool_calls=refs,

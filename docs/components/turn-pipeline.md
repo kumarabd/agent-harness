@@ -126,6 +126,17 @@ output field; the tool call is just the wire. When the model omits it,
 `model_call.py` synthesizes `status` from tool-call presence (the Phase-2
 fallback — removed once model adherence is proven).
 
+**Invariant: `status: done` never coexists with a pending tool call.** A model
+can still author both in one step (`report_status(done)` alongside a real
+action like `create_intention`) — self-contradictory, since the task can't be
+"the answer" while an unobserved action is still outstanding. `model_call.py`
+coerces this to `working` at the one point both signals are known together
+(logged as a warning — a real model-adherence gap, not a silent fallback);
+every downstream reader of `status` (`turn.go`'s loop included) trusts the
+invariant rather than re-deriving it. Found via a live reminder request whose
+`create_intention` call was minted, then silently dropped, because nothing
+reconciled the two signals before this fix.
+
 ---
 
 ## Prompt assembly

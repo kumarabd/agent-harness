@@ -119,12 +119,26 @@ async def main() -> None:
     # docs/components/memory-slot.md, "Resolved: Persona/Directive Content via Mental
     # Models" — one per-tenant persona mental model, ensured (not recreated) once per
     # process start. Not required — a deployment without agent-brain's retain server
-    # configured just skips this, same degrade-gracefully stance as the memory tools
-    # themselves.
+    # configured (or, per the real incident below, one that's misconfigured/unreachable)
+    # just skips this, same degrade-gracefully stance as the memory tools themselves.
+    #
+    # Real incident, not hypothetical (2026-09-14): caught only AgentBrainNotConfiguredError
+    # here originally — a real DNS failure (AGENT_BRAIN_RETAIN_BASE_URL pointing at a
+    # retain-mcp Service that hadn't actually been deployed yet in that cluster) surfaced
+    # as an unhandled ExceptionGroup instead (the MCP client's streamable-HTTP transport
+    # fails before ever producing a clean AgentBrainCallError to catch), which propagated
+    # out of main() and killed the ENTIRE tenant-worker process — every session, every
+    # tool call, not just this one optional bootstrap step. Broadened to catch any
+    # failure here: one bootstrap nicety must never take down a worker whose job is
+    # everything else too.
     try:
         await agent_brain.ensure_persona_mental_model()
-    except agent_brain.AgentBrainNotConfiguredError:
-        logging.getLogger(__name__).info("agent-brain retain server not configured, skipping persona mental model bootstrap")
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "persona mental model bootstrap failed (agent-brain retain server not "
+            "configured, unreachable, or misconfigured) — continuing without it",
+            exc_info=True,
+        )
 
     # AsyncOpenAI clients are no longer constructed here (2026-08-28,
     # per-tier provider revision) — every activity that needs one
