@@ -64,17 +64,26 @@ actions with `status: working` and the loop continues.
 
 ### Stop conditions
 
-The loop ends when any of these is true (whichever fires, the turn completes with
-whatever it has — never a hard crash):
+Two independent questions, decided separately — this used to be one conflated
+check and the conflation was a real bug (see the invariant note below):
 
-- `status: done` **and** no follow-up message is queued at that boundary.
-- `iterations >= ceiling` — a hard cap the model cannot raise (see *Iteration
-  budget*).
-- token/cost budget exhausted.
+1. **Is there more work to do?** Decided purely by `tool_calls`, never by
+   `status`. Any pending tool call is dispatched unconditionally — even a step
+   that also claims `status: done` or `blocked`. A stop signal never discards
+   real requested work (`create_intention`, `ask_user`, anything else).
+2. **Should the loop stop?** Only asked once (1) says there is nothing left to
+   dispatch. Then:
+   - `status: done` **and** no follow-up message queued at that boundary → stop.
+   - `status: blocked` with nothing to wait on **and** no follow-up queued →
+     stop (an `ask_user` call would already have been caught by (1) instead).
+   - `iterations >= ceiling` — a hard cap the model cannot raise (see
+     *Iteration budget*).
+   - token/cost budget exhausted.
 
-`status: done` racing an incoming message: the loop checks the follow-up queue
-**before** acting on `done`. A pending message means `done` was decided on stale
-input — fold the message in, keep looping, let the model re-decide.
+`status: done`/`blocked` racing an incoming message: the loop checks the
+follow-up queue **before** acting on either. A pending message means the status
+was decided on stale input — fold the message in, keep looping, let the model
+re-decide.
 
 ---
 
@@ -126,31 +135,39 @@ output field; the tool call is just the wire. When the model omits it,
 `model_call.py` synthesizes `status` from tool-call presence (the Phase-2
 fallback — removed once model adherence is proven).
 
-**Invariant: `status: done` means exactly what `report_status` documents —
-"the task is complete and your message is the answer."** Two ways a model can
-author a `done` that contradicts this, both self-inflicted: pairing it with a
-real pending tool call (e.g. `create_intention` in the same step — the task
-isn't "the answer" while an unobserved action is still outstanding), or
-pairing it with an empty message (there is no answer). `model_call.py` coerces
-either case to `working` at the one point every signal (`status`, tool calls,
-content) is known together (logged as a warning — a real model-adherence gap,
-not a silent fallback); every downstream reader of `status` (`turn.go`'s loop
-included) trusts the invariant rather than re-deriving it. Found via a live
-reminder request that hit both cases in successive turns: a `create_intention`
-call minted then silently dropped, and later a `done` turn whose final message
-was empty, delivering nothing to the user.
+**`status` is never reconciled against `tool_calls` or `content` — those are
+two separate concerns that must not collapse onto one field.** An earlier
+version of this fix tried to make `status: done` mean "the task is complete
+*and* your message is the answer," coercing it to `working` whenever a step
+paired `done` with a pending tool call or an empty message. The tool-call
+half of that was solving a real problem in the wrong place (see *Stop
+conditions* above — `turn.go` now dispatches pending tool calls unconditionally,
+so `status` never needs correcting for that). The empty-message half was
+wrong outright: it assumed an empty response always means something broke,
+but silence is a legitimate answer any time the model genuinely has nothing
+to add — a proactive check that decides not to notify, a user who said "no
+more" and gets no further reply. **Delivery is decided purely by whether
+`content` is non-empty; the harness never second-guesses that against who
+triggered the turn or what `status` says.**
 
-**A stuck model fails loudly, never silently.** The coercion above buys the
-model exactly one real retry (the existing no-progress guard: two consecutive
-steps with no content and no tool calls). If that retry also produces
-nothing, the turn is a genuine failure, not a quiet completion — it fails via
-the same `failTurn` path a hard infrastructure error takes (`turns.status =
-'failed'`, a visible system notice), never the ordinary "completed" egress
-that would otherwise treat persistent model silence as an unremarkable
-success. The notice is a system-authored failure notice, not a fabricated
-stand-in for the model's answer — content the user sees as "the assistant
-said X" stays the model's responsibility; the harness's only content is the
-explicit, out-of-band statement that it failed.
+**A model that's actually stuck still fails loudly, never silently** — this
+part didn't change. The no-progress guard (two consecutive `status: working`
+steps with neither content nor a tool call) is a different signal entirely: not
+"the model said nothing," but "the model claimed more work was coming and then
+produced none of it." That still routes through the same `failTurn` path a
+hard infrastructure error takes (`turns.status = 'failed'`, a visible system
+notice) rather than the ordinary "completed" egress silently treating a stuck
+model as an unremarkable success. The notice is a system-authored failure
+notice, not a fabricated stand-in for the model's answer — content the user
+sees as "the assistant said X" stays the model's responsibility; the harness's
+only content is the explicit, out-of-band statement that it failed.
+
+Found via a live reminder request that surfaced both halves of the original
+conflation in successive turns: a `create_intention` call minted then
+silently dropped (fixed by dispatch-before-stop, not status coercion), and
+later a `done` turn whose final message was empty (not actually a bug —
+silence there was correct; the fix was removing the coercion that turned it
+into one).
 
 ---
 

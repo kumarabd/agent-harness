@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# done-with-empty-content.json — a "done" step with no message content must
-# not end the turn with nothing delivered. model_call.py coerces the
-# contradictory status to "working" so the no-progress guard gives the model
-# one real retry; the turn only completes once a real message exists.
+# done-with-empty-content.json — an empty message with status=done must end
+# the turn cleanly in one step, not retry and not fail. Silence is a valid
+# outcome; the harness never second-guesses it.
 set -euo pipefail
 
 ROOT_TURN_ID="$2"
@@ -14,16 +13,15 @@ fail() { echo "  FAIL: $1"; exit 1; }
 ok() { echo "  ok: $1"; }
 
 [ "$(pg "SELECT status FROM turns WHERE turn_id = '$ROOT_TURN_ID'")" = "completed" ] \
-  || fail "root turn not completed"
-ok "turn completed"
+  || fail "expected turns.status='completed' — silence is not a failure"
+ok "turn completed normally, not marked failed"
 
 n_asst="$(pg "SELECT count(*) FROM messages WHERE parent_id = '$ROOT_TURN_ID' AND role = 'assistant'")"
-[ "${n_asst:-0}" = "2" ] || fail "expected exactly 2 assistant messages (the loop must retry past the empty 'done' step), got $n_asst"
-ok "loop retried past the empty 'done' step instead of ending on it"
+[ "${n_asst:-0}" = "1" ] || fail "expected exactly 1 assistant message (no forced retry on empty done), got $n_asst"
+ok "no retry was forced — one step, done"
 
-ans="$(pg "SELECT content FROM messages WHERE parent_id = '$ROOT_TURN_ID' AND role = 'assistant' ORDER BY seq DESC LIMIT 1")"
-[ -n "$ans" ] || fail "final message is empty — nothing was delivered to the user"
-echo "$ans" | grep -qi "done" || fail "final message is not the retry's real content: '$ans'"
-ok "a real, non-empty message reached the user"
+ans="$(pg "SELECT content FROM messages WHERE parent_id = '$ROOT_TURN_ID' AND role = 'assistant' LIMIT 1")"
+[ -z "$ans" ] || fail "expected the persisted message to be empty, got: '$ans'"
+ok "the empty message was persisted as-is, not rewritten"
 
 exit 0

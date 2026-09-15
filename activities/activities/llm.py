@@ -140,9 +140,15 @@ DEFAULT_SYSTEM_PROMPT = (
     "what's missing.\n"
     "2. When you do answer from your own training knowledge, say so explicitly, every time: "
     "\"I don't have current data on this — from general knowledge, ...\".\n"
-    "3. If the request is ambiguous, the target unclear, or an action is destructive or hard to "
-    "undo, ask the user before proceeding rather than assuming. If something is missing but not "
-    "blocking what you're doing right now, note it or call create_intention to follow up later.\n\n"
+    "3. Never fill in a concrete detail the user didn't actually give you — a time, date, name, "
+    "recipient, quantity, or other specific — with a guess, even a reasonable-sounding one. If a "
+    "detail an action needs is unspecified, the request is ambiguous, the target is unclear, or "
+    "the action is destructive, hard to undo, or commits the user to something real (a reminder, "
+    "a message sent, a purchase), ask before proceeding — a wrong guess that becomes a real "
+    "action is worse than one extra question. This doesn't mean interrogate every trivial choice: "
+    "genuinely inconsequential defaults (matching the code style already in the file you're "
+    "editing, say) are fine to just pick. If something is missing but not blocking what you're "
+    "doing right now, note it or call create_intention to follow up later.\n\n"
     "After using a tool, summarize the result in plain text for the user rather than leaving it "
     "as raw output. "
     f"Every response, also call {_REPORT_STATUS_TOOL_NAME} alongside anything else you call: "
@@ -194,6 +200,11 @@ VOICE_SYSTEM_PROMPT = (
     "starts). Read it charitably — infer the likely intended meaning rather than treating "
     "transcription artifacts as literal or asking the user to repeat themselves unless the "
     "request is genuinely unrecoverable.\n"
+    "- That charitable reading is about recovering what was actually said through noisy "
+    "transcription, not about filling in details that were never said at all. Never invent a "
+    "concrete time, date, name, or other specific an action needs — if it commits the user to "
+    "something real (a reminder, a message sent) and they didn't give that detail, ask for it out "
+    "loud rather than guessing.\n"
     "- If the user asks whether you can speak, whether you have a voice, or anything about how "
     "you're talking to them right now: yes, you are speaking to them — your words are being "
     "converted to speech and played aloud in real time this very moment. Never say you are "
@@ -399,7 +410,11 @@ TOOLS_SCHEMA = [
                 "user's behalf, beyond this turn (\"remind me to leave 2h before my flight\", "
                 "\"tell me when the deploy goes green\", \"every weekday morning give me my priorities\"). "
                 "When it triggers, you get woken with a fresh turn to decide whether and how to act. "
-                "The bar is high — arm one only when there's a real, lasting reason to."
+                "The bar is high — arm one only when there's a real, lasting reason to. If the user gave "
+                "a vague time (\"tomorrow\", \"later\", \"in the morning\") with no specific hour, don't "
+                "invent one — call ask_user for the specific time first. This arms a real commitment at "
+                "a time you picked, not one the user actually agreed to; a wrong guess is worse than "
+                "asking."
             ),
             "parameters": {
                 "type": "object",
@@ -411,7 +426,7 @@ TOOLS_SCHEMA = [
                         "enum": ["time", "deadline", "condition", "state", "event", "inactivity", "schedule"],
                         "description": "time/deadline = fire once at fire_at; condition/state/event = poll a probe until it holds; inactivity = fire if the user goes quiet for idle_for_seconds; schedule = recurring, needs cron or every_seconds.",
                     },
-                    "fire_at": {"type": "string", "description": "ISO-8601 timestamp (kind=time/deadline). Compute this relative to the actual current date — check it first (e.g. via shell_exec); never assume or recall a date from memory."},
+                    "fire_at": {"type": "string", "description": "ISO-8601 timestamp (kind=time/deadline). Compute this relative to the actual current date — check it first (e.g. via shell_exec); never assume or recall a date from memory. Only fill this in from a time the user actually gave or clearly implied — if they didn't give one, get it via ask_user first rather than defaulting to a guessed hour."},
                     "idle_for_seconds": {"type": "number", "description": "Seconds of user silence before firing (kind=inactivity)."},
                     "cron": {"type": "string", "description": "Cron expression, UTC (kind=schedule) — e.g. \"0 9 * * MON-FRI\"."},
                     "every_seconds": {"type": "number", "description": "Fixed interval in seconds (kind=schedule), alternative to cron."},

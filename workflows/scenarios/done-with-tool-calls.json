@@ -1,5 +1,5 @@
 {
-  "_comment": "turn-pipeline.md status:\"done\" contract — a model can (wrongly) pair status:\"done\" with a real tool call in the same step (report_status(done) alongside e.g. create_intention). activities/activities/model_call.py must coerce that contradictory status to \"working\" (the one place both signals are known together) rather than let turn.go's `done` branch break on it and silently drop the tool call. Regression for a real bug found via a live reminder request whose create_intention call was minted into tool_calls (status=pending) and then discarded because nothing reconciled the two signals.",
+  "_comment": "turn-pipeline.md — pending tool calls are always dispatched, regardless of what status claims. A model can (wrongly) pair status:\"done\" with a real tool call in the same step (report_status(done) alongside e.g. create_intention); turn.go's stop/continue check looks at ToolCalls FIRST and only consults status once nothing is pending, so this still dispatches instead of being silently dropped. Regression for a real bug found via a live reminder request whose create_intention call was minted into tool_calls (status=pending) and then discarded because status alone gated the stop decision.",
   "message": { "role": "user", "content": "remind me tomorrow, then confirm" },
   "scripted_model_responses": [
     {

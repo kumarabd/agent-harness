@@ -1088,16 +1088,14 @@ loop:
 		// --- No-progress guard (future-work.md §4). A step with no content and
 		// no tool calls that still isn't "done" produced nothing actionable —
 		// two running means the model is stuck (a report_status "working" call
-		// gets peeled, so it reads as an empty step here). This is a genuine
-		// failure, not a quiet completion: the user must never be left with
-		// silence just because the model couldn't produce anything after a
-		// real second chance (model_call.py already coerces a false "done"
-		// claim — empty content or a dropped tool call — to "working" once;
-		// two such steps in a row means that retry didn't help). Routed
-		// through the same failTurn() used for genuine infra errors —
-		// turns.status='failed', a visible notice, no silent "completed" —
-		// rather than falling into the generic egress path below, which
-		// treats every non-cancelled stop as an ordinary success.
+		// gets peeled, so it reads as an empty step here). Distinct from "the
+		// model deliberately said nothing" below: this is status=="working"
+		// (more is claimed to be coming) with nothing actually happening,
+		// which two steps running means it never will. Routed through the
+		// same failTurn() used for genuine infra errors — turns.status='failed',
+		// a visible notice, no silent "completed" — rather than falling into
+		// the generic egress path below, which treats every non-cancelled
+		// stop as an ordinary success.
 		if !mcOut.HasContent && len(mcOut.ToolCalls) == 0 && mcOut.Status != "done" {
 			emptyStreak++
 			if emptyStreak >= 2 {
@@ -1112,67 +1110,71 @@ loop:
 			emptyStreak = 0
 		}
 
-		// --- Stop / continue on the model's declared status
-		// (docs/components/turn-pipeline.md's output schema).
-		if mcOut.Status == "done" {
-			// A follow-up that landed before this boundary makes the model's
-			// "done" stale — fold it in and keep looping rather than ending on
-			// input the model hadn't seen.
-			if len(pendingMessages) > 0 {
-				nextMsg := pendingMessages[0]
-				pendingMessages = pendingMessages[1:]
-				ictx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
-				if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: input.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
+		// --- Stop / continue: two independent questions, decided separately.
+		//
+		// (1) Is there more work to do? Answered by ToolCalls alone, never by
+		// status — a real requested action (create_intention, ask_user, ...)
+		// is always dispatched, even if the same step also claimed "done" or
+		// "blocked". status is never trusted to discard pending work.
+		//
+		// (2) Should the loop stop? Only asked once there is nothing left to
+		// dispatch. "done" or "blocked" with no pending tool calls ends the
+		// turn; an empty message in that case is not a defect to correct —
+		// silence is a legitimate response whenever the model genuinely has
+		// nothing to add (a proactive check that decided not to notify, a
+		// user who said "no more" and gets no further reply, etc.). Delivery
+		// downstream already sends only what's actually there.
+		if len(mcOut.ToolCalls) == 0 {
+			if mcOut.Status == "done" {
+				// A follow-up that landed before this boundary makes the
+				// model's "done" stale — fold it in and keep looping rather
+				// than ending on input the model hadn't seen.
+				if len(pendingMessages) > 0 {
+					nextMsg := pendingMessages[0]
+					pendingMessages = pendingMessages[1:]
+					ictx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
+					if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: input.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
+						cancel()
+						return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+					}
 					cancel()
-					return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+					continue
 				}
+				stopReason = "no_tool_calls"
 				cancel()
-				continue
+				break
 			}
-			// Safe to break unconditionally: activities/activities/model_call.py
-			// guarantees status=="done" never coexists with a pending tool
-			// call (a model pairing report_status(done) with e.g.
-			// create_intention in the same step is coerced to "working"
-			// there, the one place both signals are known together) — no
-			// need to re-derive that check on every reader of mcOut.Status.
-			stopReason = "no_tool_calls"
-			cancel()
-			break
-		}
-		// docs/components/turn-pipeline.md's interrupt model — a "blocked"
-		// status means the model needs the user. If it paired that with an
-		// ask_user call, the fan-out below parks the turn on it. If a follow-up
-		// already arrived, that IS the answer — fold it in and keep going. If
-		// it's "blocked" with nothing to wait on, the model has said its piece
-		// and can't proceed: deliver that message and end.
-		if mcOut.Status == "blocked" {
-			if len(pendingMessages) > 0 {
-				nextMsg := pendingMessages[0]
-				pendingMessages = pendingMessages[1:]
-				ictx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
-				if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: input.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
+			// docs/components/turn-pipeline.md's interrupt model — a
+			// "blocked" status means the model needs the user. With no tool
+			// calls pending (an ask_user call would have gone through the
+			// ToolCalls>0 path above instead), it has said its piece and
+			// can't proceed: same stale-input check, then deliver and end.
+			if mcOut.Status == "blocked" {
+				if len(pendingMessages) > 0 {
+					nextMsg := pendingMessages[0]
+					pendingMessages = pendingMessages[1:]
+					ictx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
+					if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: input.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
+						cancel()
+						return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+					}
 					cancel()
-					return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+					continue
 				}
-				cancel()
-				continue
-			}
-			if len(mcOut.ToolCalls) == 0 {
 				stopReason = "blocked"
 				cancel()
 				break
 			}
-			// else: falls through to the fan-out, which parks on ask_user.
-		}
-		// "working" / "blocked"-with-an-action: no tool calls this step means
-		// the model is still reasoning — loop again; the iteration / retry /
-		// budget ceilings bound it.
-		if len(mcOut.ToolCalls) == 0 {
+			// "working" (or status omitted) with nothing to dispatch — still
+			// reasoning; loop again. The iteration / retry / budget ceilings,
+			// and the no-progress guard above, bound it.
 			cancel()
 			continue
 		}
 
 		// --- Act: parallel fan-out over this reasoning step's tool calls ---
+		// Reached whenever ToolCalls is non-empty, regardless of status —
+		// see (1) above.
 		// components/02-architecture-temporal-execution.md §4: siblings run
 		// concurrently, not as a queue of independent workflows. IDs are
 		// already minted by ModelCall — the workflow only reuses them.
