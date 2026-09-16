@@ -20,6 +20,9 @@ import (
 type Handler struct {
 	realtime *realtime.Handler
 	route    string
+	pool     *pgxpool.Pool
+	clerk    clerkauth.Config
+	platform string
 }
 
 // NewIOS wires the Apple mobile namespace. iPadOS and CarPlay intentionally
@@ -35,7 +38,7 @@ func NewAndroid(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool
 }
 
 func newHandler(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config, platform, route string) *Handler {
-	return &Handler{route: route, realtime: realtime.New(ctx, ingestor, pool, temporal, clerk, realtime.Config{
+	return &Handler{route: route, pool: pool, clerk: clerk, platform: platform, realtime: realtime.New(ctx, ingestor, pool, temporal, clerk, realtime.Config{
 		TrackPresence: true,
 		CheckOrigin:   func(*http.Request) bool { return true },
 		ResolveScope: func(userID, sessionID, parentSessionID string) (realtime.Scope, error) {
@@ -51,4 +54,8 @@ func newHandler(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool
 // in their first WebSocket frame, preserving the shared deployed contract.
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+h.route, h.realtime.HandleWS)
+	if h.platform == "android" {
+		mux.HandleFunc("GET /android/briefings", h.handleBriefings)
+		mux.HandleFunc("GET /android/briefings/{turnSeq}/audio", h.handleBriefingAudio)
+	}
 }
