@@ -21,22 +21,24 @@ that already-verified scenario suite. This is NOT a fallback for arbitrary
 unregistered names — tool_call.py's "unknown tool" error path is real and
 applies to anything not explicitly listed here.
 
-`search_memory`/`reflect_on_entity` (docs/components/memory-slot.md,
-"Resolved: agent-brain Is the Memory Backend") wrap agent-brain's retain MCP
-server's own `memory_recall`/`memory_reflect` tools — model-facing names
-differ from agent-brain's own (the generic `search` name is already taken by
-the fixture stub above, predating this feature; `reflect_on_entity` is more
-descriptive to the model than the bare `memory_reflect`), but `bank_id` is
-injected here rather than model-controlled, since it's one bank per tenant,
-not a per-call choice. No tier of its own: both are quick request/response
-network calls with no cancellable subprocess or session-filesystem lease to
-hold, so they fall back to tool_tiers.go's defaultToolTiming on the Go side
-(no entry needed there) and don't call activity.heartbeat() here.
+`recall`/`reflect` (docs/components/memory-slot.md, "Resolved: agent-brain Is
+the Memory Backend") wrap agent-brain's retain MCP server's own
+`memory_recall`/`memory_reflect` tools. Renamed 2026-09-16 from
+`search_memory`/`reflect_on_entity` to match the real Hindsight product's own
+naming directly (its `recall`/`reflect` — confirmed by direct source reads
+recorded in memory-architecture.md), superseding the earlier harness-invented
+names — the `search` collision with the fixture stub below no longer applies
+since the new name is `recall`, not `search`. `bank_id` is injected here
+rather than model-controlled, since it's one bank per tenant, not a per-call
+choice. No tier of its own: both are quick request/response network calls
+with no cancellable subprocess or session-filesystem lease to hold, so they
+fall back to tool_tiers.go's defaultToolTiming on the Go side (no entry
+needed there) and don't call activity.heartbeat() here.
 
 `search_tools`/`call_tool` (docs/components/tool-registry.md, "Resolved:
 mcp-hub-Mediated Integration Mechanism") are the mcp-hub-mediated tier's own
-tools, named to match mcp-hub's real MCP tool names directly, same reasoning
-as search_memory/reflect_on_entity above — same no-tier-of-its-own treatment.
+tools, named to match mcp-hub's real MCP tool names directly, same
+no-tier-of-its-own treatment as recall/reflect above.
 search_tools additionally fans out to shell_hub.py's local, in-process
 discovery ("Resolved: Native-Tool Discovery") and returns the combined
 result.
@@ -389,22 +391,25 @@ async def merge_subagent_output(arguments: dict, ctx: ToolContext) -> dict:
     return result
 
 
-async def memory_search(arguments: dict, ctx: ToolContext) -> dict:
+async def recall(arguments: dict, ctx: ToolContext) -> dict:
     """docs/components/memory-slot.md's `search` — shallow, unrestricted
     (available to both the main agent and subagents; tool-level access
     control, if ever added, is components/tool-registry.md's concern, not
     this handler's). Model passes `query`; bank_id (one bank per tenant) is
-    injected here, not model-controlled."""
+    injected here, not model-controlled. Named `recall` (not `search_memory`)
+    since 2026-09-16 to match the real Hindsight product's own naming."""
     return await agent_brain.call_retain_tool(
         "memory_recall", {"bank_id": agent_brain.retain_bank_id(), "query": arguments["query"]}
     )
 
 
-async def reflect_on_entity(arguments: dict, ctx: ToolContext) -> dict:
+async def reflect(arguments: dict, ctx: ToolContext) -> dict:
     """docs/components/memory-slot.md's `reflect` — also unrestricted (no
     depth parameter to escalate through, so the unbounded-re-expansion risk
     that would motivate a subagent-only restriction doesn't apply). Model
-    passes `entity_name`/`query`; bank_id injected here."""
+    passes `entity_name`/`query`; bank_id injected here. Named `reflect` (not
+    `reflect_on_entity`) since 2026-09-16 to match the real Hindsight
+    product's own naming."""
     return await agent_brain.call_retain_tool(
         "memory_reflect",
         {"bank_id": agent_brain.retain_bank_id(), "entity_name": arguments["entity_name"], "query": arguments["query"]},
@@ -556,7 +561,7 @@ async def lcm_describe(arguments: dict, ctx: ToolContext) -> dict:
     came from either lcm_grep's own output or a summary block lcm.assemble
     rendered into THIS session's context, so in practice it never crosses a
     session boundary; no explicit ctx.session_key check added on top of
-    that, matching search_memory/reflect_on_entity's own "unrestricted" stance
+    that, matching recall/reflect's own "unrestricted" stance
     just above."""
     id_arg = arguments.get("id")
     if not isinstance(id_arg, str) or not id_arg:
@@ -610,14 +615,17 @@ from . import capabilities as _cap  # noqa: E402
 # only hand-maintained tool list left, and it carries nothing but the wiring —
 # the schema lives in llm.py, the turn-kind / peel / timing metadata in
 # capabilities.py (docs/components/tool-registry.md, "Implementation shape").
-# key = capabilities.Capability.handler_ref. The renamed meta-tools
-# (search_memory / discover_tools, docs/components/turn-pipeline.md) keep their
-# original handler function names here — only the model-facing name changed.
+# key = capabilities.Capability.handler_ref. The renamed meta-tool
+# (discover_tools, docs/components/turn-pipeline.md) keeps its original
+# handler function name here (search_tools, matching mcp-hub's own tool name)
+# — only the model-facing name changed. recall/reflect's handler_ref matches
+# their function names directly (both renamed together 2026-09-16 to match
+# the real Hindsight product's own naming — see memory-slot.md's Notes Log).
 _HANDLERS: dict[str, Any] = {
     "shell_exec": shell_exec,
     "merge_subagent_output": merge_subagent_output,
-    "search_memory": memory_search,
-    "reflect_on_entity": reflect_on_entity,
+    "recall": recall,
+    "reflect": reflect,
     "discover_tools": search_tools,
     "call_tool": call_tool,
     "lcm_grep": lcm_grep,

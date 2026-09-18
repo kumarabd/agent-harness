@@ -8,10 +8,11 @@
 > **`ToolDiscover` / retrieval fan-out** describes machinery removed over the
 > turn-pipeline redesign (`docs/components/turn-pipeline.md` is the current
 > source of truth for how a turn runs). Current model-facing tool names:
-> `search_memory` / `reflect_on_entity` (2026-09-13, replacing `memory_expand`
-> — no equivalent on agent-brain's new retain MCP server; see
-> `docs/components/memory-slot.md`), `discover_tools`, `report_status`; the
-> `TurnKind` enum is `{REASONING, SUBAGENT}`.
+> `recall` / `reflect` (2026-09-13, replacing `memory_expand` — no equivalent
+> on agent-brain's new retain MCP server; renamed 2026-09-16 from
+> `search_memory`/`reflect_on_entity` to match the real Hindsight product's
+> own naming — see `docs/components/memory-slot.md`), `discover_tools`,
+> `report_status`; the `TurnKind` enum is `{REASONING, SUBAGENT}`.
 
 ### Role (one line)
 The single source of truth for which tools an agent can invoke, their schemas, execution tiers, and (eventually) permission policy — replacing today's tool dispatch table and timing config, hand-duplicated across two languages, with something that actually scales past a handful of tools.
@@ -28,7 +29,7 @@ Only one tool (`shell_exec`) is real today; `search`, `slow_tool`, `noop_tool` a
 - Solve the cross-language duplication: the Go workflow needs per-tool `ActivityOptions` (heartbeat/timeout) *before* dispatch, and the Python worker needs the actual handler — both currently hand-copied from one conceptual registry that doesn't exist as a real, single artifact.
 - Natural home for the permission/destructive-command gating already parked as its own open item (`future-work.md` §4, "Permission Gating for Destructive Tool Calls") — allow/deny policy per tool, possibly per-tenant.
 - Per-tenant tool scoping: does every tenant get every tool, or is the tool surface itself tenant-configurable — ties into `components/multi-tenancy.md`.
-- **Inherited from `components/memory-slot.md`'s resolved design**: two concrete tools, `search_memory` and `reflect_on_entity`, calling agent-brain's retain MCP server's `memory_recall`/`memory_reflect` directly (2026-09-13 — `memory_expand` had no equivalent on the new server and was dropped, not replaced). **Both unrestricted** — not the subagent-only split originally modeled on LCM's `lcm_expand`; `memory_reflect` has no depth to escalate through, so the unbounded-re-expansion risk that guardrail existed for doesn't apply here. `memory-slot.md`'s own "Resolved: Search/Reflect Tools" section has the reasoning; this doc owns the actual tool-registry entries.
+- **Inherited from `components/memory-slot.md`'s resolved design**: two concrete tools, `recall` and `reflect` (renamed 2026-09-16 from `search_memory`/`reflect_on_entity` to match the real Hindsight product's own naming), calling agent-brain's retain MCP server's `memory_recall`/`memory_reflect` directly (2026-09-13 — `memory_expand` had no equivalent on the new server and was dropped, not replaced). **Both unrestricted** — not the subagent-only split originally modeled on LCM's `lcm_expand`; `memory_reflect` has no depth to escalate through, so the unbounded-re-expansion risk that guardrail existed for doesn't apply here. `memory-slot.md`'s own "Resolved: Recall/Reflect Tools" section has the reasoning; this doc owns the actual tool-registry entries.
 
 ### Resolved: Two-Tier Architecture — Native Activities vs. mcp-hub-Mediated
 Not every tool needs the same execution model, and forcing a broad tool surface through one mechanism was the wrong framing. Splits cleanly on one real axis: does the tool need Temporal's durable-execution semantics (heartbeating, cooperative cancellation, retry-via-replay)?
@@ -81,7 +82,7 @@ different constructs behind one schema list. They are:
 | Layer | What it is | Members |
 |---|---|---|
 | **Interfaces** | open-ended external reach | `shell_exec` (local; discover + invoke in one), `search_tools` (remote discovery), the per-task **resolved tools** (below), and `call_tool` — now an *internal* dispatch verb, not model-facing |
-| **Cognition** | reading the agent's own substrate | `search_memory` / `reflect_on_entity` (agent-brain), `lcm_grep` / `lcm_describe` / `lcm_expand` (this session's history + compaction DAG) |
+| **Cognition** | reading the agent's own substrate | `recall` / `reflect` (agent-brain), `lcm_grep` / `lcm_describe` / `lcm_expand` (this session's history + compaction DAG) |
 | **Control** | steering the constructs the agent lives inside | `declare_next_step_hint` (tier), `propose_plan` / `checkpoint_done` (plan), `spawn_subagent` (subagent tree), the intention tools |
 
 Only **Interfaces** vary by task. Cognition is always relevant; Control is
@@ -126,11 +127,14 @@ shouldn't be delegating. `merge_subagent_output` only after a subagent was
 spawned this turn.
 
 **Considered and rejected:**
-- *Collapsing the cognition tools into one `recall(query)`* — `search_memory`
-  (semantic) and `lcm_grep` (literal regex) on two different substrates are
-  genuinely distinct intents; a unified tool forces the harness to *infer* which
-  the model wanted from a natural-language string — a new failure surface for
-  ~650 tokens. The cognition tools are left exactly as they are.
+- *Collapsing the cognition tools into one merged tool* — `recall` (memory,
+  semantic) and `lcm_grep` (session history, literal regex) on two different
+  substrates are genuinely distinct intents; a unified tool forces the harness
+  to *infer* which the model wanted from a natural-language string — a new
+  failure surface for ~650 tokens. The cognition tools are left exactly as
+  they are. (Note: `recall` is now also the actual, separate tool's own name
+  since the 2026-09-16 rename — this bullet is about a *different*, rejected
+  idea, merging it with `lcm_grep`, not a description of what shipped.)
 - *Gating the intention tools on a classify "intention ask" signal* — risks
   suppressing the agent proactively arming an intention the user didn't phrase
   as "remind me." The 6→2 consolidation removes the token cost without that risk.
@@ -156,7 +160,7 @@ and `tools_schema_for`'s `if planning / if is_subagent / …` cascade.
 
 class Layer(StrEnum):
     INTERFACE = "interface"   # shell_exec, search_tools, per-task resolved tools
-    COGNITION = "cognition"   # search_memory/reflect_on_entity, lcm_grep/describe/expand
+    COGNITION = "cognition"   # recall/reflect, lcm_grep/describe/expand
     CONTROL   = "control"     # declare_next_step_hint, propose_plan, checkpoint_done,
                               #   spawn_subagent, merge_subagent_output, create_intention, manage_intention
 

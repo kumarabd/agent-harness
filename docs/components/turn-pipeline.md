@@ -104,7 +104,7 @@ ModelTurnOutput {
 
   # ── actions (the model's real control channel) ──
   tool_calls: [ ... ]            # ordinary tools AND meta-tools:
-                                 #   search_memory · discover_tools · load_skill
+                                 #   recall · discover_tools · load_skill
                                  #   spawn_subagent · ask_user
 
   # ── advisory (recorded / used if present, safe to omit) ──
@@ -201,7 +201,7 @@ tails it in every call.
 
 **LCM-assembled conversation** — the transcript. Append-only, compacted as it
 grows (verbatim window + summary DAG). Everything retrieved during the turn flows
-*into* this stream as ordinary observation messages: a `search_memory` result, a
+*into* this stream as ordinary observation messages: a `recall` result, a
 `load_skill` procedure, a tool result, a subagent result. LCM compacts them
 uniformly with everything else. There is no separate managed "memory section" or
 "skills section" and no per-section budget shedding — that logic collapses into
@@ -217,7 +217,7 @@ maps service) for the rest of the turn, read from the per-turn discovered set.
 always-on profile/memory block injected every turn. `memory-slot.md` ("Resolved:
 Entity Facts as a Task-Matched Procedure — No First-Class Digest", 2026-09-05)
 had already examined and rejected exactly that — no genesis population, no
-staleness cache, no non-shed section. Recall instead rests on: the `search_memory`
+staleness cache, no non-shed section. Retrieval instead rests on: the `recall`
 meta-tool, the "retrieve before answering" rule, the "don't guess — ask or
 `create_intention`" rule, and (over time) a learned entity-lookup procedure the
 model pulls via `load_skill`. The completeness risk (a turn that needs a fact
@@ -238,7 +238,7 @@ from the user-visible stream and the iteration budget):
 
 | Tool | Effect |
 |---|---|
-| `search_memory(query)` | returns matched long-term memory as an observation |
+| `recall(query)` | returns matched long-term memory as an observation |
 | `discover_tools(query)` | matched tool schemas become callable for the rest of the turn |
 | `spawn_subagent(brief, …)` | starts a child `TurnWorkflow` (see *Subagents*) |
 | `ask_user(question, options?)` | parks the turn on a user-input request (see *Interrupts*) |

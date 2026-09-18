@@ -6,7 +6,7 @@ Everything the model can emit in a response falls into one of three layers:
   - INTERFACE  — open-ended external reach: shell_exec, discover_tools, and the
                  per-task *resolved* tools (built per turn from discover_tools's
                  rows, not listed here).
-  - COGNITION  — reading the agent's own substrate: search_memory / reflect_on_entity
+  - COGNITION  — reading the agent's own substrate: recall / reflect
                  (agent-brain), lcm_grep /
                  lcm_describe / lcm_expand (this session's history + compaction DAG).
   - CONTROL    — steering the constructs the agent lives inside: report_status
@@ -65,7 +65,7 @@ class Capability:
     layer: Layer
     turn_kinds: frozenset[TurnKind]
     peel: bool = False
-    # docs/components/turn-pipeline.md — a provisioning action (search_memory,
+    # docs/components/turn-pipeline.md — a provisioning action (recall,
     # discover_tools, spawn_subagent, ask_user). Flagged so later
     # phases can exclude these from approval gating / the user-visible stream /
     # the iteration budget. No behavioural effect yet.
@@ -90,8 +90,11 @@ _MAIN = frozenset(TurnKind)
 CAPABILITIES: list[Capability] = [
     Capability("shell_exec", Layer.INTERFACE, _MAIN, handler_ref="shell_exec", timing=HEAVY),
     Capability("merge_subagent_output", Layer.CONTROL, _MAIN, handler_ref="merge_subagent_output", timing=HEAVY),
-    Capability("search_memory", Layer.COGNITION, _MAIN, handler_ref="search_memory", meta=True),
-    Capability("reflect_on_entity", Layer.COGNITION, _MAIN, handler_ref="reflect_on_entity"),
+    # Renamed 2026-09-16 (from search_memory/reflect_on_entity) to match the
+    # real Hindsight product's own tool naming — docs/components/memory-slot.md's
+    # Notes Log.
+    Capability("recall", Layer.COGNITION, _MAIN, handler_ref="recall", meta=True),
+    Capability("reflect", Layer.COGNITION, _MAIN, handler_ref="reflect"),
     Capability("discover_tools", Layer.INTERFACE, _MAIN, handler_ref="discover_tools", meta=True),
     # call_tool is internal-only since the 2026-09-04 per-task-resolution
     # revision (tool-registry.md, "Resolved: Three-Layer Tool Taxonomy") —

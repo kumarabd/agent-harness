@@ -30,7 +30,7 @@ _GENERIC_LINE = "Still working on this…"
 
 # _describe_call — docs/components/gateway/first-party-plan.md, "every
 # progress frame". Different tools name their main argument differently
-# (shell_exec's "command", search_memory/discover_tools' "query",
+# (shell_exec's "command", recall/discover_tools' "query",
 # spawn_subagent's "prompt"); tried in priority order, first real string
 # wins. Deliberately generic rather than a per-tool-name switch — a new tool
 # that happens to use one of these key names is covered for free, and one

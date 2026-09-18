@@ -560,7 +560,7 @@ def _resolve_gating(tool_name: str, arguments: dict) -> tuple[bool, str, str]:
         itself no longer calls call_tool directly since the 2026-09-04
         per-task-resolution revision, but a stray call still resolves
         correctly rather than silently ungated.)
-      - anything else (search_memory, discover_tools, report_status,
+      - anything else (recall, discover_tools, report_status,
         ...): never gateable, these aren't side-effecting.
     """
     if tool_name == "shell_exec":

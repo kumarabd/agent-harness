@@ -53,11 +53,13 @@ deploy/docker/tenant-worker.Dockerfile and deploy/helm/agent-harness-tenant:
     AGENT_BRAIN_RETAIN_BASE_URL/AGENT_BRAIN_RETAIN_API_KEY/AGENT_BRAIN_AGENT_ID
                          docs/components/memory-slot.md's memory backend —
                          agent-brain's retain MCP server (agent_brain.py's
-                         call_retain_tool, tools.py's search_memory/
-                         reflect_on_entity, write_memory.py). AGENT_BRAIN_AGENT_ID
+                         call_retain_tool, tools.py's recall/reflect —
+                         renamed 2026-09-16 from search_memory/reflect_on_entity
+                         to match the real Hindsight product's own naming —
+                         write_memory.py). AGENT_BRAIN_AGENT_ID
                          doubles as bank_id (one bank per tenant). Not required —
                          a session that never touches memory works fine without
-                         these set; search_memory/reflect_on_entity/WriteMemory
+                         these set; recall/reflect/WriteMemory
                          all degrade to a no-op (or, for a mid-session tool call,
                          a clear error observation) rather than failing the turn.
     MCP_HUB_URL          docs/components/tool-registry.md's mcp-hub-mediated

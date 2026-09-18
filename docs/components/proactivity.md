@@ -94,7 +94,7 @@ feedback) collapses into machinery that already exists:
 | concept | already is |
 |---|---|
 | **Situation** — what's happening now | what every turn does: the model calls tools mid-loop to check live state. No `AssembleSituation` activity. |
-| **Policy** — when am I allowed to act | the model calling `search_memory` + its own judgment. agent-brain holds "no travel notifications", past "stop doing this" corrections, quiet hours. Not a rule engine. |
+| **Policy** — when am I allowed to act | the model calling `recall` + its own judgment. agent-brain holds "no travel notifications", past "stop doing this" corrections, quiet hours. Not a rule engine. |
 | **Opportunity detection** | a **default intention** seeded at genesis: *"periodically review recent episodes for anything worth raising."* Not a subsystem. |
 | **Proactive decision** — act? | the deciding turn's own output: a message = act; ending silently (`no_tool_calls`, empty response) = suppress. No arbiter workflow. |
 | **Plan / Execute** | the wake is just a `seq=0` message into the same flat reason-act loop every turn runs (`turn-pipeline.md`) — no separate classify step or plan/lite fork exists to route through any more. |
@@ -164,7 +164,7 @@ starts a TurnWorkflow, seed = the synthesized system message, initiated_by = "in
                            output to the session's gateway channel
 ```
 
-The deciding turn is a **normal turn**: the model calls `search_memory`
+The deciding turn is a **normal turn**: the model calls `recall`
 (preferences, "stop doing this" corrections, quiet hours — the "policy") and
 other tools (the "situation" check) as it judges it needs to, then it either
 **produces a message** (act, delivered) or **ends silently**
