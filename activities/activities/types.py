@@ -161,6 +161,17 @@ class ToolCallOutput:
 
 
 @dataclass
+class ReasoningTurnOutcome:
+    """skills.RunReasoningTurn's result — what SummarizeReasoningTurn distills
+    a skill's own scoped reasoning turn down to once the shared reason-act
+    loop stops. Short and structured, never raw message content — the same
+    class of crossing CloseSkillCall's own `result` param already makes."""
+
+    status: str = "ok"  # "ok" | "error" | "cancelled"
+    summary: str = ""
+
+
+@dataclass
 class InsertMessageInput:
     """Input for the message-insert activity — the one place content still
     crosses an activity input boundary, since it's the literal handoff from

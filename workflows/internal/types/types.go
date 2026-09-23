@@ -314,6 +314,17 @@ type SkillWorkflowOutput struct {
 	Status     string `json:"status"` // "ok" | "error" | "cancelled"
 }
 
+// ReasoningTurnOutcome is skills.RunReasoningTurn's result — what
+// SummarizeReasoningTurn (Python, content-reading allowed there under the
+// reference-passing contract) distills a skill's own scoped reasoning turn
+// down to once RunReasonActLoop stops. Short and structured, never raw
+// message content — the same class of crossing CloseSkillCall's own `result`
+// param already makes.
+type ReasoningTurnOutcome struct {
+	Status  string `json:"status"` // "ok" | "error" | "cancelled"
+	Summary string `json:"summary,omitempty"`
+}
+
 // InsertMessageInput is the input for the message-insert activity — the one
 // place content still crosses an activity input boundary, since it's the
 // literal handoff from the coordinator's signal payload (already durable via

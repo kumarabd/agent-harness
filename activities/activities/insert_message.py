@@ -24,6 +24,14 @@ entirely and instead reads its own kickoff content from
 its tool_call_id, per the ID scheme) — no content needs to flow through the
 workflow to get it there.
 
+Skill-reasoning-turn case (docs/05-architecture-domain-control-loops.md):
+parent_type == "skill" is a *different* shape, not a subagent — its content is
+an objective a skill's own Go code authored directly, not derived from any
+tool_calls row (nothing minted one; the skill decided to enter this reasoning
+turn itself, it wasn't a model-requested delegation). `input.message` is
+honored as-is here, same as the top-level "session" case below — the only
+thing recorded differently is turns.parent_type itself, for audit/attribution.
+
 messages.seq is computed here (MAX(seq)+1 within the turn), not passed in —
 decoupled from ModelCall's ContextSeq, which is a separate fixture-lookup
 index that only coincidentally starts at the same value.
@@ -97,6 +105,10 @@ class InsertMessageActivity:
                         "user", str(arguments.get("prompt", "")), None, None, None, None,
                     )
                 else:
+                    # Covers "session" (a real user message) and "skill" (a
+                    # skill's own authored objective) alike — both are
+                    # already-populated input.message content, unlike the
+                    # subagent case above. See the module docstring.
                     role, content = input.message.role, input.message.content
                     speaker_id = input.message.speaker_id or None
                     client_msg_id = input.message.client_msg_id or None

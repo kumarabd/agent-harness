@@ -1,10 +1,11 @@
-package workflow
+package skills
 
 import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/workflow"
 
 	"agent-harness/workflows/internal/types"
+	wf "agent-harness/workflows/internal/workflow"
 )
 
 // DraftNoteSkillWorkflow — docs/05-architecture-domain-control-loops.md's
@@ -14,7 +15,7 @@ import (
 // type-name string, an internally-composed approval gate, three distinct
 // terminal outcomes, and a two-level cooperative-cancel cascade).
 // Registered under "draft_note" in activities/activities/skills.py; must
-// have a matching w.RegisterWorkflow(wf.DraftNoteSkillWorkflow) line in
+// have a matching w.RegisterWorkflow(skillswf.DraftNoteSkillWorkflow) line in
 // cmd/loop-worker/main.go.
 //
 // States: read its own arguments (compose) -> ask for explicit approval via
@@ -72,7 +73,7 @@ func DraftNoteSkillWorkflow(ctx workflow.Context, input types.SkillWorkflowInput
 		},
 		Context: map[string]any{"tool_call_id": input.ToolCallID},
 	}
-	fut := workflow.ExecuteChildWorkflow(cctx, UserInputRequestWorkflow, types.UserInputRequestWorkflowInput{
+	fut := workflow.ExecuteChildWorkflow(cctx, wf.UserInputRequestWorkflow, types.UserInputRequestWorkflowInput{
 		Request:      req,
 		SessionKey:   input.SessionKey,
 		ConnectionID: input.ConnectionID,
@@ -101,21 +102,4 @@ func DraftNoteSkillWorkflow(ctx workflow.Context, input types.SkillWorkflowInput
 	result := map[string]any{"recipient": recipient, "note_text": noteText, "sent": true}
 	out.Status = closeSkillCall(ctx, input.ToolCallID, "ok", result, "", "none")
 	return out, nil
-}
-
-// closeSkillCall is the one place every skill workflow's exit paths funnel
-// through — writes the real result/reason/side_effect to Postgres via the
-// CloseSkillCall activity, on a disconnected context so it still runs even
-// if ctx itself is already cancelled (same reasoning as
-// UserInputRequestWorkflow's own CloseUserInput/DenyToolCall calls —
-// user_input.go), and returns the thin status this workflow's own return
-// value carries. Best-effort, same tolerance every other end-of-turn
-// bookkeeping call in this codebase gets.
-func closeSkillCall(ctx workflow.Context, toolCallID string, status string, result map[string]any, reason string, sideEffect string) string {
-	bg, cancelBg := workflow.NewDisconnectedContext(ctx)
-	defer cancelBg()
-	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
-	actx := workflow.WithActivityOptions(bg, ao)
-	_ = workflow.ExecuteActivity(actx, "CloseSkillCall", toolCallID, status, result, reason, sideEffect).Get(actx, nil)
-	return status
 }

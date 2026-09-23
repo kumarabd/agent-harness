@@ -51,6 +51,7 @@ import (
 	"go.temporal.io/sdk/worker"
 
 	wf "agent-harness/workflows/internal/workflow"
+	skillswf "agent-harness/workflows/internal/workflow/skills"
 )
 
 func envOrDefault(key, fallback string) string {
@@ -132,13 +133,16 @@ func runForNamespace(ctx context.Context, address, namespace, taskQueue string, 
 	w.RegisterWorkflow(wf.CompressContextWorkflow)
 	w.RegisterWorkflow(wf.UserInputRequestWorkflow)
 	w.RegisterWorkflow(wf.IntentionWorkflow)
-	// docs/05-architecture-domain-control-loops.md — a "skill" registered
-	// under its own type name; turn.go dispatches it dynamically by that
-	// name string (types.ToolCallRef.ResolvedWorkflowType), not by a
-	// Go-side switch. This is the only Go-side registration a new skill
-	// needs beyond its own file. Must match the "workflow_type" declared
-	// alongside its registry entry in activities/activities/skills.py.
-	w.RegisterWorkflow(wf.DraftNoteSkillWorkflow)
+	// docs/05-architecture-domain-control-loops.md — every "skill" lives in
+	// its own package (workflows/internal/workflow/skills/) and is
+	// registered under its own type name here; turn.go dispatches it
+	// dynamically by that name string (types.ToolCallRef.ResolvedWorkflowType),
+	// not by a Go-side switch, and never imports this package itself. This
+	// is the only Go-side registration a new skill needs beyond its own
+	// file. Must match the "workflow_type" declared alongside its registry
+	// entry in activities/activities/skills.py.
+	w.RegisterWorkflow(skillswf.DraftNoteSkillWorkflow)
+	w.RegisterWorkflow(skillswf.JournalingSkillWorkflow)
 
 	log.Printf("loop worker starting: temporal=%q namespace=%q task_queue=%q", address, namespace, taskQueue)
 

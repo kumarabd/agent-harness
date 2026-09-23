@@ -813,22 +813,6 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	logger := workflow.GetLogger(ctx)
 	logger.Info("turn workflow started", "turn_id", input.TurnID, "parent_type", input.ParentType)
 
-	// docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
-	// namespace-tagged once here and reused, since loop-worker is shared
-	// across every tenant's namespace from one process; an untagged metric
-	// would collapse every tenant's turns into one undifferentiated number.
-	metrics := workflow.GetMetricsHandler(ctx).WithTags(map[string]string{"namespace": workflow.GetInfo(ctx).Namespace})
-
-	iterations := 0
-	retries := 0
-	cumulativeTokens := 0
-	contextSeq := 0 // ModelCall's own call-index for fixture lookup — distinct from messages.seq, which activities compute themselves
-	// docs/components/model-registry.md — the model authors its next-step tier
-	// hint via report_status (Phase 7); this workflow carries it forward opaquely
-	// into the next ModelCallInput. Empty on the first iteration — model_call.py
-	// bootstraps from model_registry.default_hint() Python-side.
-	hintModality, hintTier := "", ""
-
 	// --- Start-of-turn: write the inbound message (or, for a subagent, let
 	// InsertMessage derive its kickoff content from its own tool_calls row)
 	// before the first ModelCall — ModelCall's first read needs this content
@@ -916,6 +900,125 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	// gone. The turn goes straight to the reason-act loop; the model pulls
 	// memory / skills / tools on demand via the meta-tools, and picks its own
 	// model tier per step via report_status.
+	//
+	// docs/05-architecture-domain-control-loops.md — this is also the exact
+	// loop a skill's own scoped reasoning turn runs (skills.RunReasoningTurn),
+	// via the same RunReasonActLoop call, not a hand-rolled parallel one.
+	loopResult, err := RunReasonActLoop(ctx, RunReasonActLoopInput{
+		TurnID:             input.TurnID,
+		SessionKey:         input.SessionKey,
+		ConnectionID:       input.ConnectionID,
+		ParentType:         input.ParentType,
+		OfferDeliveryTools: input.OfferDeliveryTools,
+		PendingMessages:    &pendingMessages,
+		CancelRequested:    &cancelRequested,
+		Interrupts:         interrupts,
+		ProgressGen:        &progressGen,
+	})
+	// The reason-act loop is done — tell the watchdog goroutine to stop before
+	// the (bounded) egress + delivery below, so it can't ping during teardown.
+	turnDone = true
+
+	if loopResult.StopReason == "error" {
+		// RunReasonActLoop already ran failTurn internally (Persist('failed')
+		// and, for a top-level turn, its own delivery-race attempt) —
+		// nothing left for this wrapper to do beyond forwarding exactly what
+		// it returned, same as the pre-extraction code's own
+		// `return failTurn(...)` did at each of these call sites.
+		return types.TurnResult{TurnID: input.TurnID, InterruptedDuringDelivery: loopResult.InterruptedDuringDelivery}, err
+	}
+
+	// --- Egress: every turn (top-level or subagent) persists its own
+	// turns.status inside RunReasonActLoop already — components/state-layer.md's
+	// read/write-split table assigns that generically to "the persist
+	// activity" with no top-level carve-out. Only Deliver (external gateway
+	// send) is top-level-only: a subagent has no external delivery target,
+	// its result is read from Postgres by its parent's next ModelCall instead.
+	// docs/components/memory-slot.md's "Resolved: Write-Path Construction"
+	// correction (2026-08-29): WriteMemory no longer dispatches here, once
+	// per top-level turn — agent-brain's own write contract asks for
+	// session-completion and context-compaction boundaries instead
+	// (coordinator.go's idle-timeout exit, and RunReasonActLoop's own
+	// hard-compression branch), not per turn.
+	var interruptedPayload *types.SignalPayload
+	if input.ParentType == "session" {
+		var deliverErr error
+		interruptedPayload, deliverErr = deliverConnectionBased(ctx, interrupts, input.SessionKey, input.ConnectionID, input.TurnID)
+		if deliverErr != nil {
+			runDiscordDeliveryRecovery(ctx, input.TurnID, input.ConnectionID, loopResult.ContextSeq)
+		}
+	}
+
+	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", loopResult.StopReason, "iterations", loopResult.Iterations, "interrupted_during_delivery", interruptedPayload != nil)
+	return types.TurnResult{TurnID: input.TurnID, StopReason: loopResult.StopReason, Iterations: loopResult.Iterations, InterruptedDuringDelivery: interruptedPayload}, nil
+}
+
+// RunReasonActLoopInput/RunReasonActLoopResult — docs/05-architecture-domain-control-loops.md.
+// The reason-act loop itself, factored out of TurnWorkflow so a skill's own
+// scoped reasoning turn (skills.RunReasoningTurn) can run the *exact* same
+// mechanism — the same ModelCall dispatch, the same status/tool_calls stop
+// condition, the same real RequiresApproval → UserInputRequestWorkflow path,
+// the same drainResult — rather than a hand-rolled parallel one. Plain Go
+// function call, not a child workflow: runs in-process inside whichever
+// workflow execution calls it (TurnWorkflow itself, or a skill's own).
+//
+// Not a JSON/cross-language boundary type (this never crosses Temporal's data
+// converter — it's a direct call within one workflow execution's
+// determinism domain), so it carries whatever's convenient here rather than
+// being constrained to types.TurnResult's own cross-workflow contract shape.
+type RunReasonActLoopInput struct {
+	TurnID, SessionKey, ConnectionID, ParentType string
+	OfferDeliveryTools                           bool
+	// PendingMessages/CancelRequested — caller-owned. TurnWorkflow passes
+	// pointers fed by its own signal-listening goroutines; a skill's scoped
+	// reasoning turn passes pointers to values nothing ever mutates (no
+	// signal listener of its own — a scoped turn is never signaled directly,
+	// only cascade-cancelled via ctx when the outer turn is interrupted,
+	// already handled structurally, not through this mechanism).
+	PendingMessages *[]types.SignalPayload
+	CancelRequested *bool
+	// Interrupts — nil is a valid, meaningful value (deliveryInterruptSource's
+	// own doc comment): every place this loop actually dereferences it is
+	// already gated on ParentType == "session", so a non-"session" caller
+	// (a subagent, or a skill's scoped turn) never touches it regardless.
+	Interrupts *deliveryInterruptSource
+	// ProgressGen — bumped once per reason-act pass, read by the top-level
+	// progress watchdog goroutine (TurnWorkflow-only). A skill's scoped turn
+	// passes a pointer nothing reads.
+	ProgressGen *int
+}
+
+type RunReasonActLoopResult struct {
+	TurnID     string
+	StopReason string
+	Iterations int
+	ContextSeq int
+	// InterruptedDuringDelivery — set only on the rare failTurn path where a
+	// top-level (ParentType == "session") turn's mid-loop failure raced an
+	// already-in-flight connection-based delivery. Propagated so
+	// TurnWorkflow's own wrapper can fold it into its final TurnResult even
+	// on an error return, matching the pre-extraction behavior exactly.
+	InterruptedDuringDelivery *types.SignalPayload
+}
+
+func RunReasonActLoop(ctx workflow.Context, in RunReasonActLoopInput) (RunReasonActLoopResult, error) {
+	logger := workflow.GetLogger(ctx)
+
+	// docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
+	// namespace-tagged once here and reused, since loop-worker is shared
+	// across every tenant's namespace from one process; an untagged metric
+	// would collapse every tenant's turns into one undifferentiated number.
+	metrics := workflow.GetMetricsHandler(ctx).WithTags(map[string]string{"namespace": workflow.GetInfo(ctx).Namespace})
+
+	iterations := 0
+	retries := 0
+	cumulativeTokens := 0
+	contextSeq := 0 // ModelCall's own call-index for fixture lookup — distinct from messages.seq, which activities compute themselves
+	// docs/components/model-registry.md — the model authors its next-step tier
+	// hint via report_status (Phase 7); this workflow carries it forward opaquely
+	// into the next ModelCallInput. Empty on the first iteration — model_call.py
+	// bootstraps from model_registry.default_hint() Python-side.
+	hintModality, hintTier := "", ""
 
 	var stopReason string
 
@@ -933,7 +1036,7 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 loop:
 	for {
 		// --- Resolved: Stop-Condition Logic (inline check, pure read of local state) ---
-		if cancelRequested {
+		if *in.CancelRequested {
 			// Between steps — no active tool calls to cancel, just stop
 			// before starting another ModelCall. Mid-step cancellation
 			// (an active tool-call batch, or a parked ask_user) is handled
@@ -955,7 +1058,7 @@ loop:
 		}
 
 		iterations++
-		progressGen++ // a fresh reason-act pass is real progress — resets the watchdog backoff
+		*in.ProgressGen++ // a fresh reason-act pass is real progress — resets the watchdog backoff
 		cancelCtx, cancel := workflow.WithCancel(ctx)
 
 		// --- Reason: model-call activity (mints tool_call_id/subagent IDs
@@ -972,11 +1075,11 @@ loop:
 		}
 		mctx := workflow.WithActivityOptions(cancelCtx, mao)
 		modelInput := types.ModelCallInput{
-			TurnID:             input.TurnID,
+			TurnID:             in.TurnID,
 			ContextSeq:         contextSeq,
 			HintModality:       hintModality,
 			HintTier:           hintTier,
-			OfferDeliveryTools: input.OfferDeliveryTools,
+			OfferDeliveryTools: in.OfferDeliveryTools,
 		}
 		mcFuture := workflow.ExecuteActivity(mctx, "ModelCall", modelInput)
 
@@ -987,19 +1090,20 @@ loop:
 		// below). awaitModelCallWithStreaming's own doc comment has the
 		// full reasoning for why this needs a merged Selector loop rather
 		// than a plain Get() plus a detached consumer goroutine.
-		streamPlatform := platformFromSessionKey(input.SessionKey)
-		streamingEligible := iterations == 1 && input.ConnectionID != "" &&
+		streamPlatform := platformFromSessionKey(in.SessionKey)
+		streamingEligible := iterations == 1 && in.ConnectionID != "" &&
 			(streamPlatform == "discord" || streamPlatform == "discord-voice")
 
 		var mcErr error
 		if streamingEligible {
-			mcErr = awaitModelCallWithStreaming(ctx, mcFuture, mctx, &mcOut, input.TurnID, input.ConnectionID, streamPlatform)
+			mcErr = awaitModelCallWithStreaming(ctx, mcFuture, mctx, &mcOut, in.TurnID, in.ConnectionID, streamPlatform)
 		} else {
 			mcErr = mcFuture.Get(mctx, &mcOut)
 		}
 		if mcErr != nil {
 			cancel()
-			return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, mcErr, interrupts)
+			tr, ferr := failTurn(ctx, in.TurnID, in.SessionKey, in.ConnectionID, in.ParentType, mcErr, in.Interrupts)
+			return RunReasonActLoopResult{TurnID: in.TurnID, StopReason: "error", InterruptedDuringDelivery: tr.InterruptedDuringDelivery}, ferr
 		}
 		contextSeq++
 		if mcOut.NextStep != nil {
@@ -1049,7 +1153,7 @@ loop:
 			// Blocks until compaction completes, so the *next* ModelCall in
 			// this same turn assembles a smaller context.
 			cctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
-			_ = workflow.ExecuteActivity(cctx, "CompressContext", input.TurnID).Get(cctx, nil)
+			_ = workflow.ExecuteActivity(cctx, "CompressContext", in.TurnID).Get(cctx, nil)
 
 			// docs/components/memory-slot.md's "Resolved: Write-Path
 			// Construction" correction — a real, threshold-crossing hard
@@ -1062,13 +1166,13 @@ loop:
 			// door). Detached child, same ABANDON reasoning as
 			// WriteMemoryWorkflow's own doc comment — this turn keeps
 			// running after dispatching it, doesn't wait for it.
-			if input.ParentType == "session" {
+			if in.ParentType == "session" {
 				wcwo := workflow.ChildWorkflowOptions{
-					WorkflowID:        input.TurnID + ":write-memory:" + strconv.Itoa(iterations),
+					WorkflowID:        in.TurnID + ":write-memory:" + strconv.Itoa(iterations),
 					ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
 				}
 				wcctx := workflow.WithChildOptions(ctx, wcwo)
-				wmFuture := workflow.ExecuteChildWorkflow(wcctx, WriteMemoryWorkflow, input.SessionKey)
+				wmFuture := workflow.ExecuteChildWorkflow(wcctx, WriteMemoryWorkflow, in.SessionKey)
 				_ = wmFuture.GetChildWorkflowExecution().Get(wcctx, nil)
 			}
 		} else {
@@ -1077,11 +1181,11 @@ loop:
 			// WorkflowID since this can fire on more than one iteration
 			// within the same turn.
 			cwo := workflow.ChildWorkflowOptions{
-				WorkflowID:        input.TurnID + ":compress-context:" + strconv.Itoa(iterations),
+				WorkflowID:        in.TurnID + ":compress-context:" + strconv.Itoa(iterations),
 				ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
 			}
 			cctx := workflow.WithChildOptions(ctx, cwo)
-			childFuture := workflow.ExecuteChildWorkflow(cctx, CompressContextWorkflow, input.TurnID)
+			childFuture := workflow.ExecuteChildWorkflow(cctx, CompressContextWorkflow, in.TurnID)
 			_ = childFuture.GetChildWorkflowExecution().Get(cctx, nil)
 		}
 
@@ -1100,11 +1204,12 @@ loop:
 			emptyStreak++
 			if emptyStreak >= 2 {
 				cancel()
-				return failTurn(
-					ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType,
+				tr, ferr := failTurn(
+					ctx, in.TurnID, in.SessionKey, in.ConnectionID, in.ParentType,
 					errors.New("model made no progress: two consecutive steps with no content and no tool calls"),
-					interrupts,
+					in.Interrupts,
 				)
+				return RunReasonActLoopResult{TurnID: in.TurnID, StopReason: "error", InterruptedDuringDelivery: tr.InterruptedDuringDelivery}, ferr
 			}
 		} else {
 			emptyStreak = 0
@@ -1129,13 +1234,14 @@ loop:
 				// A follow-up that landed before this boundary makes the
 				// model's "done" stale — fold it in and keep looping rather
 				// than ending on input the model hadn't seen.
-				if len(pendingMessages) > 0 {
-					nextMsg := pendingMessages[0]
-					pendingMessages = pendingMessages[1:]
+				if len(*in.PendingMessages) > 0 {
+					nextMsg := (*in.PendingMessages)[0]
+					*in.PendingMessages = (*in.PendingMessages)[1:]
 					ictx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
-					if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: input.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
+					if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: in.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
 						cancel()
-						return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+						tr, ferr := failTurn(ctx, in.TurnID, in.SessionKey, in.ConnectionID, in.ParentType, err, in.Interrupts)
+						return RunReasonActLoopResult{TurnID: in.TurnID, StopReason: "error", InterruptedDuringDelivery: tr.InterruptedDuringDelivery}, ferr
 					}
 					cancel()
 					continue
@@ -1150,13 +1256,14 @@ loop:
 			// ToolCalls>0 path above instead), it has said its piece and
 			// can't proceed: same stale-input check, then deliver and end.
 			if mcOut.Status == "blocked" {
-				if len(pendingMessages) > 0 {
-					nextMsg := pendingMessages[0]
-					pendingMessages = pendingMessages[1:]
+				if len(*in.PendingMessages) > 0 {
+					nextMsg := (*in.PendingMessages)[0]
+					*in.PendingMessages = (*in.PendingMessages)[1:]
 					ictx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA})
-					if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: input.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
+					if err := workflow.ExecuteActivity(ictx, "InsertMessage", types.InsertMessageInput{TurnID: in.TurnID, Message: nextMsg.Message}).Get(ictx, nil); err != nil {
 						cancel()
-						return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+						tr, ferr := failTurn(ctx, in.TurnID, in.SessionKey, in.ConnectionID, in.ParentType, err, in.Interrupts)
+						return RunReasonActLoopResult{TurnID: in.TurnID, StopReason: "error", InterruptedDuringDelivery: tr.InterruptedDuringDelivery}, ferr
 					}
 					cancel()
 					continue
@@ -1204,7 +1311,7 @@ loop:
 				cctx := workflow.WithChildOptions(cancelCtx, cwo)
 				req := types.UserInputRequest{
 					RequestID: tc.ToolCallID,
-					TurnID:    input.TurnID,
+					TurnID:    in.TurnID,
 					Kind:      "permission",
 					Prompt:    "Approve calling " + tc.Server + "/" + tc.Tool + "?",
 					Options: []types.UserInputOption{
@@ -1216,16 +1323,16 @@ loop:
 				fut := workflow.ExecuteChildWorkflow(cctx, UserInputRequestWorkflow, types.UserInputRequestWorkflowInput{
 					Request:           req,
 					ApprovalGatedCall: &types.ApprovalGatedCallSpec{ToolCallID: tc.ToolCallID, ToolName: tc.ToolName},
-					SessionKey:        input.SessionKey,
-					ConnectionID:      input.ConnectionID,
+					SessionKey:        in.SessionKey,
+					ConnectionID:      in.ConnectionID,
 				})
 				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isApprovalGated: true})
 			} else if tc.IsSubagent {
 				childInput := types.TurnInput{
-					SessionKey: input.SessionKey,
+					SessionKey: in.SessionKey,
 					TurnID:     tc.ToolCallID, // subagent's turn_id IS its tool_call_id
 					ParentType: "turn",
-					ParentID:   input.TurnID,
+					ParentID:   in.TurnID,
 				}
 				cwo := workflow.ChildWorkflowOptions{
 					WorkflowID:        tc.ToolCallID,
@@ -1251,7 +1358,7 @@ loop:
 				fut := workflow.ExecuteChildWorkflow(cctx, UserInputRequestWorkflow, types.UserInputRequestWorkflowInput{
 					Request: types.UserInputRequest{
 						RequestID:     tc.ToolCallID,
-						TurnID:        input.TurnID,
+						TurnID:        in.TurnID,
 						Kind:          "question",
 						AllowFreeText: true,
 						// Explicit non-nil — the model's real question/options
@@ -1264,8 +1371,8 @@ loop:
 						Options: []types.UserInputOption{},
 						Context: map[string]any{},
 					},
-					SessionKey:   input.SessionKey,
-					ConnectionID: input.ConnectionID,
+					SessionKey:   in.SessionKey,
+					ConnectionID: in.ConnectionID,
 				})
 				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isAskUser: true})
 			} else if tc.IsSkill {
@@ -1281,7 +1388,9 @@ loop:
 				// tool_calls row out itself via CloseSkillCall (see drainResult
 				// below), independent of spawn_subagent end to end (docs/
 				// 05-architecture-domain-control-loops.md, "Skill Workflows Are
-				// Independent of Subagents").
+				// Independent of Subagents"). Reachable from any depth this loop
+				// runs at — a subagent's own turn, or a skill's own scoped
+				// reasoning turn, can mint a further nested skill the same way.
 				cwo := workflow.ChildWorkflowOptions{
 					WorkflowID:        tc.ToolCallID,
 					ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
@@ -1289,12 +1398,12 @@ loop:
 				cctx := workflow.WithChildOptions(cancelCtx, cwo)
 				fut := workflow.ExecuteChildWorkflow(cctx, tc.ResolvedWorkflowType, types.SkillWorkflowInput{
 					ToolCallID:   tc.ToolCallID,
-					TurnID:       input.TurnID,
-					SessionKey:   input.SessionKey,
-					ConnectionID: input.ConnectionID,
+					TurnID:       in.TurnID,
+					SessionKey:   in.SessionKey,
+					ConnectionID: in.ConnectionID,
 				})
 				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isSkill: true})
-			} else if deliveryActivityName, ok := deliveryToolActivity(platformFromSessionKey(input.SessionKey), tc.ToolName); ok {
+			} else if deliveryActivityName, ok := deliveryToolActivity(platformFromSessionKey(in.SessionKey), tc.ToolName); ok {
 				// deliver_reply/deliver_attachment — routed to the owning
 				// gateway connection's own embedded worker, same task-queue
 				// scheme Deliver/DeliverChunk/DeliverInterim already use,
@@ -1303,7 +1412,7 @@ loop:
 				ao := workflow.ActivityOptions{
 					ActivityID:          tc.ToolCallID,
 					StartToCloseTimeout: activityTimeoutTierA,
-					TaskQueue:           "deliver:discord:" + input.ConnectionID,
+					TaskQueue:           "deliver:discord:" + in.ConnectionID,
 					RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
 				}
 				actx := workflow.WithActivityOptions(cancelCtx, ao)
@@ -1343,7 +1452,7 @@ loop:
 		// this doesn't fight the watchdog's own collapse-on-progress logic —
 		// they're complementary triggers on the identical mechanism.
 		if len(calls) > 0 {
-			notifyProgress(ctx, input.TurnID, input.SessionKey, input.ConnectionID, "tool_dispatch", logger)
+			notifyProgress(ctx, in.TurnID, in.SessionKey, in.ConnectionID, "tool_dispatch", logger)
 		}
 
 		allReady := func() bool {
@@ -1358,7 +1467,7 @@ loop:
 		// Wait for either all of this step's calls to settle, a follow-up
 		// message to arrive, or a cancel — whichever happens first.
 		_ = workflow.Await(ctx, func() bool {
-			return allReady() || len(pendingMessages) > 0 || cancelRequested
+			return allReady() || len(*in.PendingMessages) > 0 || *in.CancelRequested
 		})
 
 		if !allReady() {
@@ -1386,7 +1495,7 @@ loop:
 			}
 			dispatchSubagentManifests(ctx, subagentIDs)
 
-			if cancelRequested {
+			if *in.CancelRequested {
 				// A stop, not new input — end here rather than folding
 				// anything in and paying for another ModelCall. The
 				// cancel() above already tore down this step's in-flight
@@ -1399,13 +1508,14 @@ loop:
 			// Dequeue exactly ONE pending message — never batch multiple
 			// queued messages into a single fold-in (components/temporal-workflow.md,
 			// Resolved: Signal Coalescing).
-			next := pendingMessages[0]
-			pendingMessages = pendingMessages[1:]
+			next := (*in.PendingMessages)[0]
+			*in.PendingMessages = (*in.PendingMessages)[1:]
 			iao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 			iactx := workflow.WithActivityOptions(ctx, iao)
-			insertInput := types.InsertMessageInput{TurnID: input.TurnID, Message: next.Message}
+			insertInput := types.InsertMessageInput{TurnID: in.TurnID, Message: next.Message}
 			if err := workflow.ExecuteActivity(iactx, "InsertMessage", insertInput).Get(iactx, nil); err != nil {
-				return failTurn(ctx, input.TurnID, input.SessionKey, input.ConnectionID, input.ParentType, err, interrupts)
+				tr, ferr := failTurn(ctx, in.TurnID, in.SessionKey, in.ConnectionID, in.ParentType, err, in.Interrupts)
+				return RunReasonActLoopResult{TurnID: in.TurnID, StopReason: "error", InterruptedDuringDelivery: tr.InterruptedDuringDelivery}, ferr
 			}
 
 			// A mid-turn follow-up lands in the conversation (InsertMessage
@@ -1438,10 +1548,6 @@ loop:
 		dispatchSubagentManifests(ctx, subagentIDs)
 	}
 
-	// The reason-act loop is done — tell the watchdog goroutine to stop before
-	// the (bounded) egress + delivery below, so it can't ping during teardown.
-	turnDone = true
-
 	metrics.Counter("turn_iterations_total").Inc(int64(iterations))
 	metrics.Counter("turn_retries_total").Inc(int64(retries))
 	metrics.WithTags(map[string]string{"stop_reason": stopReason}).Counter("turn_stop_reason_total").Inc(1)
@@ -1452,18 +1558,16 @@ loop:
 	// the turn ran out of budget rather than finishing on its own.
 	hitCeiling := stopReason == "max_iterations"
 	logger.Info("iteration budget",
-		"turn_id", input.TurnID, "iterations", iterations, "ceiling", ceiling,
+		"turn_id", in.TurnID, "iterations", iterations, "ceiling", ceiling,
 		"ceiling_raised", ceilingRaised, "hit_ceiling", hitCeiling)
 	if hitCeiling {
 		metrics.Counter("turn_hit_iteration_ceiling_total").Inc(1)
 	}
 
-	// --- Egress: every turn (top-level or subagent) persists its own
-	// turns.status — components/state-layer.md's read/write-split table
-	// assigns that generically to "the persist activity" with no top-level
-	// carve-out. Only Deliver (external gateway send) is top-level-only: a
-	// subagent has no external delivery target, its result is read from
-	// Postgres by its parent's next ModelCall instead.
+	// --- Every turn (top-level, subagent, or a skill's own scoped reasoning
+	// turn) persists its own turns.status here, unconditionally —
+	// components/state-layer.md's read/write-split table assigns that
+	// generically to "the persist activity" with no top-level carve-out.
 	{
 		finalStatus := "completed"
 		if stopReason == "cancelled_by_user" {
@@ -1475,26 +1579,10 @@ loop:
 		}
 		ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 		actx := workflow.WithActivityOptions(ctx, ao)
-		_ = workflow.ExecuteActivity(actx, "Persist", input.TurnID, finalStatus).Get(actx, nil)
-	}
-	// docs/components/memory-slot.md's "Resolved: Write-Path Construction"
-	// correction (2026-08-29): WriteMemory no longer dispatches here, once
-	// per top-level turn — agent-brain's own write contract asks for
-	// session-completion and context-compaction boundaries instead
-	// (coordinator.go's idle-timeout exit, and the hard-compression branch
-	// above), not per turn. Removing this per-turn dispatch is the actual
-	// fix for the gap that correction named; nothing replaces it here.
-	var interruptedPayload *types.SignalPayload
-	if input.ParentType == "session" {
-		var deliverErr error
-		interruptedPayload, deliverErr = deliverConnectionBased(ctx, interrupts, input.SessionKey, input.ConnectionID, input.TurnID)
-		if deliverErr != nil {
-			runDiscordDeliveryRecovery(ctx, input.TurnID, input.ConnectionID, contextSeq)
-		}
+		_ = workflow.ExecuteActivity(actx, "Persist", in.TurnID, finalStatus).Get(actx, nil)
 	}
 
-	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", stopReason, "iterations", iterations, "interrupted_during_delivery", interruptedPayload != nil)
-	return types.TurnResult{TurnID: input.TurnID, StopReason: stopReason, Iterations: iterations, InterruptedDuringDelivery: interruptedPayload}, nil
+	return RunReasonActLoopResult{TurnID: in.TurnID, StopReason: stopReason, Iterations: iterations, ContextSeq: contextSeq}, nil
 }
 
 // dispatchSubagentManifests fans out one SubagentManifest activity per

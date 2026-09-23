@@ -97,6 +97,7 @@ from .model_call import ModelCallActivity
 from .persist import PersistActivity
 from .seed_child_session import SeedChildSessionContextActivity
 from .skill_call import CloseSkillCallActivity, ReadSkillCallArgumentsActivity
+from .skill_reasoning import SummarizeReasoningTurnActivity
 from .status_ping import StatusPingActivity
 from .subagent_manifest import SubagentManifestActivity
 from .tool_call import DenyToolCallActivity, ToolCallActivity
@@ -198,6 +199,7 @@ async def main() -> None:
             CloseUserInputActivity(pool).__call__,
             ReadSkillCallArgumentsActivity(pool).__call__,
             CloseSkillCallActivity(pool).__call__,
+            SummarizeReasoningTurnActivity(pool).__call__,
             SeedChildSessionContextActivity(pool).__call__,
             SubagentManifestActivity(pool).__call__,
             StatusPingActivity(pool).__call__,

@@ -7,7 +7,8 @@ layer can't ask the activity layer for this at runtime, and vice versa;
 docs/components/tool-registry.md documents that cost as a known, deliberately
 accepted one for the native tier).
 
-Each entry here must have a matching `w.RegisterWorkflow(wf.<WorkflowType>)`
+Each entry here must have a matching Go workflow function in
+workflows/internal/workflow/skills/ and a `w.RegisterWorkflow(skillswf.<WorkflowType>)`
 line in workflows/cmd/loop-worker/main.go, keyed by the exact `workflow_type`
 string. That's the only Go-side bookkeeping a new skill needs — Temporal's
 ExecuteChildWorkflow dispatches by that registered string directly (turn.go),
@@ -38,5 +39,23 @@ SKILLS: list[dict] = [
             "required": ["recipient", "note_text"],
         },
         "workflow_type": "DraftNoteSkillWorkflow",
+    },
+    {
+        "name": "journaling",
+        "description": (
+            "Record a journal entry the user has decided to keep, into today's page in "
+            "their Notion journal. Only call this once the user has confirmed something is "
+            "actually journal material (not just thinking out loud) — this skill itself "
+            "runs its own reasoning turn to find or create the right Notion database, "
+            "confirm the entry with the user, and write it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entry_text": {"type": "string", "description": "The journal entry's content."},
+            },
+            "required": ["entry_text"],
+        },
+        "workflow_type": "JournalingSkillWorkflow",
     },
 ]
