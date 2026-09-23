@@ -50,7 +50,8 @@ async def assemble(
         context_tokens += lcm.estimate_tokens(scratchpad)
 
     tool_rows = await _staged_tool_rows(conn, turn_id)
-    resolved_tools = capabilities.mint_resolved(tool_rows)
+    skill_rows = await _staged_skill_rows(conn, turn_id)
+    resolved_tools = capabilities.mint_resolved(tool_rows) + capabilities.mint_resolved_skills(skill_rows)
 
     if scratchpad or resolved_tools:
         logger.info(
@@ -83,6 +84,19 @@ async def _staged_tool_rows(conn, turn_id: str) -> list[tuple[str, dict]]:
     rows = await conn.fetch(
         "SELECT content, metadata FROM turn_retrieval "
         "WHERE owner_id = $1 AND kind = 'tool' ORDER BY seq",
+        turn_id,
+    )
+    return [(r["content"], json.loads(r["metadata"]) if r["metadata"] else {}) for r in rows]
+
+
+async def _staged_skill_rows(conn, turn_id: str) -> list[tuple[str, dict]]:
+    """`discover_skills`'s staged `(content, metadata)` rows for this turn —
+    `metadata` carries {name, workflow_type, input_schema}. Same shape as
+    `_staged_tool_rows`, `kind='skill'` instead of `kind='tool'`
+    (docs/05-architecture-domain-control-loops.md)."""
+    rows = await conn.fetch(
+        "SELECT content, metadata FROM turn_retrieval "
+        "WHERE owner_id = $1 AND kind = 'skill' ORDER BY seq",
         turn_id,
     )
     return [(r["content"], json.loads(r["metadata"]) if r["metadata"] else {}) for r in rows]

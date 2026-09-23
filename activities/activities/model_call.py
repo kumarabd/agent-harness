@@ -361,11 +361,27 @@ class ModelCallActivity:
                     # call_tool's own explicit arguments). Gating reuses the same
                     # identity when it's known; falls back to _resolve_gating's
                     # shell_exec/call_tool cases otherwise.
+                    #
+                    # A resolved SKILL (discover_skills — docs/
+                    # 05-architecture-domain-control-loops.md) is the same
+                    # per-task-resolved shape, mutually exclusive with the tool
+                    # case: resolved_workflow_type (migration 037) carries the Go
+                    # workflow type turn.go dispatches as a child workflow
+                    # instead. Never approval-gated by this outer mechanism — a
+                    # skill that needs a human gate requests it itself,
+                    # internally, via its own child UserInputRequestWorkflow.
                     resolved_cap = None if (is_subagent or is_ask_user) else resolved_by_name.get(tool_name)
-                    if resolved_cap is not None:
+                    is_skill = resolved_cap is not None and resolved_cap.resolved_workflow_type is not None
+                    resolved_workflow_type = None
+                    if resolved_cap is not None and resolved_cap.resolved_target is not None:
                         resolved_server, resolved_tool = resolved_cap.resolved_target
                         gate_server, gate_tool = resolved_server, resolved_tool
                         approval_needed = permissions.requires_approval(gate_server, gate_tool)
+                    elif is_skill:
+                        resolved_server = resolved_tool = None
+                        resolved_workflow_type = resolved_cap.resolved_workflow_type
+                        gate_server, gate_tool = "", ""
+                        approval_needed = False
                     else:
                         resolved_server = resolved_tool = None
                         approval_needed, gate_server, gate_tool = (
@@ -373,14 +389,14 @@ class ModelCallActivity:
                         )
 
                     # status left at its 'pending' default — ToolCall (or the
-                    # subagent child workflow's own completion) is what
+                    # subagent/skill child workflow's own completion) is what
                     # transitions it to ok/error/cancelled. See the schema
                     # migration's note on why 'pending' exists.
                     await conn.execute(
                         "INSERT INTO tool_calls "
                         "(tool_call_id, parent_id, message_id, tool_name, arguments, is_subagent, "
-                        "resolved_server, resolved_tool) "
-                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                        "resolved_server, resolved_tool, is_skill, resolved_workflow_type) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                         tool_call_id,
                         input.turn_id,
                         message_id,
@@ -389,6 +405,8 @@ class ModelCallActivity:
                         is_subagent,
                         resolved_server,
                         resolved_tool,
+                        is_skill,
+                        resolved_workflow_type,
                     )
                     refs.append(
                         ToolCallRef(
@@ -399,6 +417,8 @@ class ModelCallActivity:
                             requires_approval=approval_needed,
                             server=gate_server,
                             tool=gate_tool,
+                            is_skill=is_skill,
+                            resolved_workflow_type=resolved_workflow_type or "",
                         )
                     )
 

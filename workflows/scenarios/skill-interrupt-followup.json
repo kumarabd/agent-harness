@@ -1,0 +1,13 @@
+{
+  "message": {
+    "role": "user",
+    "content": "actually never mind, forget about that note"
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Okay, I've dropped that.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 60, "output_tokens": 15 }
+    }
+  ]
+}

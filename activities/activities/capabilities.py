@@ -81,6 +81,12 @@ class Capability:
     # {server, tool} for a resolved mcp-hub tool — carried onto types.ToolCall
     # so turn.go dispatches it through the generic mcp-hub-tier proxy
     resolved_target: tuple[str, str] | None = field(default=None, compare=False)
+    # docs/05-architecture-domain-control-loops.md — the Go workflow type name
+    # for a resolved skill, mutually exclusive with resolved_target: turn.go
+    # dispatches this one as a child workflow (workflow.ExecuteChildWorkflow
+    # by type-name string), never through the call_tool/TOOL_REGISTRY path a
+    # resolved_target capability uses.
+    resolved_workflow_type: str | None = field(default=None, compare=False)
 
 
 # Both turn kinds see every capability by default; SUBAGENT additionally sees
@@ -96,6 +102,10 @@ CAPABILITIES: list[Capability] = [
     Capability("recall", Layer.COGNITION, _MAIN, handler_ref="recall", meta=True),
     Capability("reflect", Layer.COGNITION, _MAIN, handler_ref="reflect"),
     Capability("discover_tools", Layer.INTERFACE, _MAIN, handler_ref="discover_tools", meta=True),
+    # docs/05-architecture-domain-control-loops.md — matches a registered
+    # domain workflow ("skill") by description, mints it callable by its own
+    # name for the rest of the turn, same mechanism as discover_tools.
+    Capability("discover_skills", Layer.INTERFACE, _MAIN, handler_ref="discover_skills", meta=True),
     # call_tool is internal-only since the 2026-09-04 per-task-resolution
     # revision (tool-registry.md, "Resolved: Three-Layer Tool Taxonomy") —
     # turn_kinds=() means schema_for never offers it to the model. It keeps a
@@ -218,5 +228,42 @@ def mint_resolved(rows: "list[tuple[str, dict | None]]") -> list[Capability]:
             turn_kinds=frozenset(),  # not looked up by schema_for's static loop; appended directly
             schema={"type": "function", "function": {"name": name, "description": description, "parameters": schema}},
             resolved_target=(server, tool),
+        ))
+    return out[-MAX_RESOLVED:]
+
+
+def mint_resolved_skills(rows: "list[tuple[str, dict | None]]") -> list[Capability]:
+    """Same job as `mint_resolved`, for discover_skills's staged rows instead
+    of discover_tools's — docs/05-architecture-domain-control-loops.md.
+    `content` = "{name} — {description}", `metadata` = {name, workflow_type,
+    input_schema}. No `{server, tool}` identity here: a skill has no proxy
+    dispatch, it's a child workflow keyed by `workflow_type` directly, so the
+    resulting Capability sets `resolved_workflow_type` instead of
+    `resolved_target` — the two fields turn.go/model_call.py branch on to
+    decide activity-vs-tool-proxy-vs-child-workflow dispatch."""
+    out: list[Capability] = []
+    taken: set[str] = set()
+    for content, metadata in rows:
+        if not isinstance(metadata, dict):
+            continue
+        name, workflow_type, schema = (
+            metadata.get("name"), metadata.get("workflow_type"), metadata.get("input_schema")
+        )
+        if not name or not workflow_type or not isinstance(schema, dict):
+            continue
+        minted_name = _NAME_RE.sub("_", name)[:64] or "skill"
+        if minted_name in taken:
+            minted_name = f"{minted_name[:60]}_{len(taken)}"
+        taken.add(minted_name)
+        description = content.split(" — ", 1)[1].strip() if " — " in content else content
+        out.append(Capability(
+            name=minted_name,
+            layer=Layer.INTERFACE,
+            turn_kinds=frozenset(),
+            schema={
+                "type": "function",
+                "function": {"name": minted_name, "description": description, "parameters": schema},
+            },
+            resolved_workflow_type=workflow_type,
         ))
     return out[-MAX_RESOLVED:]

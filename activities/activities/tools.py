@@ -59,7 +59,7 @@ import asyncpg
 from temporalio import activity
 from temporalio.exceptions import CancelledError
 
-from . import agent_brain, claim_check, ids, lcm, leases, mcp_hub, shell_hub
+from . import agent_brain, claim_check, ids, lcm, leases, mcp_hub, shell_hub, skill_hub
 
 logger = logging.getLogger(__name__)
 
@@ -527,6 +527,69 @@ async def _persist_discovered(ctx: ToolContext, results: list[dict]) -> None:
         logger.warning("discover_tools: failed to persist discovered rows for mid-turn binding", exc_info=True)
 
 
+async def discover_skills(query: str, top_k: int = 5) -> list[dict]:
+    """docs/05-architecture-domain-control-loops.md — the skill analog of
+    discover_tools. Local-only, deliberately: skill-hub is not mcp-hub-mediated
+    (a skill is a Go workflow type registered in this deployment, not a
+    shared multi-tenant external-API capability), so there's no fan-out here,
+    just skill_hub.search directly."""
+    try:
+        return await skill_hub.search(query, top_k)
+    except Exception:  # noqa: BLE001 - never let a bad query take discovery down
+        logger.warning("discover_skills: skill-hub search failed", exc_info=True)
+        return []
+
+
+async def search_skills(arguments: dict, ctx: ToolContext) -> dict:
+    """The model-facing wrapper around discover_skills — mirrors search_tools
+    exactly: persist what it found into turn_retrieval (kind='skill') so
+    prompt.assemble's mint_resolved_skills makes each match directly callable
+    by its own name on the turn's next step."""
+    results = await discover_skills(arguments.get("query", ""), arguments.get("top_k", 5))
+    await _persist_discovered_skills(ctx, results)
+    return {"results": results}
+
+
+async def _persist_discovered_skills(ctx: ToolContext, results: list[dict]) -> None:
+    """Stage a mid-turn discover_skills call's results into turn_retrieval
+    (kind='skill', owner_id = this turn) — the kind='skill' CHECK value
+    already existed in the schema (migration 013), unused until now. Mirrors
+    _persist_discovered's shape exactly, keyed by {name, workflow_type,
+    input_schema} instead of {server, tool, input_schema}."""
+    if not results:
+        return
+    try:
+        turn_id = ids.turn_id_of_tool_call(ctx.tool_call_id)
+        seq = await ctx.pool.fetchval(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM turn_retrieval WHERE owner_id = $1 AND kind = 'skill'",
+            turn_id,
+        )
+        seen: set[str] = set()
+        rows: list[tuple] = []
+        for result in results:
+            name = str(result.get("name", "")).strip()
+            workflow_type = str(result.get("workflow_type", "")).strip()
+            if not name or not workflow_type or name in seen:
+                continue
+            seen.add(name)
+            description = str(result.get("description", "")).strip()
+            content = f"{name} — {description[:300]}" if description else name
+            metadata = {"name": name, "workflow_type": workflow_type, "input_schema": result.get("input_schema")}
+            rows.append((turn_id, "skill", seq, content, None, json.dumps(metadata)))
+            seq += 1
+        if rows:
+            await ctx.pool.executemany(
+                "INSERT INTO turn_retrieval (owner_id, kind, seq, content, score, metadata) "
+                "VALUES ($1, $2, $3, $4, $5, $6) "
+                "ON CONFLICT (owner_id, kind, seq) DO UPDATE SET "
+                "  content = EXCLUDED.content, score = EXCLUDED.score, "
+                "  metadata = EXCLUDED.metadata, created_at = now()",
+                rows,
+            )
+    except Exception:  # noqa: BLE001 - never fail the search itself over persisting its binding
+        logger.warning("discover_skills: failed to persist discovered rows for mid-turn binding", exc_info=True)
+
+
 async def call_tool(arguments: dict, ctx: ToolContext) -> dict:
     """Straight proxy to mcp-hub's own call_tool — only mcp-hub-sourced
     search_tools results are invoked this way; a shell-hub-sourced result is
@@ -627,6 +690,7 @@ _HANDLERS: dict[str, Any] = {
     "recall": recall,
     "reflect": reflect,
     "discover_tools": search_tools,
+    "discover_skills": search_skills,
     "call_tool": call_tool,
     "lcm_grep": lcm_grep,
     "lcm_describe": lcm_describe,

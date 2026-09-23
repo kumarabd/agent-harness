@@ -88,6 +88,14 @@ class ToolCallRef:
     # when requires_approval is True.
     server: str = ""
     tool: str = ""
+    # docs/05-architecture-domain-control-loops.md, docs/components/
+    # turn-pipeline.md ("Skills") — the model called a skill discover_skills
+    # minted this turn. turn.go dispatches a child workflow of
+    # resolved_workflow_type instead of the generic ToolCall activity or a
+    # subagent TurnWorkflow. Never true alongside is_subagent — independent
+    # primitives, never the same call.
+    is_skill: bool = False
+    resolved_workflow_type: str = ""
 
 
 @dataclass

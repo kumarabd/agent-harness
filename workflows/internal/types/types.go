@@ -208,6 +208,21 @@ type ToolCallRef struct {
 	// workflow-visible by design, not an accepted leak").
 	Server string `json:"server,omitempty"`
 	Tool   string `json:"tool,omitempty"`
+	// IsSkill — docs/05-architecture-domain-control-loops.md, docs/components/
+	// turn-pipeline.md ("Skills"). The model called a skill discover_skills
+	// minted this turn; turn.go dispatches a child workflow of
+	// ResolvedWorkflowType instead of the generic ToolCall activity or a
+	// subagent TurnWorkflow. Minted by ModelCall the same way IsSubagent is.
+	// Never true alongside IsSubagent — a skill and a subagent are
+	// independent primitives (docs/05-architecture-domain-control-loops.md,
+	// "Skill Workflows Are Independent of Subagents"), never the same call.
+	IsSkill bool `json:"is_skill,omitempty"`
+	// ResolvedWorkflowType — the Go workflow type name to dispatch via
+	// workflow.ExecuteChildWorkflow's string-name form. No Go-side
+	// name-to-function registry needed: Temporal resolves the string against
+	// whatever was registered with RegisterWorkflow in cmd/loop-worker. Set
+	// only when IsSkill is true.
+	ResolvedWorkflowType string `json:"resolved_workflow_type,omitempty"`
 }
 
 // ModelCallOutput is ModelCall's only output — refs and control metadata, never
@@ -266,6 +281,35 @@ type ToolCallInput struct {
 // Those stay in Postgres; the workflow only needs ok/error/cancelled to
 // decide retry-count bookkeeping.
 type ToolCallOutput struct {
+	ToolCallID string `json:"tool_call_id"`
+	Status     string `json:"status"` // "ok" | "error" | "cancelled"
+}
+
+// SkillWorkflowInput is a skill child workflow's only input — IDs and
+// dispatch plumbing, deliberately never a context clone or brief
+// (docs/05-architecture-domain-control-loops.md, "Skill Workflows Are
+// Independent of Subagents"). A skill reads its own real arguments via the
+// ReadSkillCallArguments activity, keyed by ToolCallID — the same
+// reference-passing discipline ToolCallInput already uses.
+type SkillWorkflowInput struct {
+	ToolCallID string `json:"tool_call_id"`
+	// TurnID — the parent turn's id, needed whenever a skill composes a
+	// primitive with its own FK-backed Postgres row referencing turns(turn_id)
+	// (e.g. user_input_requests.turn_id, NOT NULL) — an ID, not content, the
+	// same crossing ToolName/Server/Tool already make on ToolCallRef.
+	TurnID       string `json:"turn_id"`
+	SessionKey   string `json:"session_key"`
+	ConnectionID string `json:"connection_id,omitempty"`
+}
+
+// SkillWorkflowOutput is every skill workflow's return value — status only,
+// mirroring ToolCallOutput exactly under the same reference-passing contract:
+// result/reason/side_effect stay in Postgres, written by the skill workflow
+// itself via the CloseSkillCall activity before it returns (same convention
+// UserInputRequestWorkflow already follows for CloseUserInput/DenyToolCall —
+// user_input.go), never carried as workflow-visible data. turn.go's
+// drainResult only needs Status for retry bookkeeping.
+type SkillWorkflowOutput struct {
 	ToolCallID string `json:"tool_call_id"`
 	Status     string `json:"status"` // "ok" | "error" | "cancelled"
 }

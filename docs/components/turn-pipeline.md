@@ -3,7 +3,9 @@
 > STATUS: **CURRENT — this is how a turn runs.** Built and deployed over
 > 2026-09-07…09 (the classify / lane / routing / planning machinery and the
 > harness-owned skill subsystem were removed; a model-steered reason-act loop
-> over a thin set of deterministic rails is what runs now).
+> over a thin set of deterministic rails is what runs now). *Skills* (below)
+> is the 2026-09-22 design that replaces the old skill subsystem — DESIGNED,
+> not yet built; see `docs/05-architecture-domain-control-loops.md`.
 
 ### Role (one line)
 
@@ -104,7 +106,7 @@ ModelTurnOutput {
 
   # ── actions (the model's real control channel) ──
   tool_calls: [ ... ]            # ordinary tools AND meta-tools:
-                                 #   recall · discover_tools · load_skill
+                                 #   recall · discover_tools · discover_skills
                                  #   spawn_subagent · ask_user
 
   # ── advisory (recorded / used if present, safe to omit) ──
@@ -202,31 +204,32 @@ tails it in every call.
 **LCM-assembled conversation** — the transcript. Append-only, compacted as it
 grows (verbatim window + summary DAG). Everything retrieved during the turn flows
 *into* this stream as ordinary observation messages: a `recall` result, a
-`load_skill` procedure, a tool result, a subagent result. LCM compacts them
-uniformly with everything else. There is no separate managed "memory section" or
-"skills section" and no per-section budget shedding — that logic collapses into
-LCM's normal compaction.
+`discover_skills` match list, a skill workflow's result, a tool result, a
+subagent result. LCM compacts them uniformly with everything else. There is no
+separate managed "memory section" or "skills section" and no per-section budget
+shedding — that logic collapses into LCM's normal compaction.
 
 **Tools param** — assembled separately because callable function schemas are a
 provider-request parameter, not messages. The core set (read / write / shell /
 search / list) is always present so exploration and coding tasks start without a
 discovery round-trip; `discover_tools` adds exotic capabilities (a weather API, a
-maps service) for the rest of the turn, read from the per-turn discovered set.
+maps service), `discover_skills` adds matched domain-workflow skills, both for
+the rest of the turn, read from the per-turn discovered set.
 
 **No ambient memory digest.** An earlier draft of this design added a thin
 always-on profile/memory block injected every turn. `memory-slot.md` ("Resolved:
 Entity Facts as a Task-Matched Procedure — No First-Class Digest", 2026-09-05)
 had already examined and rejected exactly that — no genesis population, no
 staleness cache, no non-shed section. Retrieval instead rests on: the `recall`
-meta-tool, the "retrieve before answering" rule, the "don't guess — ask or
-`create_intention`" rule, and (over time) a learned entity-lookup procedure the
-model pulls via `load_skill`. The completeness risk (a turn that needs a fact
-never triggering the lookup) is consciously accepted; a well-authored procedure
-is the mitigation, not a structural guarantee.
+meta-tool, the "retrieve before answering" rule, and the "don't guess — ask or
+`create_intention`" rule. The completeness risk (a turn that needs a fact never
+triggering the lookup) is consciously accepted; there is no learned fallback for
+it — see *Skills* for the (unrelated) mechanism that replaced the old
+learned-procedure idea.
 
 The result tailors itself: turn 1 is lean; turn 6 of a research task carries
-skills, discovered tools, a scratchpad, and memory hits — the prompt grows with
-the work, not up front.
+discovered skills, discovered tools, a scratchpad, and memory hits — the prompt
+grows with the work, not up front.
 
 ---
 
@@ -240,13 +243,18 @@ from the user-visible stream and the iteration budget):
 |---|---|
 | `recall(query)` | returns matched long-term memory as an observation |
 | `discover_tools(query)` | matched tool schemas become callable for the rest of the turn |
+| `discover_skills(query)` | matched domain-workflow "skills" become callable for the rest of the turn (see *Skills*) |
 | `spawn_subagent(brief, …)` | starts a child `TurnWorkflow` (see *Subagents*) |
 | `ask_user(question, options?)` | parks the turn on a user-input request (see *Interrupts*) |
 
-There is no skill/procedure retrieval. The harness-owned skill subsystem
-(`load_skill`, `RecordSkill`, `SkillDiscover`, the `skill_procedures` store) was
-removed — a procedural-memory approach is deferred and will be redesigned
-separately rather than carried in this shape.
+The earlier harness-owned procedural-memory subsystem (`load_skill`,
+`RecordSkill`, `SkillDiscover`, the `skill_procedures` store, the RL EMA loop)
+is gone for good — it auto-recorded prose procedures from transcripts, which is
+exactly what produced the per-turn-fragmentation regression this doc used to
+describe. It is not "deferred"; it's superseded by *Skills* below, a different
+mechanism entirely: no prose, no recording, no LCM injection — a skill's body
+is a Temporal workflow, authored like code, discovered locally, invoked like
+any other tool.
 
 The scratchpad uses the ordinary file tools against a session-scoped path
 (`…/turn/<seq>/scratchpad.md`); assembly auto-tails that path, so there is no
@@ -274,8 +282,10 @@ These are rules, not guidance. Eval them explicitly.
 
 ## Subagents
 
-The only decomposition primitive. `spawn_subagent` starts a child `TurnWorkflow`
-(same workflow type, recursively), `ParentClosePolicy: REQUEST_CANCEL`.
+The decomposition primitive — for delegating open-ended scoped work, not for
+invoking a fixed process (see *Skills* for that, a separate and independent
+mechanism). `spawn_subagent` starts a child `TurnWorkflow` (same workflow type,
+recursively), `ParentClosePolicy: REQUEST_CANCEL`.
 
 The child receives a **clone of the parent's session context** plus an
 **explicit brief** the parent writes: what the specific job is, what to return,
@@ -291,6 +301,49 @@ observation telling the model to do the work directly. Root's own sibling fan-ou
 On subagent completion or cancellation, a `SubagentManifest` activity records its
 changed-file list against its own turn id before the parent's next `ModelCall`
 reads it.
+
+---
+
+## Skills
+
+The harness's entire notion of a "skill," full stop — there is no separate
+prose-procedure mechanism alongside this one. See
+`docs/05-architecture-domain-control-loops.md` for the full design; this section
+covers only how it plugs into the turn loop.
+
+A skill's body is a Temporal workflow (its own registered type, its own states,
+approvals, retries, and completion rules), not a document. It is authored like
+code — the workflow declares its own `{name, description, input_schema}` — and
+never auto-recorded from a transcript; the earlier `RecordSkill`/EMA-learned
+version of "skill" is gone, not deferred (see *Meta-tools*).
+
+**Discovery** is local, not mcp-hub-mediated: an in-process semantic index
+(`skill-hub`, the same in-process hybrid vector+FTS mechanism `shell-hub`
+already uses for local tool discovery — `components/tool-registry.md`) built at
+worker startup by scanning registered workflow types, not a manifest file to
+hand-sync. `discover_skills(query)` searches it and mints matches as directly
+callable actions for the rest of the turn, exactly like `discover_tools`.
+
+**Invocation has no separate "load" step.** The model calls a minted skill by
+name with arguments matching its own `input_schema` — the same `tool_calls`
+channel as any other tool. Whichever loop makes that call, root `TurnWorkflow`
+or a subagent's, dispatches it as a child workflow of that specific registered
+type and blocks on it at the same drain point as any other in-flight call
+(`drainResult` in `turn.go`) — a new branch alongside the activity/subagent/
+ask_user cases, not a reuse of any of them. The result folds back as an
+observation into the *same* loop that invoked it.
+
+**Independent of `spawn_subagent`, not a variant of it.** No context clone, no
+brief, no narrowing check — a skill's contract is entirely whatever its own
+`input_schema` declares, defined by the workflow itself. `spawn_subagent` is the
+model's choice to delegate open-ended scoped work; a skill is a fixed process
+fragment reachable from anywhere in the execution lifecycle, root or subagent,
+with no ceremony either way.
+
+**Interrupts** treat an in-flight skill workflow the same way as everything
+else in the *Interrupt model* table: `RequestCancelChildWorkflowExecution`, a
+`cancelled` observation, cooperative cancellation all the way down — no
+special-casing for a skill's own internal approval/retry stages.
 
 ---
 
@@ -368,6 +421,7 @@ flight, not a queue-after.
 | `ModelCall`, streaming (turn-1 voice/discord) | barge-in cancels it; partial output → `[response interrupted]` observation | near-instant |
 | Tool calls (activities) | cancel context, await settle; non-cancellable Tier-A tools run to completion; `cancelled` observation per call | heartbeat + teardown |
 | Subagent (child workflow) | cascade cancel; `SubagentManifest` still runs for partial file work; `cancelled` observation | deepest in-flight tool's heartbeat |
+| Skill workflow (child) | same cooperative-cancel treatment as a subagent — `RequestCancelChildWorkflowExecution`, `cancelled` observation — regardless of the skill's own internal stages | deepest in-flight step's heartbeat |
 | Multiple queued | FIFO, one per boundary | — |
 | Blocked on `ask_user` | **the message resolves the block** (below) | instant |
 | Hard compaction (blocking) | let it finish — it makes the next `ModelCall` viable — then fold in | compaction completes |
@@ -390,8 +444,7 @@ never a bare `.Get()`:
   the child (its row → `cancelled`) and folds the message in as the next user
   turn. The model connects it to the question from context.
 
-Implemented in Phase 5 — the `blocked` status branch itself lands with Phase 7
-(the model doesn't author `status` yet).
+Implemented in Phase 5; the `blocked` status branch landed with Phase 7.
 
 ---
 
@@ -435,14 +488,13 @@ model:
 
 ## Skill recording
 
-Removed. The harness-owned procedural-memory subsystem (`RecordSkill`,
-`load_skill`, `SkillDiscover`, the `skill_procedures` store, the RL EMA loop) is
-gone — a procedural-memory approach is deferred and will be redesigned
-separately rather than carried in this shape.
-
-**Known regression:** recording is now per-turn. Teaching the agent something
-across several messages fragments into several partial procedures. Accepted for
-v1; revisit if it proves noisy.
+There is none, and there won't be. `RecordSkill`/`load_skill`/`SkillDiscover`/
+`skill_procedures`/the RL EMA loop are gone for good, not deferred — the
+per-turn-fragmentation regression that subsystem produced (teaching the agent
+something across several messages fragmented into partial, half-learned
+procedures) is closed by removing recording as a concept entirely, not by
+fixing it. See *Skills* above: a skill is a hand-authored Temporal workflow,
+declared once in code, never inferred from a transcript.
 
 ---
 

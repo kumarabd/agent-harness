@@ -126,6 +126,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "rather than a raw result list).\n"
     "- discover_tools — find a tool that isn't already offered; a match becomes callable by its "
     "own name on your NEXT step, not the response that found it.\n"
+    "- discover_skills — find a domain workflow that owns a fixed multi-step process (an "
+    "approval gate, retries, a defined finish condition) for something you'd otherwise have to "
+    "freehand; a match becomes callable by its own name on your NEXT step, same as discover_tools.\n"
     "- spawn_subagent — delegate a self-contained slice of work to its own focused turn.\n"
     "- ask_user — put a question to the user and wait for their answer (the turn pauses; they "
     "may also just send a new message, which is the answer).\n"
@@ -342,6 +345,28 @@ TOOLS_SCHEMA = [
                 "description, and input schema. A match becomes directly callable by its own "
                 "tool name (or shell_exec, for a shell result) starting your NEXT step, not "
                 "this one — so don't expect to invoke it in the same response that found it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural language description of what you need."},
+                    "top_k": {"type": "number", "description": "Max results to return (default 5)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "discover_skills",
+            "description": (
+                "Semantically search the domain workflows ('skills') registered in this "
+                "deployment — each one owns a fixed multi-step process (e.g. an approval gate, "
+                "a defined finish condition) rather than being freehanded step by step. Returns "
+                "candidates with a name, description, and input schema. A match becomes directly "
+                "callable by its own name starting your NEXT step, not this one — call it with "
+                "arguments matching its input schema, same as any other tool."
             ),
             "parameters": {
                 "type": "object",

@@ -86,7 +86,7 @@ from temporalio.client import Client
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
-from . import agent_brain, llm_client, shell_hub
+from . import agent_brain, llm_client, shell_hub, skill_hub
 from .metrics import LATENCY_BUCKETS_SECONDS, SECONDS_LATENCY_METRICS
 from .compress_context import CompressContextActivity
 from .db import create_pool
@@ -96,6 +96,7 @@ from .intention import CheckConditionActivity, FireIntentionActivity
 from .model_call import ModelCallActivity
 from .persist import PersistActivity
 from .seed_child_session import SeedChildSessionContextActivity
+from .skill_call import CloseSkillCallActivity, ReadSkillCallArgumentsActivity
 from .status_ping import StatusPingActivity
 from .subagent_manifest import SubagentManifestActivity
 from .tool_call import DenyToolCallActivity, ToolCallActivity
@@ -117,6 +118,9 @@ async def main() -> None:
     # builds shell_hub's in-process zvec index once at startup.
     # No-op if shell_hub.CATALOG is empty or EMBEDDING_BASE_URL isn't set.
     await shell_hub.init()
+    # docs/05-architecture-domain-control-loops.md — same mechanism, its own
+    # index, sourced from skills.SKILLS instead of a $PATH scan.
+    await skill_hub.init()
 
     # docs/components/memory-slot.md, "Resolved: Persona/Directive Content via Mental
     # Models" — one per-tenant persona mental model, ensured (not recreated) once per
@@ -192,6 +196,8 @@ async def main() -> None:
             DenyToolCallActivity(pool).__call__,
             RequestUserInputActivity(pool).__call__,
             CloseUserInputActivity(pool).__call__,
+            ReadSkillCallArgumentsActivity(pool).__call__,
+            CloseSkillCallActivity(pool).__call__,
             SeedChildSessionContextActivity(pool).__call__,
             SubagentManifestActivity(pool).__call__,
             StatusPingActivity(pool).__call__,

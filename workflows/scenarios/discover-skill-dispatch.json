@@ -1,0 +1,28 @@
+{
+  "_comment": "docs/05-architecture-domain-control-loops.md, docs/components/turn-pipeline.md ('Skills'). Fully fixture-scripted (no real LLM call, no setup.sql) -- exercises the whole skill mechanism end to end for real: discover_skills' real handler runs (fixtures only script the model's own text/tool_calls, never the handler), skill_hub.search matches the registered 'draft_note' skill, tools._persist_discovered_skills writes it into turn_retrieval (kind='skill'), and prompt.assemble/mint_resolved_skills makes it directly callable by name on this turn's NEXT step -- proven here by actually scripting that next call. draft_note itself internally raises a permission-gated UserInputRequestWorkflow (same primitive turn.go's own approval branch uses); run_scenario.sh's existing AUTO_APPROVE poller already covers it with no changes, since the request's turn_id is this turn's own root id.",
+  "message": {
+    "role": "user",
+    "content": "Draft a note for Sam about the schedule change."
+  },
+  "scripted_model_responses": [
+    {
+      "content": "Let me find something that can handle this properly.",
+      "tool_calls": [
+        { "name": "discover_skills", "is_subagent": false, "arguments": { "query": "draft and send a note to someone", "top_k": 5 } }
+      ],
+      "usage": { "input_tokens": 40, "output_tokens": 15 }
+    },
+    {
+      "content": "I'll draft that now, pending your approval to send it.",
+      "tool_calls": [
+        { "name": "draft_note", "is_subagent": false, "arguments": { "recipient": "Sam", "note_text": "The schedule has changed." } }
+      ],
+      "usage": { "input_tokens": 60, "output_tokens": 20 }
+    },
+    {
+      "content": "Sent the note to Sam.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 70, "output_tokens": 10 }
+    }
+  ]
+}

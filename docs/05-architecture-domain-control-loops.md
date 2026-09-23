@@ -3,7 +3,9 @@
 
 This paper records the next architectural emphasis for the harness: author multiple, purpose-built Temporal workflows for distinct use cases and business domains. Each workflow is a durable control loop that defines how a class of work proceeds, rather than leaving that procedure solely to a model prompt or a skill document.
 
-This extends, rather than replaces, the shared Session Coordinator, Turn Workflow, activity, state, workspace, and tenancy designs in Parts 1–4.
+**This is also the harness's entire notion of a "skill."** There is no separate prose-procedure mechanism alongside it. Two earlier ideas are superseded outright, not merely extended: the harness-owned procedural-memory subsystem (`load_skill`/`RecordSkill`/`SkillDiscover`/`skill_procedures`, which auto-recorded prose procedures from transcripts and was removed in the turn-pipeline redesign — `docs/components/turn-pipeline.md`) and the never-built plan to source curated prose skills from mcp-hub's `search_skills`/`get_skill` (`docs/components/tool-registry.md`). Both are gone. A skill's body is a Temporal workflow, not a document, authored like code, discovered locally, never recorded from a transcript.
+
+This extends, rather than replaces, the shared Session Coordinator, Turn Workflow, activity, state, workspace, and tenancy designs in Parts 1–4. It does **not** reintroduce a pre-turn classifier or router — `turn-pipeline.md`'s core principle (no classifier deciding a lane, no router deciding which subsystems to consult) stays intact. Workflow/skill selection here is a model-decided, mid-loop tool call, symmetric to how the model already decides when to call `discover_tools` or `spawn_subagent` — never a step the harness runs before the model sees the request. See *Discovery and Invocation* below.
 
 ---
 
@@ -21,24 +23,25 @@ These are examples of shapes, not a fixed product taxonomy. A new workflow is ju
 
 ---
 
-### Why a Workflow Is Not a Skill
+### A Skill Is a Workflow, Not a Document
 
-A conventional skill is usually a probabilistic instruction-following aid: a document tells a model how to approach a task, which tools to prefer, and what good output looks like. The generic agent loop still asks the model to choose whether, when, and in what order to follow those instructions.
+A conventional skill is a probabilistic instruction-following aid: a document tells a model how to approach a task, which tools to prefer, and what good output looks like. The generic agent loop still asks the model to choose whether, when, and in what order to follow those instructions — and, in this harness's own prior history, to record new ones from its own transcripts, which fragmented into partial, half-learned procedures across multi-message tasks (`turn-pipeline.md`'s "Skill recording" section has the full account).
 
-A domain control workflow changes where authority lives:
+This design replaces that document-and-recording model with an executable one. A skill *is* a domain-specific control workflow:
 
-| Concern | Skill inside a generic loop | Domain-specific control workflow |
+| Concern | Prose skill (removed) | Skill as a domain workflow |
 |---|---|---|
 | Process owner | Model interpretation | Executable workflow definition |
 | Sequence and transitions | Suggested by instructions | Encoded and enforced in workflow state |
 | Interrupts, waits, and approvals | Prompt-dependent or ad hoc | First-class Temporal signals and durable waits |
 | Recovery after a worker failure | Model must reconstruct intent | Workflow resumes from recorded history |
 | Auditability | What the model chose to do | State transitions and activities are explicit |
+| How it's learned | Recorded from transcripts (removed — fragmented, noisy) | Authored once in code, versioned like any other artifact |
 | Reuse | Reuse instructions | Reuse activities while varying process composition |
 
-This is not merely “deterministic workflows versus probabilistic models.” Model judgment remains useful—and often necessary—within a step: classify an input, propose a plan, interpret evidence, choose among allowed actions, or summarize a result. The distinction is that the workflow owns the enclosing process and the model does not get to silently skip or reorder its governing stages.
+This is not merely "deterministic workflows versus probabilistic models." Model judgment remains useful—and often necessary—within a step: interpret evidence, choose among allowed actions, summarize a result, or decide *whether* a given skill applies at all. The distinction is that once a skill workflow is entered, it owns the enclosing process and the model does not get to silently skip or reorder its governing stages.
 
-Skills can still exist as optional knowledge packaging, including for interoperability with external agent ecosystems. They are not required by this architecture. A skill that only restates workflow steps is redundant; the workflow is the executable version of that specialization.
+There is no fallback prose-skill tier for cases that don't warrant a full workflow. If a procedure is too lightweight to justify authoring a workflow, it stays as ordinary static-core guidance or a scratchpad note — it is not packaged as a "skill" in this harness at all.
 
 ---
 
@@ -66,29 +69,41 @@ shared activities + shared state/workspace contracts
 
 ---
 
-### Workflow Selection and Lifecycle
+### Discovery and Invocation
 
-The gateway remains a thin ingress layer. It identifies tenant and session, normalizes the inbound event, and addresses the Session Coordinator through `SignalWithStart`. The coordinator remains the durable per-session control plane: it serializes active work and turns later input into an interrupt or a new unit of work as appropriate.
+There is no pre-turn selector. The gateway stays a thin ingress layer (identify tenant/session, normalize the event, `SignalWithStart` to the Session Coordinator); the coordinator still always forwards to the active turn or starts an ordinary `TurnWorkflow` — exactly the flow `turn-pipeline.md` describes, unchanged. A domain workflow only enters the picture *inside* that reason-act loop, as the model's own decision, mid-turn.
 
-Workflow selection is an explicit routing decision, not an accidental prompt side effect. A selector may use the inbound intent, tenant configuration, session state, a user-selected mode, or an inexpensive classification step to choose a suitable workflow definition. That selection—and the reason or policy version behind it—should be recorded in durable state so it is reviewable and replay-safe.
+The mechanism mirrors tool discovery deliberately, not by analogy:
 
-The chosen workflow then owns its lifecycle:
+- **Authoring** — a domain workflow is a registered Go workflow type that declares its own `{name, description, input_schema}` alongside its definition. Nothing is hand-synced to a separate manifest.
+- **Discovery** — `skill-hub`, a local in-process semantic index (the same hybrid vector+FTS mechanism `shell-hub` already uses for local tool discovery, `docs/components/tool-registry.md`), built at worker startup by scanning registered workflow types. Not mcp-hub-mediated, not shared across tenants, not manually curated.
+- **The meta-tool** — `discover_skills(query)` searches that index and mints matches as directly callable actions for the rest of the turn, exactly like `discover_tools`.
+- **Invocation** — the model calls a minted skill by name with arguments matching its `input_schema`, on the same `tool_calls` channel as any other tool. No separate "load" or "start" step. Whichever loop makes the call — the root turn or a subagent's own turn — dispatches it as a child workflow of that registered type and blocks on it the same way it blocks on any other in-flight call; the result folds back as an observation into that same loop.
 
-1. establish the scoped objective and load only the context it needs;
-2. progress through its domain stages using shared activities and, where useful, child workflows;
+Because entry is a model-decided tool call rather than a harness-side classification step, the completeness risk is the same one already accepted for memory retrieval in `turn-pipeline.md`: a turn that should reach for a skill but doesn't call `discover_skills` simply won't. A well-written static-core hint and an accurate `description` on each skill are the mitigation, not a structural guarantee — consistent with how this harness already treats `recall` and `discover_tools`.
+
+Once entered, the chosen workflow owns its own lifecycle:
+
+1. establish its scoped objective from exactly the arguments it was called with — no implicit context clone (see *Skill Workflows Are Independent of Subagents* below);
+2. progress through its domain stages using shared activities and, where useful, further child workflows;
 3. respond to Temporal signals for interruption, cancellation, and human input;
 4. persist observable outcomes and deliver a final result; and
-5. complete with a domain-meaningful terminal state, or hand control back to the coordinator for later work.
+5. complete with a domain-meaningful terminal state, returning that result to the loop that invoked it.
 
-Long-lived coordination and short-lived execution should keep the existing split: the Session Coordinator is long-lived and deliberately small, while a turn or domain workflow is bounded and disposable. A workflow that expects a long external wait should model that wait explicitly rather than holding a worker or hiding it inside an activity. Workflow evolution must follow Temporal-compatible versioning practices when in-flight executions may exist.
+Long-lived coordination and short-lived execution keep the existing split: the Session Coordinator is long-lived and deliberately small, a turn or domain/skill workflow is bounded and disposable. A workflow that expects a long external wait should model that wait explicitly rather than holding a worker or hiding it inside an activity. Workflow evolution must follow Temporal-compatible versioning practices when in-flight executions may exist.
 
 ---
 
-### Subagents, State, and Isolation
+### Skill Workflows Are Independent of Subagents
 
-Control workflows can recursively spawn child workflows for independently scoped work. That preserves the existing recursive-subagent model: a child has its own bounded objective, context, activity history, and isolated workspace; its result returns through an explicit observation or merge-back contract.
+A skill workflow and `spawn_subagent` are two separate primitives that happen to both be Temporal child workflows — not one generalizing the other, and not competing for the same use case.
 
-The workflow does not carry the entire system in its history. Postgres remains the durable state and audit layer. The session filesystem remains the workspace and claim-check store for files and large payloads. Context and memory are assembled through their dedicated contracts. This division lets workflow code make deterministic control decisions from IDs, status, and small structural metadata while activities handle non-deterministic I/O and large content.
+- `spawn_subagent` is the model's choice to delegate open-ended scoped *reasoning* work. The child is another `TurnWorkflow` (same type, recursively), receiving a clone of the parent's session context plus an explicit brief — it decides its own approach.
+- A skill workflow is a fixed *process* fragment. The child is a different, purpose-built workflow type with no context clone and no brief — only whatever its own `input_schema` declares. It is reachable identically from the root turn or from inside a subagent's own turn; nothing about invoking it depends on decomposition.
+
+A domain workflow can itself spawn subagents or invoke further skills internally if its author designs it that way — the two primitives compose, they just don't substitute for each other.
+
+Control workflows (of either kind) do not carry the entire system in their history. Postgres remains the durable state and audit layer. The session filesystem remains the workspace and claim-check store for files and large payloads. Context and memory are assembled through their dedicated contracts. This division lets workflow code make deterministic control decisions from IDs, status, and small structural metadata while activities handle non-deterministic I/O and large content.
 
 Tenancy is not an afterthought to workflow selection. A selected definition must run within the tenant’s Temporal namespace and worker boundary, using that tenant’s database, credentials, permissions, and session storage. A control workflow can therefore express domain policy without creating a path around the isolation model.
 
@@ -104,7 +119,8 @@ The cost is intentional design and maintenance. Every workflow needs clear state
 
 ### Consequence
 
-Agent Harness is not defined by a library of skills wrapped around a generic agent loop. It is defined by durable, inspectable, domain-aware control workflows that orchestrate shared capabilities and model judgment. The workflow becomes the executable form of specialization; skills are optional helpers, not the foundation of execution.
+Agent Harness is not defined by a library of prose skills wrapped around a generic agent loop. It is defined by durable, inspectable, domain-aware control workflows that orchestrate shared capabilities and model judgment — and those workflows *are* this harness's skills, discovered locally and invoked by model decision, not a separate packaging layer bolted on top of execution.
 
 ### Notes Log
-- 2026-09-21: Introduced the domain-specific control-loop strategy. The central distinction is process ownership, not a simplistic deterministic-versus-probabilistic split: models make bounded judgments inside a workflow, while the workflow encodes and enforces the process itself. Multiple purpose-built workflows share activities and infrastructure instead of duplicating generic loop plumbing. Skills remain optional guidance or interoperability packaging, not a required first-class execution mechanism.
+- 2026-09-21: Introduced the domain-specific control-loop strategy. The central distinction is process ownership, not a simplistic deterministic-versus-probabilistic split: models make bounded judgments inside a workflow, while the workflow encodes and enforces the process itself. Multiple purpose-built workflows share activities and infrastructure instead of duplicating generic loop plumbing.
+- 2026-09-22: Reconciled against `turn-pipeline.md`'s deployed "no classifier, no router" principle, which the original "Workflow Selection" section (inbound-intent/classification-based selection) contradicted without acknowledging. Resolved: workflow/skill selection is a model-decided `discover_skills` → call-by-name tool interaction, mirroring `discover_tools`, never a pre-turn harness decision. Also resolved: this doc *is* the redesign of "skills" flagged as deferred in `turn-pipeline.md` and as never-built in `tool-registry.md` (mcp-hub's `search_skills`/`get_skill`) — both prior skill mechanisms (auto-recorded prose, and the unbuilt curated-prose plan) are superseded, not extended. Skill workflows are independent of `spawn_subagent` — no context clone, no brief, own `input_schema`-defined contract, reachable from root or subagent alike — and share the same cooperative-cancellation interrupt treatment as everything else in `turn-pipeline.md`'s interrupt table.
