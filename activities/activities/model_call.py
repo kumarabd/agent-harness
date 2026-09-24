@@ -27,6 +27,7 @@ import time
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from . import capabilities as _cap
 from . import ids, llm, llm_client, model_registry, permissions
 from .types import ModelCallInput, ModelCallOutput, NextStep, ToolCallRef, Usage
 
@@ -362,24 +363,32 @@ class ModelCallActivity:
                     # identity when it's known; falls back to _resolve_gating's
                     # shell_exec/call_tool cases otherwise.
                     #
-                    # A resolved SKILL (discover_skills — docs/
-                    # 05-architecture-domain-control-loops.md) is the same
-                    # per-task-resolved shape, mutually exclusive with the tool
-                    # case: resolved_workflow_type (migration 037) carries the Go
+                    # A skill (docs/05-architecture-domain-control-loops.md) is
+                    # the same per-task-resolved shape, mutually exclusive with
+                    # the tool case — but a STATIC capability
+                    # (capabilities.CAPABILITIES has one entry per registered
+                    # skill, always present, never per-turn-discovered), so the
+                    # lookup also checks the static table, not only the
+                    # per-turn `resolved_by_name` discover_tools already
+                    # populates. use_skill (migration 037/039) carries the Go
                     # workflow type turn.go dispatches as a child workflow
                     # instead. Never approval-gated by this outer mechanism — a
                     # skill that needs a human gate requests it itself,
                     # internally, via its own child UserInputRequestWorkflow.
-                    resolved_cap = None if (is_subagent or is_ask_user) else resolved_by_name.get(tool_name)
-                    is_skill = resolved_cap is not None and resolved_cap.resolved_workflow_type is not None
-                    resolved_workflow_type = None
+                    resolved_cap = None if (is_subagent or is_ask_user) else (
+                        resolved_by_name.get(tool_name) or _cap.BY_NAME.get(tool_name)
+                    )
+                    use_skill = (
+                        resolved_cap.resolved_workflow_type
+                        if (resolved_cap is not None and resolved_cap.resolved_workflow_type)
+                        else ""
+                    )
                     if resolved_cap is not None and resolved_cap.resolved_target is not None:
                         resolved_server, resolved_tool = resolved_cap.resolved_target
                         gate_server, gate_tool = resolved_server, resolved_tool
                         approval_needed = permissions.requires_approval(gate_server, gate_tool)
-                    elif is_skill:
+                    elif use_skill:
                         resolved_server = resolved_tool = None
-                        resolved_workflow_type = resolved_cap.resolved_workflow_type
                         gate_server, gate_tool = "", ""
                         approval_needed = False
                     else:
@@ -395,8 +404,8 @@ class ModelCallActivity:
                     await conn.execute(
                         "INSERT INTO tool_calls "
                         "(tool_call_id, parent_id, message_id, tool_name, arguments, is_subagent, "
-                        "resolved_server, resolved_tool, is_skill, resolved_workflow_type) "
-                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                        "resolved_server, resolved_tool, resolved_workflow_type) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                         tool_call_id,
                         input.turn_id,
                         message_id,
@@ -405,8 +414,7 @@ class ModelCallActivity:
                         is_subagent,
                         resolved_server,
                         resolved_tool,
-                        is_skill,
-                        resolved_workflow_type,
+                        use_skill or None,
                     )
                     refs.append(
                         ToolCallRef(
@@ -417,8 +425,7 @@ class ModelCallActivity:
                             requires_approval=approval_needed,
                             server=gate_server,
                             tool=gate_tool,
-                            is_skill=is_skill,
-                            resolved_workflow_type=resolved_workflow_type or "",
+                            use_skill=use_skill,
                         )
                     )
 

@@ -30,6 +30,8 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 
+from . import skills as _skills_registry
+
 
 class Layer(str, Enum):
     INTERFACE = "interface"
@@ -102,9 +104,12 @@ CAPABILITIES: list[Capability] = [
     Capability("recall", Layer.COGNITION, _MAIN, handler_ref="recall", meta=True),
     Capability("reflect", Layer.COGNITION, _MAIN, handler_ref="reflect"),
     Capability("discover_tools", Layer.INTERFACE, _MAIN, handler_ref="discover_tools", meta=True),
-    # docs/05-architecture-domain-control-loops.md — matches a registered
-    # domain workflow ("skill") by description, mints it callable by its own
-    # name for the rest of the turn, same mechanism as discover_tools.
+    # docs/05-architecture-domain-control-loops.md — every registered skill is
+    # already directly callable by its own name (see the skill entries
+    # appended below CAPABILITIES's literal list) — nothing here needs
+    # minting. This is an optional detail/search step: exact input_schema, or
+    # semantic search once there are more skills than comfortably fit as
+    # individually-listed tools.
     Capability("discover_skills", Layer.INTERFACE, _MAIN, handler_ref="discover_skills", meta=True),
     # call_tool is internal-only since the 2026-09-04 per-task-resolution
     # revision (tool-registry.md, "Resolved: Three-Layer Tool Taxonomy") —
@@ -137,6 +142,18 @@ CAPABILITIES: list[Capability] = [
     # same shape as spawn_subagent being dispatched as a child workflow.
     Capability("deliver_reply", Layer.CONTROL, frozenset()),
     Capability("deliver_attachment", Layer.CONTROL, frozenset()),
+] + [
+    # docs/05-architecture-domain-control-loops.md — a skill is a static,
+    # always-on capability, exactly like ask_user/spawn_subagent above, not a
+    # per-turn-resolved one: there are few of them, hand-authored, known at
+    # process start, so there's no reason to gate them behind discovery. No
+    # handler_ref — turn.go dispatches a child workflow of
+    # resolved_workflow_type, same as ask_user has no handler_ref. The raw
+    # schema itself is generated into llm.TOOLS_SCHEMA directly from this
+    # same registry (llm.py), so schema_for's existing _SCHEMA_BY_NAME[c.name]
+    # lookup finds it with no changes needed there.
+    Capability(e["name"], Layer.CONTROL, _MAIN, resolved_workflow_type=e["workflow_type"])
+    for e in _skills_registry.SKILLS
 ]
 
 BY_NAME: dict[str, Capability] = {c.name: c for c in CAPABILITIES}
@@ -228,42 +245,5 @@ def mint_resolved(rows: "list[tuple[str, dict | None]]") -> list[Capability]:
             turn_kinds=frozenset(),  # not looked up by schema_for's static loop; appended directly
             schema={"type": "function", "function": {"name": name, "description": description, "parameters": schema}},
             resolved_target=(server, tool),
-        ))
-    return out[-MAX_RESOLVED:]
-
-
-def mint_resolved_skills(rows: "list[tuple[str, dict | None]]") -> list[Capability]:
-    """Same job as `mint_resolved`, for discover_skills's staged rows instead
-    of discover_tools's — docs/05-architecture-domain-control-loops.md.
-    `content` = "{name} — {description}", `metadata` = {name, workflow_type,
-    input_schema}. No `{server, tool}` identity here: a skill has no proxy
-    dispatch, it's a child workflow keyed by `workflow_type` directly, so the
-    resulting Capability sets `resolved_workflow_type` instead of
-    `resolved_target` — the two fields turn.go/model_call.py branch on to
-    decide activity-vs-tool-proxy-vs-child-workflow dispatch."""
-    out: list[Capability] = []
-    taken: set[str] = set()
-    for content, metadata in rows:
-        if not isinstance(metadata, dict):
-            continue
-        name, workflow_type, schema = (
-            metadata.get("name"), metadata.get("workflow_type"), metadata.get("input_schema")
-        )
-        if not name or not workflow_type or not isinstance(schema, dict):
-            continue
-        minted_name = _NAME_RE.sub("_", name)[:64] or "skill"
-        if minted_name in taken:
-            minted_name = f"{minted_name[:60]}_{len(taken)}"
-        taken.add(minted_name)
-        description = content.split(" — ", 1)[1].strip() if " — " in content else content
-        out.append(Capability(
-            name=minted_name,
-            layer=Layer.INTERFACE,
-            turn_kinds=frozenset(),
-            schema={
-                "type": "function",
-                "function": {"name": minted_name, "description": description, "parameters": schema},
-            },
-            resolved_workflow_type=workflow_type,
         ))
     return out[-MAX_RESOLVED:]

@@ -87,7 +87,7 @@ func TestTurnWorkflow_SkillDispatch(t *testing.T) {
 		{
 			Status: "working",
 			ToolCalls: []types.ToolCallRef{
-				{ToolCallID: "t1:act:1", ToolName: "draft_note", IsSkill: true, ResolvedWorkflowType: "TestSkillWorkflow"},
+				{ToolCallID: "t1:act:1", ToolName: "draft_note", UseSkill: "TestSkillWorkflow"},
 			},
 		},
 		{Status: "done", HasContent: true},
@@ -115,7 +115,7 @@ func TestTurnWorkflow_SkillDispatch_CancelledOnInterrupt(t *testing.T) {
 		{
 			Status: "working",
 			ToolCalls: []types.ToolCallRef{
-				{ToolCallID: "t1:act:1", ToolName: "draft_note", IsSkill: true, ResolvedWorkflowType: "TestSkillWorkflow"},
+				{ToolCallID: "t1:act:1", ToolName: "draft_note", UseSkill: "TestSkillWorkflow"},
 			},
 		},
 		{Status: "done", HasContent: true},

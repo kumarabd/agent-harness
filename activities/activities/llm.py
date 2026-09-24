@@ -50,6 +50,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import prompt
+from . import skills as _skills_registry
 from .types import Usage
 
 # docs/components/turn-pipeline.md, "Model I/O schema" — the model authors
@@ -126,9 +127,11 @@ DEFAULT_SYSTEM_PROMPT = (
     "rather than a raw result list).\n"
     "- discover_tools — find a tool that isn't already offered; a match becomes callable by its "
     "own name on your NEXT step, not the response that found it.\n"
-    "- discover_skills — find a domain workflow that owns a fixed multi-step process (an "
-    "approval gate, retries, a defined finish condition) for something you'd otherwise have to "
-    "freehand; a match becomes callable by its own name on your NEXT step, same as discover_tools.\n"
+    "- Registered skills — domain workflows that own a fixed multi-step process (an approval "
+    "gate, retries, a defined finish condition) for something you'd otherwise have to freehand. "
+    "These are already in your tool list by their own name if any are registered — check there "
+    "before assuming you lack a capability. discover_skills is only for extra detail (the exact "
+    "input schema) or search once there are more than fit comfortably as individual tools.\n"
     "- spawn_subagent — delegate a self-contained slice of work to its own focused turn.\n"
     "- ask_user — put a question to the user and wait for their answer (the turn pauses; they "
     "may also just send a new message, which is the answer).\n"
@@ -361,12 +364,12 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "discover_skills",
             "description": (
-                "Semantically search the domain workflows ('skills') registered in this "
-                "deployment — each one owns a fixed multi-step process (e.g. an approval gate, "
-                "a defined finish condition) rather than being freehanded step by step. Returns "
-                "candidates with a name, description, and input schema. A match becomes directly "
-                "callable by its own name starting your NEXT step, not this one — call it with "
-                "arguments matching its input schema, same as any other tool."
+                "Every registered skill ('domain workflow' — each owns a fixed multi-step "
+                "process, e.g. an approval gate or a defined finish condition, rather than "
+                "being freehanded) is already directly callable by name — check your own tool "
+                "list, no discovery needed to find out one exists. Use this only for more "
+                "detail (the exact input schema) before committing to arguments, or to search "
+                "once there are more skills registered than comfortably fit as individual tools."
             ),
             "parameters": {
                 "type": "object",
@@ -609,6 +612,22 @@ TOOLS_SCHEMA = [
         },
     },
 ]
+
+# docs/05-architecture-domain-control-loops.md — each registered skill is a
+# static, always-on capability, built directly from its own registry entry
+# (activities/activities/skills.py) rather than hand-written here: nothing to
+# hand-sync when a skill is added. Appended before _SCHEMA_BY_NAME is built
+# below, so it's picked up the same way every other static tool schema is —
+# capabilities.CAPABILITIES has a matching static Capability per skill
+# (capabilities.py), so schema_for's existing _SCHEMA_BY_NAME[c.name] lookup
+# finds these with no changes needed there.
+TOOLS_SCHEMA.extend(
+    {
+        "type": "function",
+        "function": {"name": e["name"], "description": e["description"], "parameters": e["input_schema"]},
+    }
+    for e in _skills_registry.SKILLS
+)
 
 # docs/components/context-slot.md's Memory-Access Tools — lcm_expand is
 # subagent-only at the schema level (excluded from a main-agent turn's schema

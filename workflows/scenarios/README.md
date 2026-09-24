@@ -21,11 +21,13 @@ package, instead of re-deriving verification from scratch every time.
 > mechanism that lets a mid-turn discovery be called by name on the next
 > step.
 >
-> `discover-skill-dispatch` is the same idea for skills (docs/
-> 05-architecture-domain-control-loops.md): scripts `discover_skills`, then a
-> follow-up call to the minted `draft_note` skill by name, and checks
-> `turn_retrieval` (kind='skill'), `tool_calls.is_skill`/`resolved_workflow_type`,
-> and that the real `DraftNoteSkillWorkflow` child ran to completion —
+> `discover-skill-dispatch` covers skills (docs/
+> 05-architecture-domain-control-loops.md): `draft_note` is a static,
+> always-on capability, directly callable by its own real name from turn 1 —
+> no discovery/minting step required. It scripts an (optional) `discover_skills`
+> call, then a call to `draft_note` by name, and checks
+> `tool_calls.resolved_workflow_type` and that the real `DraftNoteSkillWorkflow`
+> child ran to completion —
 > its own internal permission gate is caught by the existing `AUTO_APPROVE`
 > poller with no changes needed, since the request's `turn_id` is this
 > turn's own root id. The `skill-interrupt` chained pair covers the

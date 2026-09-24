@@ -26,8 +26,8 @@ ok "the interrupted turn resumed and completed (one turn, not two)"
 
 # the in-flight draft_note skill was cancelled by the interrupt, cascading
 # down through its own internal approval child.
-tc="$(pg "SELECT is_skill || '|' || status FROM tool_calls WHERE parent_id = '$ROOT_TURN_ID' AND tool_name = 'draft_note'")"
-[ "$tc" = "t|cancelled" ] || fail "draft_note tool_call is '$tc', expected 't|cancelled'"
+tc="$(pg "SELECT resolved_workflow_type || '|' || status FROM tool_calls WHERE parent_id = '$ROOT_TURN_ID' AND tool_name = 'draft_note'")"
+[ "$tc" = "DraftNoteSkillWorkflow|cancelled" ] || fail "draft_note tool_call is '$tc', expected 'DraftNoteSkillWorkflow|cancelled'"
 ok "the in-flight skill was cancelled by the follow-up (CloseSkillCall's cancel path ran)"
 
 # the follow-up landed in THIS turn as a user message

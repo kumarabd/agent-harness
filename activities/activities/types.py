@@ -89,13 +89,15 @@ class ToolCallRef:
     server: str = ""
     tool: str = ""
     # docs/05-architecture-domain-control-loops.md, docs/components/
-    # turn-pipeline.md ("Skills") — the model called a skill discover_skills
-    # minted this turn. turn.go dispatches a child workflow of
-    # resolved_workflow_type instead of the generic ToolCall activity or a
-    # subagent TurnWorkflow. Never true alongside is_subagent — independent
-    # primitives, never the same call.
-    is_skill: bool = False
-    resolved_workflow_type: str = ""
+    # turn-pipeline.md ("Skills") — the model called a skill directly by its
+    # own registered name (skills are static, always-on capabilities, no
+    # discovery step required). turn.go dispatches a child workflow of
+    # use_skill instead of the generic ToolCall activity or a subagent
+    # TurnWorkflow. "" if this call isn't a skill. One field, not a
+    # bool+string pair — mirrors server/tool's own precedent of not needing a
+    # companion "is_resolved_tool" flag. Never set alongside is_subagent —
+    # independent primitives, never the same call.
+    use_skill: str = ""
 
 
 @dataclass

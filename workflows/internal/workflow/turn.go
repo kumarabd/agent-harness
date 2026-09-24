@@ -1375,33 +1375,8 @@ loop:
 					ConnectionID: in.ConnectionID,
 				})
 				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isAskUser: true})
-			} else if tc.IsSkill {
-				// docs/05-architecture-domain-control-loops.md, docs/components/
-				// turn-pipeline.md ("Skills") — a skill is dispatched as a child
-				// workflow of its own registered type, keyed by the type-name
-				// STRING ModelCall resolved at mint time: no Go-side
-				// name-to-function registry needed, workflow.ExecuteChildWorkflow
-				// accepts a registered workflow type name directly. Deliberately
-				// no context clone, no brief — SkillWorkflowInput carries only
-				// dispatch plumbing; the skill reads its own real arguments via
-				// the ReadSkillCallArguments activity and closes its own
-				// tool_calls row out itself via CloseSkillCall (see drainResult
-				// below), independent of spawn_subagent end to end (docs/
-				// 05-architecture-domain-control-loops.md, "Skill Workflows Are
-				// Independent of Subagents"). Reachable from any depth this loop
-				// runs at — a subagent's own turn, or a skill's own scoped
-				// reasoning turn, can mint a further nested skill the same way.
-				cwo := workflow.ChildWorkflowOptions{
-					WorkflowID:        tc.ToolCallID,
-					ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
-				}
-				cctx := workflow.WithChildOptions(cancelCtx, cwo)
-				fut := workflow.ExecuteChildWorkflow(cctx, tc.ResolvedWorkflowType, types.SkillWorkflowInput{
-					ToolCallID:   tc.ToolCallID,
-					TurnID:       in.TurnID,
-					SessionKey:   in.SessionKey,
-					ConnectionID: in.ConnectionID,
-				})
+			} else if tc.UseSkill != "" {
+				fut := runSkill(cancelCtx, tc, in)
 				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isSkill: true})
 			} else if deliveryActivityName, ok := deliveryToolActivity(platformFromSessionKey(in.SessionKey), tc.ToolName); ok {
 				// deliver_reply/deliver_attachment — routed to the owning
@@ -1613,6 +1588,40 @@ func dispatchSubagentManifests(ctx workflow.Context, subagentIDs []string) {
 			workflow.GetLogger(ctx).Warn("SubagentManifest failed", "subagent_turn_id", subagentIDs[i], "error", err)
 		}
 	}
+}
+
+// runSkill dispatches a skill call as a child workflow of its own registered
+// type, keyed by tc.UseSkill — the type-name STRING ModelCall resolved at
+// mint time. No Go-side name-to-function registry needed:
+// workflow.ExecuteChildWorkflow accepts a registered workflow type name
+// directly. This is the Go-side echo of tools.call_tool's own role: a named,
+// non-model-visible place this class of call is routed through — the model
+// never calls anything named "runSkill", it calls the skill directly by its
+// own real name (docs/05-architecture-domain-control-loops.md), exactly the
+// way a resolved mcp-hub tool is called by its own real name rather than by
+// calling "call_tool" (verified: capabilities.py's call_tool entry has
+// turn_kinds=frozenset(), so it is never actually offered to the model).
+//
+// Deliberately no context clone, no brief — SkillWorkflowInput carries only
+// dispatch plumbing; the skill reads its own real arguments via the
+// ReadSkillCallArguments activity and closes its own tool_calls row out
+// itself via CloseSkillCall (see drainResult below), independent of
+// spawn_subagent end to end (docs/05-architecture-domain-control-loops.md,
+// "Skill Workflows Are Independent of Subagents"). Reachable from any depth
+// this loop runs at — a subagent's own turn, or a skill's own scoped
+// reasoning turn, can mint a further nested skill the same way.
+func runSkill(cancelCtx workflow.Context, tc types.ToolCallRef, in RunReasonActLoopInput) workflow.Future {
+	cwo := workflow.ChildWorkflowOptions{
+		WorkflowID:        tc.ToolCallID,
+		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
+	}
+	cctx := workflow.WithChildOptions(cancelCtx, cwo)
+	return workflow.ExecuteChildWorkflow(cctx, tc.UseSkill, types.SkillWorkflowInput{
+		ToolCallID:   tc.ToolCallID,
+		TurnID:       in.TurnID,
+		SessionKey:   in.SessionKey,
+		ConnectionID: in.ConnectionID,
+	})
 }
 
 // drainResult calls Get on an already-ready (or now-cancelled) future purely

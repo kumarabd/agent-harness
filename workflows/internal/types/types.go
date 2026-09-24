@@ -208,21 +208,21 @@ type ToolCallRef struct {
 	// workflow-visible by design, not an accepted leak").
 	Server string `json:"server,omitempty"`
 	Tool   string `json:"tool,omitempty"`
-	// IsSkill — docs/05-architecture-domain-control-loops.md, docs/components/
-	// turn-pipeline.md ("Skills"). The model called a skill discover_skills
-	// minted this turn; turn.go dispatches a child workflow of
-	// ResolvedWorkflowType instead of the generic ToolCall activity or a
-	// subagent TurnWorkflow. Minted by ModelCall the same way IsSubagent is.
-	// Never true alongside IsSubagent — a skill and a subagent are
-	// independent primitives (docs/05-architecture-domain-control-loops.md,
-	// "Skill Workflows Are Independent of Subagents"), never the same call.
-	IsSkill bool `json:"is_skill,omitempty"`
-	// ResolvedWorkflowType — the Go workflow type name to dispatch via
-	// workflow.ExecuteChildWorkflow's string-name form. No Go-side
-	// name-to-function registry needed: Temporal resolves the string against
-	// whatever was registered with RegisterWorkflow in cmd/loop-worker. Set
-	// only when IsSkill is true.
-	ResolvedWorkflowType string `json:"resolved_workflow_type,omitempty"`
+	// UseSkill — docs/05-architecture-domain-control-loops.md, docs/components/
+	// turn-pipeline.md ("Skills"). The model called a skill directly by its
+	// own registered name (skills are static, always-on capabilities — no
+	// discovery step required); this carries the resolved Go workflow type
+	// to dispatch via workflow.ExecuteChildWorkflow's string-name form ("" if
+	// this call isn't a skill). No Go-side name-to-function registry needed:
+	// Temporal resolves the string against whatever was registered with
+	// RegisterWorkflow in cmd/loop-worker. One field, not a bool+string pair
+	// — mirrors Server/Tool's own precedent of not needing a companion
+	// "is_resolved_tool" boolean; a skill only ever needs one identity value,
+	// unlike {server, tool}'s genuine compound key. Never set alongside
+	// IsSubagent — a skill and a subagent are independent primitives (docs/
+	// 05-architecture-domain-control-loops.md, "Skill Workflows Are
+	// Independent of Subagents"), never the same call.
+	UseSkill string `json:"use_skill,omitempty"`
 }
 
 // ModelCallOutput is ModelCall's only output — refs and control metadata, never
