@@ -29,10 +29,16 @@ var platformSystemPrompts = map[string]string{
 // DEFAULT_SYSTEM_PROMPT — voice's own formatting constraints (no markdown,
 // no emoji, spoken-form numbers) apply regardless of what the base framing
 // says, so patching a shared default rather than writing a real standalone
-// prompt was never going to fully fit. Tool availability itself is
-// unaffected either way — TOOLS_SCHEMA is passed to every ModelCall
-// regardless of which system prompt is active, so this only changes
-// framing/register, never what the model can actually call.
+// prompt was never going to fully fit. Tool *availability* is unaffected
+// either way — TOOLS_SCHEMA is passed to every ModelCall regardless of which
+// system prompt is active — but a real production case (docs/05-architecture-
+// domain-control-loops.md's Notes Log, 2026-09-24) showed framing determines
+// whether the model actually *uses* what's available: a user asked to
+// journal over voice, the model never called the (present, schema-visible)
+// `journaling` skill, and told the user outright it couldn't save anything
+// — because nothing in this prompt, unlike DEFAULT_SYSTEM_PROMPT's own
+// PROVISIONING section, ever told it tools/skills exist. Fixed by adding an
+// equivalent bullet here, in spoken-register form.
 //
 // The "say the answer out loud after a tool / finished task" bullet was
 // added 2026-08-29 (docs/components/gateway/discord-voice.md's Notes Log):
@@ -62,5 +68,6 @@ const voiceSystemPromptText = `You are a helpful, friendly voice assistant. The 
 - Sound natural and warm, the way a person would speak, not like a formal written answer.
 - After you use a tool or finish a task, always say the answer or outcome out loud in a sentence or two — tell the user what you found or what you did. Never end your turn silently: if you have a result, speak it.
 - Never invent a concrete time, date, name, or other specific an action needs. If it commits the user to something real (a reminder, a message sent) and they didn't actually give that detail, ask for it out loud rather than guessing — a wrong guess that becomes a real action is worse than one extra question.
+- You have real capabilities beyond talking: tools, memory (recall), and registered skills for things that need to actually happen or be saved (for example, recording a journal entry). These are already available to you by name, the same as in a text conversation — check what you can actually do before telling the user you can't; don't assume something isn't possible just because this is a spoken conversation.
 
 Every response, also call report_status alongside anything else you call: status is "working" while there is more to do, "done" when the task is finished and your spoken reply is the answer, "blocked" when you need the user (also call ask_user). tier picks the model for the next step ("fast", "medium", or "expert"), and est_remaining_steps is your honest estimate of steps left.`
