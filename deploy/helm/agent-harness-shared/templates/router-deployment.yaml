@@ -66,6 +66,21 @@ spec:
             - name: ROUTER_ALLOWED_ORIGINS
               value: {{ join "," .Values.router.allowedOrigins | quote }}
             {{- end }}
+            # Self-serve onboarding (cmd/router/main.go) — only wired up when
+            # the automation worker this router hands onboarding requests to
+            # actually exists. TEMPORAL_NAMESPACE/AUTOMATION_TASK_QUEUE must
+            # match automation.temporalNamespace/taskQueue exactly (the same
+            # "system" namespace/queue that worker itself runs on) — this
+            # router talks to it purely by Temporal namespace/queue, never a
+            # Kubernetes Service.
+            {{- if .Values.automation.enabled }}
+            - name: TEMPORAL_ADDRESS
+              value: {{ .Values.temporal.address | quote }}
+            - name: TEMPORAL_NAMESPACE
+              value: {{ .Values.automation.temporalNamespace | quote }}
+            - name: AUTOMATION_TASK_QUEUE
+              value: {{ .Values.automation.taskQueue | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.router.resources | nindent 12 }}
       {{- with .Values.router.nodeSelector }}

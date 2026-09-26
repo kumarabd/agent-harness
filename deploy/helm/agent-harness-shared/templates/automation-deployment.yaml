@@ -1,6 +1,6 @@
 {{- if .Values.automation.enabled -}}
-{{- if and (not .Values.router.clerkJwksUrl) (not .Values.router.clerkIssuer) }}
-{{- fail "router.clerkJwksUrl or router.clerkIssuer is required when automation.enabled=true — every tenant this worker provisions gets that same shared issuer written into its own gateway.web.clerkIssuer (workflows/internal/automation/activities/helm.go)." }}
+{{- if not .Values.router.clerkIssuer }}
+{{- fail "router.clerkIssuer is required when automation.enabled=true — every tenant this worker provisions gets that same shared issuer written into its own gateway.web.clerkIssuer (workflows/internal/automation/activities/helm.go, cmd/automation/main.go's own CLERK_ISSUER check). Unlike the router (which can verify tokens with just clerkJwksUrl), this worker needs the literal issuer string to embed into each generated tenant's config — clerkJwksUrl alone does not substitute here." }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment

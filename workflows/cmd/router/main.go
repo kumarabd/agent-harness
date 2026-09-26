@@ -57,18 +57,29 @@ func main() {
 	)
 
 	// Self-serve tenant onboarding (docs/components/gateway/web.md's Phase
-	// 2, onboarding.go) — a Temporal client dialed against the "system"
-	// namespace the automation worker itself runs on, distinct from any
-	// tenant's own namespace this router otherwise never touches directly.
-	onboardingTemporal, err := temporalclient.Dial(temporalclient.Options{
-		HostPort:  envOrDefault("TEMPORAL_ADDRESS", temporalclient.DefaultHostPort),
-		Namespace: envOrDefault("TEMPORAL_NAMESPACE", "system"),
-	})
-	if err != nil {
-		log.Fatalf("unable to create Temporal client for onboarding: %v", err)
+	// 2, onboarding.go) — genuinely optional: a router deployed without the
+	// automation worker wired up (TEMPORAL_ADDRESS unset) simply doesn't
+	// register /onboard, the same optionality gateway.enabled already has
+	// elsewhere. Previously this always attempted a dial with a
+	// 127.0.0.1:7233 fallback and crashed the whole router when nothing was
+	// listening there — TEMPORAL_ADDRESS's presence is now the actual
+	// on/off switch, not a best-effort default.
+	if temporalAddr := os.Getenv("TEMPORAL_ADDRESS"); temporalAddr != "" {
+		// Dialed against the "system" namespace the automation worker
+		// itself runs on, distinct from any tenant's own namespace this
+		// router otherwise never touches directly.
+		onboardingTemporal, err := temporalclient.Dial(temporalclient.Options{
+			HostPort:  temporalAddr,
+			Namespace: envOrDefault("TEMPORAL_NAMESPACE", "system"),
+		})
+		if err != nil {
+			log.Fatalf("unable to create Temporal client for onboarding: %v", err)
+		}
+		defer onboardingTemporal.Close()
+		srv.WithOnboarding(onboardingTemporal, envOrDefault("AUTOMATION_TASK_QUEUE", "system"))
+	} else {
+		log.Printf("TEMPORAL_ADDRESS not set — onboarding endpoints disabled")
 	}
-	defer onboardingTemporal.Close()
-	srv.WithOnboarding(onboardingTemporal, envOrDefault("AUTOMATION_TASK_QUEUE", "system"))
 
 	addr := envOrDefault("ROUTER_BIND_ADDRESS", "0.0.0.0:8080")
 	httpServer := &http.Server{Addr: addr, Handler: srv.Handler()}
