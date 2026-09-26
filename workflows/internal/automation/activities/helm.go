@@ -41,26 +41,21 @@ func (a *Activities) readStagedSecret(ctx context.Context, requestID string) (ma
 	return decoded, nil
 }
 
-// HelmInstallTenant renders a per-tenant Helm values override, matching
+// buildTenantValues renders a per-tenant Helm values override, matching
 // deploy/helm/tenants/<tenant>.yaml's own real shape field-for-field (see
-// that directory's README.md), and runs `helm upgrade --install` against
-// the agent-harness-tenant chart baked into this worker's own image
-// (a.ChartDir) — the exact command sequence that README already documents
-// as the manual process, just piped over stdin instead of a checked-in
-// file, and with ownerUserID/clerkIssuer filled in automatically rather
-// than hand-copied. Deliberately narrow: storage class/access mode and
-// per-backend mcp-hub OAuth manifests are left at chart defaults — see
-// docs/components/gateway/web.md's Phase 2 section for why those stayed
-// out of a v1 onboarding form.
-func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error {
-	secrets, err := a.readStagedSecret(ctx, ref.RequestID)
-	if err != nil {
-		return err
-	}
-
+// that directory's README.md) — with ownerUserID/clerkIssuer filled in
+// automatically rather than hand-copied. Deliberately narrow: storage
+// class/access mode and per-backend mcp-hub OAuth manifests are left at
+// chart defaults — see docs/components/gateway/web.md's Phase 2 section for
+// why those stayed out of a v1 onboarding form. Pure and side-effect-free
+// (no exec, no I/O) specifically so a values-schema gap like the
+// agent-brain.llm/.temporal one below can be caught by a unit test instead
+// of only by manually cross-referencing every field against a real tenant's
+// working values.yaml — which is how both were actually found.
+func buildTenantValues(ref PublicRef, clerkIssuer, temporalAddress string, secrets map[string]string) (map[string]any, error) {
 	var llmTiers map[string]LLMTier
 	if err := json.Unmarshal([]byte(secrets[keyLLMTiersJSON]), &llmTiers); err != nil {
-		return fmt.Errorf("decode staged llm tiers: %w", err)
+		return nil, fmt.Errorf("decode staged llm tiers: %w", err)
 	}
 	tiers := map[string]any{}
 	for name, tier := range llmTiers {
@@ -77,7 +72,35 @@ func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error
 		discordBots = []map[string]any{{"botToken": tok}}
 	}
 
-	values := map[string]any{
+	// agent-brain's own retain/reflect worker (charts/agent-brain/templates/
+	// _helpers.tpl's temporalWorkerEnv: LLM_BASE_URL/LLM_MODEL, TEMPORAL_
+	// ADDRESS/TEMPORAL_NAMESPACE) reads these from its own top-level
+	// llm.baseURL/model and temporal.address/namespace — NOT nested under a
+	// "mining" key (agent-harness-tenant/values.yaml's own default had a
+	// stale agentBrain.mining.llm.* path pointing at nothing the subchart
+	// actually consumes; fixed alongside this). Neither has a chart-side
+	// fail guard or safe default (both render as empty strings otherwise),
+	// so leaving them unset here silently broke retain/reflect for every
+	// self-serve onboarded tenant — found by comparing against
+	// deploy/helm/tenants/abishekk.yaml, which sets both by hand.
+	//
+	// "medium" mirrors abishekk.yaml's own convention ("mining[/retain] is
+	// treated as a medium-tier consumer") — falls back to whichever tier
+	// actually exists if the requester didn't configure a medium one
+	// (ValidateRequest only guarantees at least one tier, not which).
+	retainTier, hasMedium := llmTiers["medium"]
+	if !hasMedium {
+		// llmTiers is guaranteed non-empty by ValidateRequest, so this always
+		// finds one — "medium" just isn't guaranteed to be the one present.
+		for _, name := range []string{"fast", "expert"} {
+			if tier, present := llmTiers[name]; present {
+				retainTier = tier
+				break
+			}
+		}
+	}
+
+	return map[string]any{
 		"temporal": map[string]any{"namespace": ref.TenantSlug},
 		"agentBrain": map[string]any{
 			"postgres":    map[string]any{"password": secrets[keyAgentBrainDBPassword]},
@@ -86,7 +109,7 @@ func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error
 		},
 		"gateway": map[string]any{
 			"enabled": true,
-			"web":     map[string]any{"clerkIssuer": a.ClerkIssuer},
+			"web":     map[string]any{"clerkIssuer": clerkIssuer},
 			"discord": map[string]any{"bots": discordBots},
 		},
 		"llm": map[string]any{
@@ -107,6 +130,14 @@ func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error
 				"litellmAPIKey": secrets[keyLiteLLMAPIKey],
 				"jwtSecret":     secrets[keyAgentBrainJWTSecret],
 			},
+			"llm": map[string]any{
+				"baseURL": retainTier.BaseURL,
+				"model":   retainTier.Model,
+			},
+			"temporal": map[string]any{
+				"address":   temporalAddress,
+				"namespace": ref.TenantSlug,
+			},
 		},
 		"mcp-hub": map[string]any{
 			"database": map[string]any{
@@ -118,6 +149,24 @@ func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error
 			},
 			"embedding": map[string]any{"apiKey": secrets[keyLiteLLMAPIKey]},
 		},
+	}, nil
+}
+
+// HelmInstallTenant runs `helm upgrade --install` against the
+// agent-harness-tenant chart baked into this worker's own image
+// (a.ChartDir) — the exact command sequence deploy/helm/tenants/README.md
+// already documents as the manual process, just piped over stdin instead
+// of a checked-in file. See buildTenantValues for what actually goes into
+// that values override.
+func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error {
+	secrets, err := a.readStagedSecret(ctx, ref.RequestID)
+	if err != nil {
+		return err
+	}
+
+	values, err := buildTenantValues(ref, a.ClerkIssuer, a.TemporalAddress, secrets)
+	if err != nil {
+		return err
 	}
 	valuesYAML, err := yaml.Marshal(values)
 	if err != nil {

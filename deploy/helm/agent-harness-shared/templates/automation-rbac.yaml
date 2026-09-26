@@ -43,6 +43,18 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Bitnami's postgresql subchart renders both of these by default
+  # (networkPolicy.enabled/pdb.create default true) — missed when this list
+  # was first written, which surfaced as a real, live `helm install` 403
+  # ("cannot get resource networkpolicies") on the very first self-serve
+  # onboarding attempt, not caught by `helm template` (rendering never
+  # touches RBAC, only `helm install`/`upgrade`'s live API calls do).
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

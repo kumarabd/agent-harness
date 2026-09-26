@@ -103,7 +103,7 @@ router:
   # gateway/web.md), this is the ONE issuer every tenant's own Gateway/
   # agent-brain now verify against too, not a separate value per tenant.
   clerkJwksUrl: "https://primary-jay-21.clerk.accounts.dev/.well-known/jwks.json"
-  clerkIssuer: ""
+  clerkIssuer: "https://primary-jay-21.clerk.accounts.dev"
   # -- REQUIRED when agentWeb.enabled=true (web-deployment.yaml's own `fail`
   # guard) — 2026-09-24: the router's real public URL (e.g.
   # "https://api.example.com"), not its in-cluster Service name. Consumed by
@@ -121,7 +121,7 @@ router:
   # path, e.g. "https://app.example.com") — or "*" to allow any origin, not
   # recommended once this handles real tenant traffic. Comma-separated if
   # more than one.
-  allowedOrigins: []
+  allowedOrigins: ["https://mission-control.nighthawklabs.org"]
   # -- Exposes this router outside the cluster — the browser calls it
   # directly now (see publicURL's own comment), so unlike loop-worker or
   # tenant-worker this can't stay purely internal-cluster-DNS once

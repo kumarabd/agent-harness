@@ -459,19 +459,32 @@ agent-brain:
     # value per tenant (deploy/helm/tenants/<tenant>.yaml) only if that
     # endpoint is actually needed.
     adminSecret: ""
-  # -- Chat-completion provider for agent-brain's mining pipeline (entity/fact/rule
-  # extraction — see agent-brain's own charts/agent-brain/values.yaml comment on
-  # mining.llm for why this is a direct provider call, not the shared LiteLLM proxy).
-  # baseURL/model are plain values here (not secrets); the actual API key is NOT
-  # set here — templates/agent-brain-creds-secret.yaml computes it directly from
-  # llm.tiers.medium.apiKey below (mining is treated as a medium-tier consumer
-  # 2026-08-28, since every tier now owns its own credential — no shared
-  # provider key exists anymore; keeping mining coupled to one specific tier
-  # is deliberate).
-  mining:
-    llm:
-      baseURL: ""
-      model: ""
+  # -- REQUIRED (2026-09-26: confirmed by reading the vendored subchart's own
+  # templates/_helpers.tpl — this renders straight into TEMPORAL_ADDRESS/
+  # LLM_BASE_URL etc. with no fail guard and no safe default, so an unset
+  # value here is a silent runtime break, not a graceful skip). Chat-
+  # completion provider for agent-brain's retain/reflect pipeline (entity/
+  # fact/rule extraction — see agent-brain's own charts/agent-brain/
+  # values.yaml comment on llm for why this is a direct provider call, not
+  # the shared LiteLLM proxy). baseURL/model are plain values here (not
+  # secrets); the actual API key is NOT set here — templates/agent-brain-
+  # creds-secret.yaml computes it directly from llm.tiers.medium.apiKey
+  # below (retain is treated as a medium-tier consumer 2026-08-28, since
+  # every tier now owns its own credential — no shared provider key exists
+  # anymore; keeping retain coupled to one specific tier is deliberate).
+  #
+  # NOT nested under a "mining" key — the vendored subchart's own
+  # values.yaml has this as a plain top-level `llm:` block, consumed
+  # directly as `.Values.llm.baseURL`/`.model` (charts/agent-brain/
+  # templates/_helpers.tpl's temporalWorkerEnv). An earlier version of this
+  # file nested it under `mining:`, which the subchart has never actually
+  # read — found by cross-checking against deploy/helm/tenants/abishekk.yaml
+  # (which had always set the correct, unnested path) while auditing why
+  # self-serve onboarding's generated values were missing this entirely
+  # (workflows/internal/automation/activities/helm.go).
+  llm:
+    baseURL: ""
+    model: ""
   # -- Fixed name, not per-release — safe because each tenant already gets
   # its own Kubernetes namespace (deploy/helm/tenants/README.md's
   # `-n <k8s-namespace>`), so no cross-tenant collision risk. Must match
