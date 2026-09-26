@@ -199,14 +199,25 @@ gateway:
 # -- agent-web (chat UI + agent-brain memory explorer) moved OUT of this
 # chart entirely (2026-09-24) — it's now a single shared deployment in
 # ../agent-harness-shared, fronted by a new shared router that resolves the
-# right tenant per request from the caller's Clerk org membership, instead
-# of one agent-web instance per tenant hardcoding this tenant's own
-# agent-brain/gateway URLs. See ../agent-harness-shared/values.yaml's
-# `agentWeb`/`router` blocks and docs/components/gateway/web.md. This
-# tenant's own Gateway (gateway.* below) is UNCHANGED — still per-tenant,
-# still holds only this tenant's own credentials; the router forwards to it
-# by Service DNS name and never re-verifies/re-issues auth, it just resolves
-# "which tenant".
+# right tenant per request by pure convention (2026-09-25: the tenant's
+# Temporal namespace/Kubernetes namespace/Helm release name are all just a
+# sanitized form of the caller's own Clerk user id — no Clerk Organizations,
+# no per-tenant registration step), instead of one agent-web instance per
+# tenant hardcoding this tenant's own agent-brain/gateway URLs. See
+# ../agent-harness-shared/values.yaml's `agentWeb`/`router` blocks and
+# docs/components/gateway/web.md. This tenant's own Gateway (gateway.* below)
+# is UNCHANGED — still per-tenant, still holds only this tenant's own
+# credentials; the router forwards to it by Service DNS name and never
+# re-verifies/re-issues auth, it just resolves "which tenant".
+
+# -- mcp-hub OAuth/header-token connection management: 2026-09-26, removed
+# entirely from this chart. There is no more separate Go "connections"
+# service or worker — mcp-hub itself now owns connection management end to
+# end (its own Postgres-backed `connections` table, POST/DELETE
+# /api/connections, GET /api/catalog), reached directly through the shared
+# router's /connections/ proxy (workflows/internal/router/core/tenant.go's
+# McpHubBaseURL()). Nothing to configure here; see the mcp-hub subchart's
+# own values below instead.
 
 # -- One self-hosted Postgres instance for this tenant — now a real subchart
 # dependency (Bitnami's postgresql, same as ../../../infra/postgres's own

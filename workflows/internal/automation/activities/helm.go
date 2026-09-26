@@ -53,85 +53,83 @@ func (a *Activities) readStagedSecret(ctx context.Context, requestID string) (ma
 // docs/components/gateway/web.md's Phase 2 section for why those stayed
 // out of a v1 onboarding form.
 func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error {
-	return runStep(ctx, a.Store, ref.RequestID, func(ctx context.Context) error {
-		secrets, err := a.readStagedSecret(ctx, ref.RequestID)
-		if err != nil {
-			return err
-		}
+	secrets, err := a.readStagedSecret(ctx, ref.RequestID)
+	if err != nil {
+		return err
+	}
 
-		var llmTiers map[string]LLMTier
-		if err := json.Unmarshal([]byte(secrets[keyLLMTiersJSON]), &llmTiers); err != nil {
-			return fmt.Errorf("decode staged llm tiers: %w", err)
+	var llmTiers map[string]LLMTier
+	if err := json.Unmarshal([]byte(secrets[keyLLMTiersJSON]), &llmTiers); err != nil {
+		return fmt.Errorf("decode staged llm tiers: %w", err)
+	}
+	tiers := map[string]any{}
+	for name, tier := range llmTiers {
+		tiers[name] = map[string]any{
+			"provider": tier.Provider,
+			"model":    tier.Model,
+			"apiKey":   tier.APIKey,
+			"baseURL":  tier.BaseURL,
 		}
-		tiers := map[string]any{}
-		for name, tier := range llmTiers {
-			tiers[name] = map[string]any{
-				"provider": tier.Provider,
-				"model":    tier.Model,
-				"apiKey":   tier.APIKey,
-				"baseURL":  tier.BaseURL,
-			}
-		}
+	}
 
-		var discordBots []map[string]any
-		if tok := secrets[keyDiscordBotToken]; tok != "" {
-			discordBots = []map[string]any{{"botToken": tok}}
-		}
+	var discordBots []map[string]any
+	if tok := secrets[keyDiscordBotToken]; tok != "" {
+		discordBots = []map[string]any{{"botToken": tok}}
+	}
 
-		values := map[string]any{
-			"temporal": map[string]any{"namespace": ref.TenantSlug},
-			"agentBrain": map[string]any{
-				"postgres":    map[string]any{"password": secrets[keyAgentBrainDBPassword]},
-				"apiKey":      secrets[keyAgentBrainAPIKey],
-				"ownerUserID": ref.RequesterUserID,
+	values := map[string]any{
+		"temporal": map[string]any{"namespace": ref.TenantSlug},
+		"agentBrain": map[string]any{
+			"postgres":    map[string]any{"password": secrets[keyAgentBrainDBPassword]},
+			"apiKey":      secrets[keyAgentBrainAPIKey],
+			"ownerUserID": ref.RequesterUserID,
+		},
+		"gateway": map[string]any{
+			"enabled": true,
+			"web":     map[string]any{"clerkIssuer": a.ClerkIssuer},
+			"discord": map[string]any{"bots": discordBots},
+		},
+		"llm": map[string]any{
+			"enabled": true,
+			"tiers":   tiers,
+		},
+		"postgresql": map[string]any{
+			"auth": map[string]any{
+				"postgresPassword": secrets[keyPostgresPassword],
+				"password":         secrets[keyPostgresPassword],
 			},
-			"gateway": map[string]any{
-				"enabled": true,
-				"web":     map[string]any{"clerkIssuer": a.ClerkIssuer},
-				"discord": map[string]any{"bots": discordBots},
+		},
+		"mcpHub": map[string]any{
+			"postgres": map[string]any{"password": secrets[keyMcpHubDBPassword]},
+		},
+		"agent-brain": map[string]any{
+			"secret": map[string]any{
+				"litellmAPIKey": secrets[keyLiteLLMAPIKey],
+				"jwtSecret":     secrets[keyAgentBrainJWTSecret],
 			},
-			"llm": map[string]any{
-				"enabled": true,
-				"tiers":   tiers,
+		},
+		"mcp-hub": map[string]any{
+			"database": map[string]any{
+				"password": secrets[keyMcpHubDBPassword],
+				// Same computed form deploy/helm/tenants/README.md documents
+				// for hand-written tenant files — release name == k8s
+				// namespace == ref.TenantSlug, this repo's own convention.
+				"host": fmt.Sprintf("%s-postgresql.%s.svc.cluster.local", ref.TenantSlug, ref.TenantSlug),
 			},
-			"postgresql": map[string]any{
-				"auth": map[string]any{
-					"postgresPassword": secrets[keyPostgresPassword],
-					"password":         secrets[keyPostgresPassword],
-				},
-			},
-			"mcpHub": map[string]any{
-				"postgres": map[string]any{"password": secrets[keyMcpHubDBPassword]},
-			},
-			"agent-brain": map[string]any{
-				"secret": map[string]any{
-					"litellmAPIKey": secrets[keyLiteLLMAPIKey],
-					"jwtSecret":     secrets[keyAgentBrainJWTSecret],
-				},
-			},
-			"mcp-hub": map[string]any{
-				"database": map[string]any{
-					"password": secrets[keyMcpHubDBPassword],
-					// Same computed form deploy/helm/tenants/README.md documents
-					// for hand-written tenant files — release name == k8s
-					// namespace == ref.TenantSlug, this repo's own convention.
-					"host": fmt.Sprintf("%s-postgresql.%s.svc.cluster.local", ref.TenantSlug, ref.TenantSlug),
-				},
-				"embedding": map[string]any{"apiKey": secrets[keyLiteLLMAPIKey]},
-			},
-		}
-		valuesYAML, err := yaml.Marshal(values)
-		if err != nil {
-			return fmt.Errorf("marshal tenant values: %w", err)
-		}
+			"embedding": map[string]any{"apiKey": secrets[keyLiteLLMAPIKey]},
+		},
+	}
+	valuesYAML, err := yaml.Marshal(values)
+	if err != nil {
+		return fmt.Errorf("marshal tenant values: %w", err)
+	}
 
-		_, err = runCommandStdin(ctx, string(valuesYAML), "helm", "upgrade", "--install", ref.TenantSlug,
-			a.ChartDir, "-n", ref.TenantSlug, "--create-namespace", "-f", "-")
-		if err != nil {
-			return fmt.Errorf("helm upgrade --install: %w", err)
-		}
-		return nil
-	})
+	_, err = runCommandStdin(ctx, string(valuesYAML), "helm", "upgrade", "--install", ref.TenantSlug,
+		a.ChartDir, "-n", ref.TenantSlug, "--create-namespace", "-f", "-")
+	if err != nil {
+		return fmt.Errorf("helm upgrade --install: %w", err)
+	}
+	return nil
 }
 
 // RegisterSharedPoolNamespace appends this tenant's namespace to the shared
@@ -148,37 +146,35 @@ func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error
 // shared-pool wiring — nothing this activity should ever need to see, let
 // alone risk overwriting with a partial re-render).
 func (a *Activities) RegisterSharedPoolNamespace(ctx context.Context, ref PublicRef) error {
-	return runStep(ctx, a.Store, ref.RequestID, func(ctx context.Context) error {
-		current, err := runCommand(ctx, "helm", "get", "values", a.SharedRelease, "-n", a.SharedNamespace, "-o", "json")
-		if err != nil {
-			return fmt.Errorf("read shared release values: %w", err)
+	current, err := runCommand(ctx, "helm", "get", "values", a.SharedRelease, "-n", a.SharedNamespace, "-o", "json")
+	if err != nil {
+		return fmt.Errorf("read shared release values: %w", err)
+	}
+	var parsed struct {
+		Temporal struct {
+			Namespaces []string `json:"namespaces"`
+		} `json:"temporal"`
+	}
+	if err := json.Unmarshal([]byte(current), &parsed); err != nil {
+		return fmt.Errorf("parse shared release values: %w", err)
+	}
+	for _, ns := range parsed.Temporal.Namespaces {
+		if ns == ref.TenantSlug {
+			return nil // idempotent — a workflow retry landing here again is a no-op
 		}
-		var parsed struct {
-			Temporal struct {
-				Namespaces []string `json:"namespaces"`
-			} `json:"temporal"`
-		}
-		if err := json.Unmarshal([]byte(current), &parsed); err != nil {
-			return fmt.Errorf("parse shared release values: %w", err)
-		}
-		for _, ns := range parsed.Temporal.Namespaces {
-			if ns == ref.TenantSlug {
-				return nil // idempotent — a workflow retry landing here again is a no-op
-			}
-		}
-		namespaces := append(parsed.Temporal.Namespaces, ref.TenantSlug)
+	}
+	namespaces := append(parsed.Temporal.Namespaces, ref.TenantSlug)
 
-		override, err := yaml.Marshal(map[string]any{
-			"temporal": map[string]any{"namespaces": namespaces},
-		})
-		if err != nil {
-			return fmt.Errorf("marshal namespace override: %w", err)
-		}
-		_, err = runCommandStdin(ctx, string(override), "helm", "upgrade", a.SharedRelease,
-			a.SharedChartDir, "-n", a.SharedNamespace, "--reuse-values", "-f", "-")
-		if err != nil {
-			return fmt.Errorf("helm upgrade shared release: %w", err)
-		}
-		return nil
+	override, err := yaml.Marshal(map[string]any{
+		"temporal": map[string]any{"namespaces": namespaces},
 	})
+	if err != nil {
+		return fmt.Errorf("marshal namespace override: %w", err)
+	}
+	_, err = runCommandStdin(ctx, string(override), "helm", "upgrade", a.SharedRelease,
+		a.SharedChartDir, "-n", a.SharedNamespace, "--reuse-values", "-f", "-")
+	if err != nil {
+		return fmt.Errorf("helm upgrade shared release: %w", err)
+	}
+	return nil
 }

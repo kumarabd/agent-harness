@@ -1,279 +1,224 @@
 // Package core is the shared router's request path: verify the caller's
 // Clerk identity, resolve which tenant they belong to, and reverse-proxy
-// the request to that tenant's own per-namespace Gateway or agent-brain —
-// docs/components/gateway/web.md's "the web becomes shared, fronted by an
-// identity-routing router" resolution. This package never re-implements or
-// weakens the downstream auth: it forwards the original Authorization
-// header unchanged, and each tenant's own Gateway/agent-brain keeps
-// verifying it exactly as it does today (workflows/internal/gateway/web/
-// auth.go) — the router only ever adds one more check in front (does this
-// caller belong to ANY tenant at all), it never removes one.
+// the request to that tenant's own per-namespace Gateway, agent-brain, or
+// mcp-hub instance — docs/components/gateway/web.md's "the web becomes
+// shared, fronted by an identity-routing router" resolution. This package
+// never re-implements or weakens the downstream auth: it forwards the
+// original Authorization header unchanged, and each tenant's own
+// Gateway/agent-brain keeps verifying it exactly as before — the router
+// only ever adds one more thing in front (compute which tenant this is), it
+// never removes a check.
+//
+// 2026-09-26: the connections service (a Go worker that shelled out to
+// `helm upgrade` to inject mcp-hub manifest config) is gone entirely —
+// mcp-hub now owns its own connections end to end (its own Postgres-backed
+// management API), and /connections/ here is a plain reverse proxy straight
+// to that tenant's own mcp-hub instance. mcp-hub does no Clerk verification
+// of its own (it predates this platform's auth model and isn't reachable
+// except through this router) — the router's own JWT check is the only
+// auth boundary for these routes, unlike /gateway/ and /brain/ where the
+// downstream also re-verifies.
+//
+// 2026-09-25: tenant identity moved from a Postgres-backed tenant_registry
+// lookup to pure convention (tenant.go's TenantForSub) — a tenant's
+// Temporal namespace, Kubernetes namespace, and Helm release name are all
+// the same string, derived deterministically from the caller's own Clerk
+// user id. There is no more "register a tenant" step and no database
+// anywhere in this router. The real, disclosed tradeoff: this router can no
+// longer tell "not yet provisioned" from "provisioned but briefly
+// unreachable" the cheap way (a lookup miss) — it now infers "no_tenant"
+// from a DNS-not-found on the computed Service name (handleProxy's
+// ErrorHandler), since a tenant's Kubernetes namespace/Services genuinely
+// don't exist in DNS until `helm install` has actually run.
 package core
 
 import (
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	temporalclient "go.temporal.io/sdk/client"
 
 	"agent-harness/workflows/internal/gateway/clerkauth"
-	"agent-harness/workflows/internal/onboarding"
-	"agent-harness/workflows/internal/router/registry"
 )
 
 var errMissingToken = errors.New("missing bearer token")
 
+// tenantSlugPattern mirrors workflows/internal/automation/activities/
+// validate.go's own — used here only to validate an UNAUTHENTICATED path
+// parameter (connectionCallback's tenant slug, embedded in an OAuth
+// provider's callback URL) before using it to build a proxy target,
+// defense against path-manipulation/SSRF via a crafted callback URL.
+var tenantSlugPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{1,38}[a-z0-9])?$`)
+
 type Server struct {
 	clerkCfg clerkauth.Config
-	registry *registry.Registry
+
+	gatewayPort    int
+	agentBrainPort int
 
 	// Self-serve tenant onboarding (onboarding.go, docs/components/gateway/
-	// web.md's Phase 2) — both nil-able: a router deployed without
-	// automation.enabled (workflows/cmd/router/main.go) simply doesn't
-	// register /onboard at all, same optionality gateway.enabled already has
-	// in agent-harness-tenant.
-	onboarding          *onboarding.Store
+	// web.md's Phase 2) — nil-able: a router deployed without automation
+	// wired up simply doesn't register /onboard at all, same optionality
+	// gateway.enabled already has in agent-harness-tenant.
 	temporal            temporalclient.Client
 	automationTaskQueue string
 }
 
-func New(clerkCfg clerkauth.Config, reg *registry.Registry) *Server {
-	return &Server{clerkCfg: clerkCfg, registry: reg}
+func New(clerkCfg clerkauth.Config, gatewayPort, agentBrainPort int) *Server {
+	return &Server{clerkCfg: clerkCfg, gatewayPort: gatewayPort, agentBrainPort: agentBrainPort}
 }
 
 // WithOnboarding enables /onboard (onboarding.go) — a separate step from
 // New(), not an extra constructor argument, so every existing New(...)
 // call site (including this package's own tests) keeps working unchanged
 // when onboarding support isn't wired up.
-func (s *Server) WithOnboarding(store *onboarding.Store, temporal temporalclient.Client, automationTaskQueue string) *Server {
-	s.onboarding = store
+func (s *Server) WithOnboarding(temporal temporalclient.Client, automationTaskQueue string) *Server {
 	s.temporal = temporal
 	s.automationTaskQueue = automationTaskQueue
 	return s
 }
 
-// Handler builds the router's full HTTP handler: /gateway/ and /brain/ —
-// agent-web's own AGENT_BRAIN_API_URL/GATEWAY_API_URL point at this router
-// with those two path prefixes (docker/runtime-config.js.template in the
-// agent-web repo, not this one) instead of directly at one tenant's own
-// Services; everything after the prefix is forwarded unchanged, so
-// agent-web's own request paths (POST /send, GET /poll, ... —
-// docs/components/gateway/web.md) don't need to change at all. Wrapped in
-// corsMiddleware — 2026-09-24, since the browser now calls this router
-// directly (agent-web's own nginx no longer reverse-proxies in front of
-// it), making this genuinely cross-origin traffic.
+func (s *Server) tenant(sub string) Tenant {
+	return TenantForSub(sub, s.gatewayPort, s.agentBrainPort)
+}
+
+// Handler builds the router's full HTTP handler: /gateway/, /brain/, and
+// /connections/ all forward to that tenant's own per-namespace services;
+// everything after the prefix is forwarded unchanged, so agent-web's own
+// request paths don't need to change at all. Wrapped in corsMiddleware,
+// since the browser calls this router directly (cross-origin).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	// Connection control is intentionally served by the shared router, not
-	// proxied to a tenant hub: it owns the cross-tenant control-plane database
-	// and only exposes the caller's own organization after Clerk verification.
-	mux.HandleFunc("GET /gateway/connections", s.listConnections)
-	mux.HandleFunc("POST /gateway/connections", s.requestConnection)
-	mux.HandleFunc("POST /gateway/connections/{integration}/authorize", s.authorizeConnection)
-	// OAuth providers do not carry the browser's Clerk bearer token. This
-	// route only accepts callbacks; the hub validates its stored PKCE/state.
-	mux.HandleFunc("GET /hub/{org}/oauth/{backend}/callback", s.connectionCallback)
-	mux.HandleFunc("/gateway/", s.handleProxy("/gateway", func(t registry.Tenant) string { return t.GatewayBaseURL() }))
-	mux.HandleFunc("/brain/", s.handleProxy("/brain", func(t registry.Tenant) string { return t.AgentBrainBaseURL() }))
+	mux.HandleFunc("/gateway/", s.handleProxy("/gateway", func(t Tenant) string { return t.GatewayBaseURL() }))
+	mux.HandleFunc("/brain/", s.handleProxy("/brain", func(t Tenant) string { return t.AgentBrainBaseURL() }))
+	// Connection management — a pure reverse proxy straight to that tenant's
+	// own mcp-hub instance's management API (GET/POST /api/connections,
+	// DELETE /api/connections/{name}, GET /api/catalog), same shape as
+	// /gateway/ and /brain/ above. The one exception is the authorize route
+	// just below: mcp-hub's own /oauth/{backend}/start responds with a raw
+	// 302, but the browser's popup-based consent flow needs the target URL
+	// as a JSON value to open the popup at (see handleAuthorize) — that
+	// translation has to happen server-side, so it's the router's own
+	// handler, registered before the generic prefix (Go's ServeMux picks
+	// the more specific pattern regardless of registration order).
+	mux.HandleFunc("POST /connections/{backend}/authorize", s.handleAuthorize)
+	mux.HandleFunc("/connections/", s.handleProxy("/connections", func(t Tenant) string { return t.McpHubBaseURL() }))
+	// OAuth providers redirect back here with no Clerk bearer token at all —
+	// the tenant slug is embedded directly in the callback URL (handleAuthorize
+	// built it from the authenticated request that started the flow), not
+	// derived from a session. handleOAuthCallback validates it against
+	// tenantSlugPattern before using it.
+	mux.HandleFunc("GET /hub/{tenant}/oauth/{backend}/callback", s.handleOAuthCallback)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	if s.onboarding != nil {
+	if s.temporal != nil {
 		s.registerOnboarding(mux)
 	}
 	return corsMiddleware(corsConfigFromEnv(), mux)
 }
 
-func (s *Server) tenantForRequest(w http.ResponseWriter, r *http.Request) (registry.Tenant, bool) {
-	orgID, err := s.authenticate(r)
+func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("tenant")
+	if !tenantSlugPattern.MatchString(slug) {
+		writeJSONError(w, http.StatusNotFound, "connection not found")
+		return
+	}
+	tenant := Tenant{Slug: slug, GatewayPort: s.gatewayPort, AgentBrainPort: s.agentBrainPort}
+	targetURL, err := url.Parse(tenant.McpHubBaseURL())
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "invalid tenant target")
+		return
+	}
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		req.URL.Path = "/oauth/" + r.PathValue("backend") + "/callback"
+		originalDirector(req)
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		writeJSONError(w, http.StatusNotFound, "connection not found")
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+// handleAuthorize starts an OAuth connection flow on the caller's behalf and
+// hands back the authorization URL as JSON rather than a redirect — the
+// frontend opens a popup window first (pop-up-blocker workaround) and then
+// navigates it to this URL, which only works if the URL is a value it can
+// read, not a response it's redirected through. mcp-hub's own
+// /oauth/{backend}/start responds with a raw 302; this fetches it with
+// redirect-following disabled and reads the Location header server-side —
+// the browser can't do this itself across origins (a `fetch` with
+// `redirect: "manual"` yields an opaque response with no readable headers).
+func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+	sub, err := s.authenticateUser(r)
 	if err != nil {
 		writeJSONError(w, http.StatusUnauthorized, "invalid session token")
-		return registry.Tenant{}, false
+		return
 	}
-	if orgID == "" {
-		writeJSONError(w, http.StatusNotFound, "no_tenant")
-		return registry.Tenant{}, false
-	}
-	tenant, err := s.registry.Lookup(r.Context(), orgID)
+	backend := r.PathValue("backend")
+	tenant := s.tenant(sub)
+
+	startURL := strings.TrimRight(tenant.McpHubBaseURL(), "/") + "/oauth/" + url.PathEscape(backend) + "/start"
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, startURL, nil)
 	if err != nil {
-		if err == registry.ErrNotFound {
+		writeJSONError(w, http.StatusBadGateway, "invalid tenant target")
+		return
+	}
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
 			writeJSONError(w, http.StatusNotFound, "no_tenant")
-		} else {
-			writeJSONError(w, http.StatusBadGateway, "registry lookup failed")
-		}
-		return registry.Tenant{}, false
-	}
-	return tenant, true
-}
-
-func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) {
-	tenant, ok := s.tenantForRequest(w, r)
-	if !ok {
-		return
-	}
-	items, err := s.registry.ListConnections(r.Context(), tenant.OrgID)
-	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "connections unavailable")
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "enabled": os.Getenv("CONNECTION_AUTOMATION_ENABLED") == "true"})
-}
-
-func (s *Server) requestConnection(w http.ResponseWriter, r *http.Request) {
-	tenant, ok := s.tenantForRequest(w, r)
-	if !ok {
-		return
-	}
-	if os.Getenv("CONNECTION_AUTOMATION_ENABLED") != "true" {
-		writeJSONError(w, http.StatusServiceUnavailable, "connection automation is not enabled")
-		return
-	}
-	var input struct {
-		IntegrationID string `json:"integration_id"`
-		DesiredState  string `json:"desired_state"`
-		Token         string `json:"token"`
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 16384)
-	d := json.NewDecoder(r.Body)
-	d.DisallowUnknownFields()
-	if err := d.Decode(&input); err != nil || input.IntegrationID == "" {
-		writeJSONError(w, http.StatusBadRequest, "integration_id is required")
-		return
-	}
-	if input.DesiredState == "" {
-		input.DesiredState = "connected"
-	}
-	if input.DesiredState != "connected" && input.DesiredState != "disconnected" {
-		writeJSONError(w, 400, "invalid desired_state")
-		return
-	}
-	connection, err := s.registry.RequestConnection(r.Context(), tenant.OrgID, input.IntegrationID, input.DesiredState, strings.TrimSpace(input.Token))
-	if err != nil {
-		if errors.Is(err, registry.ErrConnectionBusy) {
-			writeJSONError(w, 409, err.Error())
 			return
 		}
-		if errors.Is(err, registry.ErrCredential) {
-			writeJSONError(w, 400, err.Error())
-			return
-		}
-		writeJSONError(w, http.StatusBadRequest, "unable to request connection")
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(connection)
-}
-
-func hubURL(t registry.Tenant) string {
-	return "http://" + t.ReleaseName + "-tools." + t.Namespace + ".svc.cluster.local:8000"
-}
-func (s *Server) authorizeConnection(w http.ResponseWriter, r *http.Request) {
-	t, ok := s.tenantForRequest(w, r)
-	if !ok {
-		return
-	}
-	backend, err := s.registry.OAuthBackend(r.Context(), t.OrgID, r.PathValue("integration"))
-	if err != nil {
-		writeJSONError(w, 404, "connection not found")
-		return
-	}
-	req, err := http.NewRequestWithContext(r.Context(), "GET", hubURL(t)+"/oauth/"+url.PathEscape(backend)+"/start", nil)
-	if err != nil {
-		writeJSONError(w, 502, "authorization unavailable")
-		return
-	}
-	c := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	res, err := c.Do(req)
-	if err != nil {
-		writeJSONError(w, 502, "authorization unavailable")
+		log.Printf("authorize: mcp-hub request failed for tenant %s backend %s: %v", tenant.Slug, backend, err)
+		writeJSONError(w, http.StatusBadGateway, "upstream unavailable")
 		return
 	}
 	defer res.Body.Close()
-	location, e := url.Parse(res.Header.Get("Location"))
-	if res.StatusCode < 300 || res.StatusCode >= 400 || e != nil || location.Scheme != "https" || location.Host == "" {
-		writeJSONError(w, 502, "provider authorization unavailable")
+
+	if res.StatusCode < 300 || res.StatusCode >= 400 {
+		writeJSONError(w, http.StatusBadGateway, "backend did not return an authorization redirect")
 		return
 	}
+	location := res.Header.Get("Location")
+	authURL, err := url.Parse(location)
+	if err != nil || authURL.Scheme != "https" {
+		log.Printf("authorize: mcp-hub returned an unusable redirect for tenant %s backend %s: %q", tenant.Slug, backend, location)
+		writeJSONError(w, http.StatusBadGateway, "upstream unavailable")
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]string{"authorization_url": location.String()})
-}
-func (s *Server) connectionCallback(w http.ResponseWriter, r *http.Request) {
-	org, backend := r.PathValue("org"), r.PathValue("backend")
-	t, err := s.registry.Lookup(r.Context(), org)
-	if err != nil {
-		writeJSONError(w, 404, "connection not found")
-		return
-	}
-	name, err := s.registry.OAuthBackend(r.Context(), org, backend)
-	if err != nil || name != backend {
-		writeJSONError(w, 404, "connection not found")
-		return
-	}
-	req, err := http.NewRequestWithContext(r.Context(), "GET", hubURL(t)+"/oauth/"+url.PathEscape(name)+"/callback?"+r.URL.RawQuery, nil)
-	if err != nil {
-		writeJSONError(w, 400, "invalid callback")
-		return
-	}
-	c := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	res, err := c.Do(req)
-	if err != nil {
-		writeJSONError(w, 502, "authorization unavailable")
-		return
-	}
-	defer res.Body.Close()
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	if res.StatusCode != 200 {
-		w.WriteHeader(400)
-		_, _ = io.WriteString(w, "Authorization failed or expired. Return to External systems and select Authorize again.")
-		return
-	}
-	_, _ = io.WriteString(w, "Connected. You can close this tab and return to External systems; tools will appear after indexing.")
+	_ = json.NewEncoder(w).Encode(map[string]string{"authorization_url": authURL.String()})
 }
 
-func (s *Server) handleProxy(prefix string, target func(registry.Tenant) string) http.HandlerFunc {
+func (s *Server) handleProxy(prefix string, target func(Tenant) string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		orgID, err := s.authenticate(r)
+		sub, err := s.authenticateUser(r)
 		if err != nil {
 			writeJSONError(w, http.StatusUnauthorized, "invalid session token")
 			return
 		}
-		if orgID == "" {
-			// A real, valid Clerk user with no active organization — the
-			// expected state for a freshly signed-up user who hasn't been
-			// through onboarding yet (docs/components/gateway/web.md's
-			// Phase 3). Not a 401: the token is fine, there's just nothing
-			// to route to yet. agent-web's own onboarding CTA keys off this
-			// exact status/code pair.
-			writeJSONError(w, http.StatusNotFound, "no_tenant")
-			return
-		}
 
-		tenant, err := s.registry.Lookup(r.Context(), orgID)
-		if err != nil {
-			if err == registry.ErrNotFound {
-				writeJSONError(w, http.StatusNotFound, "no_tenant")
-				return
-			}
-			log.Printf("registry lookup failed for org %s: %v", orgID, err)
-			writeJSONError(w, http.StatusBadGateway, "registry lookup failed")
-			return
-		}
-
+		tenant := s.tenant(sub)
 		targetURL, err := url.Parse(target(tenant))
 		if err != nil {
-			log.Printf("invalid tenant target URL for org %s: %v", orgID, err)
+			log.Printf("invalid tenant target URL for sub %s: %v", sub, err)
 			writeJSONError(w, http.StatusBadGateway, "invalid tenant target")
 			return
 		}
@@ -288,38 +233,30 @@ func (s *Server) handleProxy(prefix string, target func(registry.Tenant) string)
 			originalDirector(req)
 			// Authorization header is carried over as-is by the reverse
 			// proxy's default director (it only rewrites URL/Host) — the
-			// downstream Gateway/agent-brain re-verifies the same JWT
-			// itself, deliberately: this router adds a check, it doesn't
-			// become a trusted-identity boundary on its own.
+			// downstream service re-verifies the same JWT itself,
+			// deliberately: this router adds a check, it doesn't become a
+			// trusted-identity boundary on its own.
+		}
+		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			var dnsErr *net.DNSError
+			if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+				// The tenant's namespace/Service genuinely doesn't exist in
+				// cluster DNS yet — this IS "not onboarded", the same
+				// signal agent-web's isNoTenantError already expects.
+				writeJSONError(w, http.StatusNotFound, "no_tenant")
+				return
+			}
+			log.Printf("proxy error for tenant %s (%s): %v", tenant.Slug, prefix, err)
+			writeJSONError(w, http.StatusBadGateway, "upstream unavailable")
 		}
 		proxy.ServeHTTP(w, r)
 	}
 }
 
-// authenticate verifies the bearer token and extracts the caller's active
-// Clerk organization id. Returns ("", nil) — not an error — for a valid
-// token with no active org, and a non-nil error only for a missing/invalid
-// token.
-func (s *Server) authenticate(r *http.Request) (orgID string, err error) {
-	authHeader := r.Header.Get("Authorization")
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-	if token == "" || token == authHeader {
-		return "", errMissingToken
-	}
-	claims, err := clerkauth.VerifyJWTClaims(r.Context(), s.clerkCfg, token)
-	if err != nil {
-		return "", err
-	}
-	return orgIDFromClaims(claims), nil
-}
-
 // authenticateUser verifies the bearer token and returns the caller's own
-// Clerk user id (the "sub" claim) — unlike authenticate above, it does NOT
-// require an active organization. Used by onboarding.go: a user submitting
-// or polling an onboarding request is, by definition, someone who doesn't
-// have a tenant/organization yet (or is checking on one still being
-// created), so gating on orgID the way the proxy routes do would be
-// self-defeating here.
+// Clerk user id ("sub") — the one thing every proxy/onboarding route needs,
+// now that tenant identity is derived from it directly instead of an active
+// organization.
 func (s *Server) authenticateUser(r *http.Request) (userID string, err error) {
 	authHeader := r.Header.Get("Authorization")
 	token := strings.TrimPrefix(authHeader, "Bearer ")
@@ -327,26 +264,6 @@ func (s *Server) authenticateUser(r *http.Request) (userID string, err error) {
 		return "", errMissingToken
 	}
 	return clerkauth.VerifyJWT(r.Context(), s.clerkCfg, token)
-}
-
-// orgIDFromClaims reads the active-organization id out of a verified Clerk
-// session JWT. Clerk represents this two ways depending on how the session
-// token is customized in the dashboard: a top-level "org_id" claim if the
-// project's JWT template adds one explicitly, or the default nested
-// "o": {"id": "org_..."} shape Clerk includes automatically once
-// Organizations is enabled. Checked in that order so an explicit custom
-// claim always wins; falls back to "" (no active org) if neither is
-// present, e.g. a user who hasn't selected/created an organization yet.
-func orgIDFromClaims(claims map[string]any) string {
-	if v, ok := claims["org_id"].(string); ok && v != "" {
-		return v
-	}
-	if o, ok := claims["o"].(map[string]any); ok {
-		if v, ok := o["id"].(string); ok {
-			return v
-		}
-	}
-	return ""
 }
 
 func writeJSONError(w http.ResponseWriter, status int, code string) {

@@ -12,14 +12,12 @@
 package main
 
 import (
-	"context"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/uber-go/tally/v4"
 	tallyprom "github.com/uber-go/tally/v4/prometheus"
 	"go.temporal.io/sdk/client"
@@ -28,8 +26,6 @@ import (
 
 	"agent-harness/workflows/internal/automation/activities"
 	automationworkflow "agent-harness/workflows/internal/automation/workflow"
-	"agent-harness/workflows/internal/onboarding"
-	"agent-harness/workflows/internal/router/registry"
 )
 
 func envOrDefault(key, fallback string) string {
@@ -75,21 +71,6 @@ func newMetricsHandler(bindAddress string) client.MetricsHandler {
 }
 
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	pgURL := "postgres://" +
-		envOrDefault("POSTGRES_USER", "router") + ":" +
-		envOrDefault("POSTGRES_PASSWORD", "") + "@" +
-		envOrDefault("POSTGRES_HOST", "localhost") + ":" +
-		envOrDefault("POSTGRES_PORT", "5432") + "/" +
-		envOrDefault("POSTGRES_DB", "router")
-	pool, err := pgxpool.New(ctx, pgURL)
-	if err != nil {
-		log.Fatalf("unable to connect to Postgres: %v", err)
-	}
-	defer pool.Close()
-
 	metricsHandler := newMetricsHandler(envOrDefault("METRICS_BIND_ADDRESS", "0.0.0.0:9090"))
 	temporalClient, err := client.Dial(client.Options{
 		HostPort:       envOrDefault("TEMPORAL_ADDRESS", client.DefaultHostPort),
@@ -102,8 +83,6 @@ func main() {
 	defer temporalClient.Close()
 
 	a := &activities.Activities{
-		Store:                  onboarding.New(pool),
-		Registry:               registry.New(pool),
 		TemporalAddress:        envOrDefault("TEMPORAL_ADDRESS", client.DefaultHostPort),
 		NamespaceRetentionDays: envIntOrDefault("TENANT_NAMESPACE_RETENTION_DAYS", 30),
 		ChartDir:               envOrDefault("TENANT_CHART_DIR", "/charts/agent-harness-tenant"),
@@ -111,15 +90,11 @@ func main() {
 		SharedRelease:          envOrDefault("SHARED_RELEASE_NAME", "harness"),
 		SharedNamespace:        envOrDefault("SHARED_RELEASE_NAMESPACE", "agents"),
 		ClerkIssuer:            os.Getenv("CLERK_ISSUER"),
-		ClerkSecretKey:         os.Getenv("CLERK_SECRET_KEY"),
 		GatewayPort:            envIntOrDefault("TENANT_GATEWAY_PORT", 8090),
 		AgentBrainPort:         envIntOrDefault("TENANT_AGENT_BRAIN_PORT", 8080),
 	}
 	if a.ClerkIssuer == "" {
 		log.Fatalf("CLERK_ISSUER is required — every generated tenant's gateway.web.clerkIssuer comes from this")
-	}
-	if a.ClerkSecretKey == "" {
-		log.Fatalf("CLERK_SECRET_KEY is required — CreateClerkOrganization can't create an Organization without it")
 	}
 
 	taskQueue := envOrDefault("TEMPORAL_TASK_QUEUE", "system")

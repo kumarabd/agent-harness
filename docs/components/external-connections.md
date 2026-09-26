@@ -1,130 +1,116 @@
 # External connections
 
+## Resolved: mcp-hub owns connections entirely (2026-09-26)
+
+Earlier designs (both a shared cross-tenant Postgres/Temporal-workflow
+version, and a later per-tenant Go "connections" service that shelled out
+to `helm upgrade` to inject mcp-hub manifest config) are gone. mcp-hub
+itself now owns connection management end to end — there is no
+agent-harness-side service, database, or workflow for this at all anymore.
+
 ## Implemented flow
 
-1. `agent-web` → `/gateway/connections` on the shared router. Clerk's verified
-   active organization selects the tenant; the browser never supplies an org,
-   Kubernetes namespace, release name, endpoint, or raw Helm values.
-2. One Postgres transaction saves desired state, optional credentials, and an
-   operation (the durable outbox). Concurrent duplicate requests reuse the same
-   operation. Opposing requests during an active operation return 409.
-3. The automation worker starts `ConnectionProvisionWorkflow` in a dedicated
-   Temporal namespace/queue. Only operation/connection IDs enter history.
-4. Its activity reads the reviewed catalog plus tenant rows, constructs overrides,
-   takes a Postgres advisory lock for that tenant release, and runs Helm with
-   `--reuse-values --wait`. Other release values and unmanaged manifests survive.
-   A matching chart name/version and a deployed release are required. Repeating
-   an activity with already-applied overrides skips the upgrade.
-5. The worker observes the tenant hub's `/api/backends`. The UI shows Available
-   only after **the requested manifest revision** has successfully discovered and
-   indexed tools, not merely after a Kubernetes rollout.
-6. OAuth connections pause at Authorization needed. The authenticated router
-   returns the provider URL; consent opens in a new tab. The public callback is
-   limited to `/hub/{org}/oauth/{backend}/callback`; the hub validates expiring,
-   single-use state and PKCE. Completion wakes that backend's polling task.
-7. A background observer follows authorization completion and later availability
-   changes. Disconnect removes the managed manifest; provider consent and saved
-   credentials are retained, not revoked. Reconnect can reuse them.
+1. `agent-web` calls the shared router's `/connections/` prefix
+   (`src/lib/gateway.ts`'s `CONNECTIONS_BASE`). The router verifies the
+   caller's Clerk JWT, resolves their tenant by convention
+   (`tenantid.SlugForSub`), and reverse-proxies straight through to that
+   tenant's own mcp-hub instance
+   (`workflows/internal/router/core/tenant.go`'s `McpHubBaseURL()`,
+   `http://<release>-tools.<namespace>.svc.cluster.local:8000`) —
+   the exact same pattern as `/gateway/` and `/brain/`.
+2. mcp-hub serves the real API directly:
+   - `GET /api/catalog` — the reviewed, buildable-from-a-name templates
+     (`mcp-hub/src/mcp_hub/catalog.py`): `notion` (OAuth, browser consent),
+     `github`/`exa` (header token), `trek` (OAuth `client_credentials` — a
+     machine client, no browser step, needs `client_id`/`client_secret`
+     supplied directly), and `abrp`/`finance`/`health`/`maps-engine`/
+     `grafana` (no secret at all — connecting is a single click). Each
+     entry's `auth_kind`/`oauth_grant_type` tells `agent-web`'s connections
+     page which input fields to show.
+   - `GET /api/connections` — every currently-configured backend (catalog
+     ones and ops-managed ones alike) with live health/status merged in.
+   - `POST /api/connections` — activate a catalog entry (`{name, token?}`)
+     or register an arbitrary backend (`{name, url, auth_kind, headers?,
+     oauth?}`) — the same endpoint serves both the end-user "connect
+     Notion" flow and an operator wiring up an internal tool.
+   - `DELETE /api/connections/{name}` — deactivate, cascading its indexed
+     tools and OAuth/health rows.
+   All of it is backed by mcp-hub's own Postgres `connections` table
+   (`mcp-hub/src/mcp_hub/store.py`'s `ConnectionRecord`) — the sole source
+   of truth. There is no more YAML-manifest-file mechanism at all (removed
+   in the same change, chart version >= 0.2.0): `MANIFEST_DIR`, the
+   manifests ConfigMap, and `chart/values.yaml`'s `manifests:` block are
+   gone. Every backend, ops-managed or user-facing, is registered through
+   this API now.
+3. Adding or removing a connection takes effect immediately, with no pod
+   restart — `POST`/`DELETE` mutate the live in-memory manifest map and
+   register/unregister that backend's poll task via
+   `mcp_hub.poller.PollerController` (`main.py` wires this once at
+   startup). The old design needed a full YAML file + restart to add a
+   backend; this doesn't.
+4. OAuth connections still work exactly as before at the protocol level
+   (`mcp_hub.oauth`/`oauth_setup.py` are unchanged): `GET
+   /oauth/{backend}/start` redirects to the provider, `GET
+   /oauth/{backend}/callback` completes the exchange and stores tokens in
+   mcp-hub's own `oauth_tokens` table. Two router-side details make the
+   browser flow work:
+   - `POST /connections/{backend}/authorize` (router, not mcp-hub) fetches
+     mcp-hub's own `/oauth/{backend}/start` with redirects disabled and
+     returns the provider's authorization URL as JSON — the frontend opens
+     a popup and navigates it there. A browser `fetch` with `redirect:
+     "manual"` can't read a cross-origin redirect's `Location` header
+     itself, so this one small translation has to happen server-side; it's
+     the one place the router does more than pure proxying for this
+     feature.
+   - `GET /hub/{tenant}/oauth/{backend}/callback` (router, unauthenticated
+     — OAuth providers carry no Clerk bearer token) proxies straight to
+     that tenant's mcp-hub `/oauth/{backend}/callback`. The tenant slug is
+     validated against `tenantSlugPattern` before use (defense against a
+     crafted callback URL), same as before.
+5. mcp-hub polls every configured backend independently (one asyncio task
+   each, capped concurrency, per-backend backoff) — a slow or dead backend
+   never blocks another's availability. `GET /api/connections`/`/api/catalog`
+   report each backend's live `state`/`tool_count`.
 
-The catalog seeds GitHub (bearer token) and Notion (OAuth). Provider permissions
-and account eligibility still determine which tools each connection can access.
-The current UI exposes only those reviewed configuration shapes, not arbitrary
-MCP endpoints or user-supplied chart settings.
+## Ownership and security boundary
 
-## Ownership and storage
+mcp-hub does no Clerk verification of its own — it predates this
+platform's auth model and is never reachable except through the shared
+router (each tenant's mcp-hub Service is cluster-internal only). The
+router's own JWT check is the entire auth boundary for `/connections/`,
+unlike `/gateway/`/`/brain/` where the downstream also independently
+re-verifies. This is a real, disclosed tradeoff, not an oversight — adding
+Clerk-awareness to mcp-hub itself (a general-purpose MCP aggregator, used
+outside this platform too) was judged out of scope for this pass.
 
-The control API is in the **shared router**, not the tenant hub. This keeps the
-control database and deployment authority outside a service that restarts during
-its own reconfiguration. Tenant data APIs continue through the existing proxy.
+Each tenant's mcp-hub instance holds only that tenant's own connections and
+tokens (`docs/components/multi-tenancy.md`'s "no process/database holds
+more than one tenant's credentials" rule) — this was true before this
+change and remains true; there is no cross-tenant table anywhere in this
+design.
 
-Shared Postgres tables: `integration_catalog`, `tenant_connections`,
-`tenant_connection_operations`, `tenant_connection_credentials`. Desired revision
-and observed readiness are separate. Tenant Postgres still owns OAuth access and
-refresh tokens and the pgvector tool index. No database-to-memory or zvec migration
-is included.
+## Rollout
 
-The hub runs one cancellable async polling task per backend, with eight concurrent
-polls, a 120-second per-poll timeout, capped failure backoff, and a separate skills
-poller. One slow backend does not hold up every other backend.
+Bump the mcp-hub chart dependency in
+`deploy/helm/agent-harness-tenant/Chart.yaml` (>= 0.2.0) and run `helm
+dependency update` before deploying. **Not automatic**: a tenant's
+previously-static YAML-manifest backends (declared under the old
+`mcp-hub.manifests` values key) are not migrated — they need to be
+re-registered through `POST /api/connections` after the upgrade. See
+`deploy/helm/tenants/abishekk.yaml`'s own TODO for this tenant's specific
+list (abrp, exa, finance, grafana, health, maps-engine, notion, trek).
 
-## Rollout (operator action; not performed automatically)
-
-1. Build/publish the updated hub, router, agent-web, and automation images using
-   immutable tags. Automation's Dockerfile is
-   `deploy/docker/connections.Dockerfile`, built with this repository as context.
-   It bundles the tenant chart and its vendored dependencies; no registry login
-   is needed at runtime.
-2. Deploy the new hub image to the target tenants first. Keep the usual
-   `<release>-tools` service name and port 8000. Existing static manifests work;
-   only automation-managed ones have connection revision markers.
-3. Create the dedicated Temporal namespace (default `system`) using your existing
-   operator tooling. This worker does not create namespaces or onboard tenants.
-4. Deploy the shared chart with the updated router/web images. Its migration hook
-   applies `003_tenant_connections.sql` and `004_connection_runtime.sql` after the
-   registry migrations. Ensure the router's public HTTPS URL and exact web CORS
-   origin are configured. That same public URL must reach the callback route.
-5. Enable `connectionAutomation.enabled`, set its image tag, and enumerate
-   `connectionAutomation.allowedTenantNamespaces`. Those Kubernetes namespaces
-   must exist. The chart creates a dedicated service account and a Role/RoleBinding
-   in each named namespace; it grants no cluster-wide permissions. Configure
-   `temporalNamespace`/`taskQueue` if not using their defaults.
-6. Test GitHub connect → Available → disconnect in a nonproduction tenant, then
-   Notion connect → Authorize → Available. Verify a second organization cannot see
-   or change the first one's connections. Do not enable globally before this
-   real-cluster/provider smoke test.
-
-When automation is disabled, the UI is read-only and writes return 503 rather than
-silently queuing work. The worker must reach shared Postgres, Temporal, Kubernetes,
-and the tenant hub services. Network policies must allow these paths. For local UI
-development set `VITE_DEV_ROUTER_PROXY` for `/gateway/connections`; other existing
-gateway dev proxy behavior is unchanged.
-
-## Recovery and limits
-
-- Restarting the router/worker loses no accepted requests. Operation IDs are fixed
-  workflow IDs; duplicate dispatch cannot create a second execution. Failed or
-  terminated workflows are reconciled back to a retryable failure state.
-- Upgrade failures are retried up to three times. A release in a pending or failed
-  Helm state requires operator inspection/recovery before Retry can succeed. The
-  worker deliberately does not roll back an unrelated or ambiguous revision.
-- Availability is eventually consistent (UI/observer roughly every five seconds;
-  provider checks at the hub's configured poll interval). A full outage may take
-  one poll/timeout to appear. The workflow waits up to ten minutes after apply.
-- All automated tenant upgrades use a release lock. Manual Helm operations must
-  not run concurrently. Keep chart artifacts immutable: name/version matching
-  cannot detect changed templates republished under the same version. A chart
-  version mismatch intentionally blocks automation; rebuild against the matching
-  tenant chart instead of letting a connection request upgrade unrelated software.
-- Helm manages the **whole tenant release**, so its hooks and changes in the baked
-  chart can affect more than the hub. Longer term, a separately versioned hub
-  release/controller would reduce this scope. This implementation preserves the
-  requested existing Helm deployment model.
-- The worker is privileged inside allowed tenant namespaces, including access to
-  Secrets. Credentials are stored in Postgres as requested; header credentials
-  also appear in the existing hub manifest ConfigMap and Helm release history.
-  Restrict DB/Kubernetes access and backups accordingly. Encrypted credential
-  storage and Secret-backed manifests are still production hardening work.
-- Any authenticated member of the active organization can manage its connections
-  under the current policy. Fine-grained connection/tool authorization, approval
-  for destructive tools, quotas, provider revocation and expanded audit retention
-  are separate policy work, not silently implemented here.
-- Keep tenant hubs internal: their existing MCP, status and OAuth-start endpoints
-  are not an Internet authentication boundary. Only the narrow callback route is
-  publicly forwarded without a Clerk token, and it requires valid OAuth state.
-- Managed OAuth manifests carry their own callback URL; unrelated static
-  integrations keep the existing hub base URL. When adopting an already-installed
-  OAuth backend, its existing provider client must allow the new router callback.
-  An old dynamic client registration may need operator re-registration before
-  reauthorization. New connections register the correct callback automatically.
+No separate worker, image, Temporal namespace, or database migration is
+needed for this feature anymore — it ships entirely inside the mcp-hub
+chart bump.
 
 ## Verification
 
-From `workflows`, run `go test ./internal/automation/... ./internal/router/...
-./cmd/connections`. Set `TEST_DATABASE_URL` to a disposable Postgres database to
-also exercise transactions, concurrent requests, tenant isolation, rendering and
-retry idempotency. Tests create and remove uniquely named schemas only.
-
-In the hub repository run `python -m pytest`; store tests start disposable
-pgvector containers. In agent-web run `npm run build` and lint the changed UI
-files. Helm lint the shared chart with automation both disabled and enabled with
-an explicit tenant namespace. These checks do not substitute for step 6 above.
+In `agent-harness/workflows`, `go test ./internal/router/...` covers the
+proxy/authorize routes. In the mcp-hub repo, `python -m pytest` covers the
+`connections` table (via testcontainers-backed Postgres) and the
+catalog/management API routes (fakes, no DB needed for those). Manual
+smoke test: connect GitHub (header token) → confirm it appears in
+`GET /api/connections` as `ready` once tools index; connect Notion (OAuth)
+→ popup opens the real consent screen → callback completes → same.
+Disconnect either and confirm its tools/oauth rows are gone.

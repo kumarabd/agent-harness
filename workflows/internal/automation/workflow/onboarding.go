@@ -22,13 +22,30 @@ import (
 // "this rolls the whole shared pool"). Every other step here is safely
 // scoped to just the new tenant's own namespace; this one alone touches
 // shared state, so it waits for an operator to send this signal rather than
-// running automatically — docs/components/gateway/web.md's Phase 2 section
-// flags this explicitly as a deliberate, reviewable choice, not an
-// oversight.
+// running automatically.
 //
 //	temporal workflow signal --workflow-id tenant-onboard:<slug> \
 //	  --name approve-shared-pool-rollout --namespace system
 const ApproveSharedPoolRolloutSignal = "approve-shared-pool-rollout"
+
+// ProgressQuery is how the router's GET /onboard/{request_id}
+// (workflows/internal/router/core/onboarding.go) reads live status — a
+// Temporal Query against this workflow directly, not a database read. There
+// is no Postgres anywhere in this system as of 2026-09-25: tenant identity
+// is pure convention, and progress lives in the workflow's own state.
+const ProgressQuery = "progress"
+
+type StepProgress struct {
+	Step    string `json:"step"`
+	Status  string `json:"status"` // running|done|failed
+	Message string `json:"message,omitempty"`
+}
+
+type Progress struct {
+	Status string         `json:"status"` // pending|running|awaiting_approval|completed|failed
+	Error  string         `json:"error,omitempty"`
+	Steps  []StepProgress `json:"steps"`
+}
 
 // defaultActivityOptions applies to every activity below except HealthCheck
 // (which runs its own bounded polling loop internally, see activities/
@@ -51,71 +68,101 @@ func TenantOnboardingWorkflow(ctx workflow.Context, in activities.TenantOnboardi
 	ref := in.Ref()
 	result := activities.TenantOnboardingResult{TenantSlug: ref.TenantSlug, Namespace: ref.TenantSlug}
 
-	markStatus := func(status, errMsg string) {
-		// Best-effort: a failure to record status is not itself grounds to
-		// fail an otherwise-successful (or already-failing) workflow.
-		_ = workflow.ExecuteActivity(ctx, a.MarkRequestStatus, ref, status, errMsg).Get(ctx, nil)
-	}
-	fail := func(err error) (activities.TenantOnboardingResult, error) {
-		markStatus("failed", err.Error())
+	progress := Progress{Status: "pending"}
+	if err := workflow.SetQueryHandler(ctx, ProgressQuery, func() (Progress, error) { return progress, nil }); err != nil {
 		return result, err
 	}
 
-	markStatus("running", "")
+	// runStep records a step's running/done/failed transition in the
+	// workflow's own local state, queryable live via ProgressQuery — the
+	// direct replacement for the old Postgres-backed runStep wrapper that
+	// used to live in the activities package.
+	runStep := func(name string, fn func() error) error {
+		progress.Steps = append(progress.Steps, StepProgress{Step: name, Status: "running"})
+		idx := len(progress.Steps) - 1
+		if err := fn(); err != nil {
+			progress.Steps[idx].Status = "failed"
+			progress.Steps[idx].Message = err.Error()
+			return err
+		}
+		progress.Steps[idx].Status = "done"
+		return nil
+	}
+	fail := func(err error) (activities.TenantOnboardingResult, error) {
+		progress.Status = "failed"
+		progress.Error = err.Error()
+		return result, err
+	}
 
-	if err := workflow.ExecuteActivity(ctx, a.ValidateRequest, in).Get(ctx, nil); err != nil {
+	progress.Status = "running"
+
+	if err := runStep("ValidateRequest", func() error {
+		return workflow.ExecuteActivity(ctx, a.ValidateRequest, in).Get(ctx, nil)
+	}); err != nil {
 		return fail(err)
 	}
-	if err := workflow.ExecuteActivity(ctx, a.RegisterTemporalNamespace, ref).Get(ctx, nil); err != nil {
+	if err := runStep("RegisterTemporalNamespace", func() error {
+		return workflow.ExecuteActivity(ctx, a.RegisterTemporalNamespace, ref).Get(ctx, nil)
+	}); err != nil {
 		return fail(err)
 	}
-	if err := workflow.ExecuteActivity(ctx, a.CreateK8sNamespace, ref).Get(ctx, nil); err != nil {
+	if err := runStep("CreateK8sNamespace", func() error {
+		return workflow.ExecuteActivity(ctx, a.CreateK8sNamespace, ref).Get(ctx, nil)
+	}); err != nil {
 		return fail(err)
 	}
-	if err := workflow.ExecuteActivity(ctx, a.StageTenantSecrets, in).Get(ctx, nil); err != nil {
+	if err := runStep("StageTenantSecrets", func() error {
+		return workflow.ExecuteActivity(ctx, a.StageTenantSecrets, in).Get(ctx, nil)
+	}); err != nil {
 		return fail(err)
 	}
 
 	// From here on, every failure path must still clean up the staged
 	// secret — a disconnected context so cleanup runs even if ctx itself
-	// was cancelled (e.g. this workflow's own execution being terminated),
-	// same pattern discord.go's own connection teardown uses.
+	// was cancelled (e.g. this workflow's own execution being terminated).
 	cleanupCtx, cancelCleanup := workflow.NewDisconnectedContext(ctx)
 	cleanupCtx = workflow.WithActivityOptions(cleanupCtx, defaultActivityOptions())
 	cleanup := func() {
-		_ = workflow.ExecuteActivity(cleanupCtx, a.CleanupStagedSecret, ref).Get(cleanupCtx, nil)
+		_ = runStep("CleanupStagedSecret", func() error {
+			return workflow.ExecuteActivity(cleanupCtx, a.CleanupStagedSecret, ref).Get(cleanupCtx, nil)
+		})
 		cancelCleanup()
 	}
 
-	if err := workflow.ExecuteActivity(ctx, a.HelmInstallTenant, ref).Get(ctx, nil); err != nil {
+	if err := runStep("HelmInstallTenant", func() error {
+		return workflow.ExecuteActivity(ctx, a.HelmInstallTenant, ref).Get(ctx, nil)
+	}); err != nil {
 		cleanup()
 		return fail(err)
 	}
 
-	markStatus("awaiting_approval", "")
+	progress.Status = "awaiting_approval"
 	workflow.GetSignalChannel(ctx, ApproveSharedPoolRolloutSignal).Receive(ctx, nil)
-	markStatus("running", "")
+	progress.Status = "running"
 
-	if err := workflow.ExecuteActivity(ctx, a.RegisterSharedPoolNamespace, ref).Get(ctx, nil); err != nil {
+	if err := runStep("RegisterSharedPoolNamespace", func() error {
+		return workflow.ExecuteActivity(ctx, a.RegisterSharedPoolNamespace, ref).Get(ctx, nil)
+	}); err != nil {
 		cleanup()
 		return fail(err)
 	}
 
-	var orgID string
-	if err := workflow.ExecuteActivity(ctx, a.CreateClerkOrganization, ref).Get(ctx, &orgID); err != nil {
-		cleanup()
-		return fail(err)
-	}
-	if err := workflow.ExecuteActivity(ctx, a.RegisterTenantInRegistry, ref, orgID).Get(ctx, nil); err != nil {
-		cleanup()
-		return fail(err)
-	}
-	if err := workflow.ExecuteActivity(ctx, a.HealthCheck, ref).Get(ctx, nil); err != nil {
+	// No Clerk Organization to create and no tenant_registry to write —
+	// tenant identity is pure convention (workflows/internal/router/core/
+	// tenant.go): the router already resolves ref.RequesterUserID to this
+	// exact ref.TenantSlug the instant a request comes in, whether or not
+	// this workflow has finished. Provisioning the actual infrastructure at
+	// that same slug (already done, above) is the only thing that was ever
+	// missing.
+
+	if err := runStep("HealthCheck", func() error {
+		return workflow.ExecuteActivity(ctx, a.HealthCheck, ref).Get(ctx, nil)
+	}); err != nil {
 		cleanup()
 		return fail(err)
 	}
 
 	cleanup()
-	markStatus("completed", "")
+	progress.Status = "completed"
 	return result, nil
 }

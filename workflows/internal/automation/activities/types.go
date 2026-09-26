@@ -1,12 +1,14 @@
 // Package activities implements TenantOnboardingWorkflow's real, Go-native
 // provisioning steps (docs/components/gateway/web.md's Phase 2) — creating
 // the tenant's Temporal namespace and Kubernetes namespace, installing the
-// agent-harness-tenant Helm release, registering it with the shared pool
-// and the router's own tenant_registry, and creating its Clerk
-// Organization. Each activity records its own progress via
-// workflows/internal/onboarding (Store.RecordStep) — see runStep in
-// progress.go for the shared start/success/failure wrapper every activity
-// in this package uses.
+// agent-harness-tenant Helm release, and registering it with the shared
+// pool. Plain functions, no shared wrapper: progress tracking lives in the
+// WORKFLOW's own local state now (workflow/onboarding.go's runStep,
+// queryable live via Temporal Query), not in these activities — there is no
+// database anywhere in this package. Tenant identity itself is pure
+// convention (workflows/internal/router/core/tenant.go,
+// workflows/internal/tenantid) — there is no registry to write to, and
+// (2026-09-25) no Clerk Organization to create either.
 package activities
 
 // LLMTier mirrors deploy/helm/agent-harness-tenant/values.yaml's
@@ -32,7 +34,10 @@ type LLMTier struct {
 type TenantOnboardingInput struct {
 	RequestID       string
 	RequesterUserID string // Clerk user_id of the signed-in requester — becomes agentBrain.ownerUserID
-	TenantSlug      string // k8s namespace AND Helm release name (this repo's own convention, e.g. "abishekk")
+	// k8s namespace AND Helm release name AND Temporal namespace — always
+	// tenantid.SlugForSub(RequesterUserID), computed by the router, never
+	// user-chosen (ValidateRequest checks this invariant explicitly).
+	TenantSlug string
 
 	// At least one tier required; keys are "fast"/"medium"/"expert" — same
 	// three tiers deploy/helm/agent-harness-tenant/values.yaml's own

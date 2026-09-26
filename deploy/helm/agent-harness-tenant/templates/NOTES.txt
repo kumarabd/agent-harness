@@ -17,8 +17,11 @@ This is a PER-TENANT release (docs/components/multi-tenancy.md) — one
   - {{ .Release.Name }}-tools (mcp-hub, installed under nameOverride "tools";
     see values.yaml's mcp-hub.* comment)
     (docs/components/tool-registry.md's mcp-hub-mediated tool tier, one
-    dedicated instance for this tenant. Reachable at MCP_HUB_BASE_URL; no
-    native/Python dispatch code calls it yet)
+    dedicated instance for this tenant. Reachable at MCP_HUB_BASE_URL; also
+    owns this tenant's own connection management end to end now (2026-09-26)
+    — its own Postgres-backed `connections` table and POST/DELETE
+    /api/connections, GET /api/catalog — reached through the shared router's
+    /connections/ proxy. There is no separate connections service anymore.)
 
 It does NOT deploy Temporal server itself, and does NOT deploy the
 loop-worker pool (Session Coordinator + Turn Workflow) — that's the

@@ -29,5 +29,9 @@ dependencies:
     version: "0.1.5"
     repository: "oci://ghcr.io/realnighthawk"
   - name: mcp-hub
-    version: "0.1.1"
+    # 0.2.0 (2026-09-26): drops YAML-manifest-file backend config entirely —
+    # every backend (ops-managed and user-facing alike) now lives in mcp-hub's
+    # own Postgres `connections` table, managed through its own
+    # POST/DELETE /api/connections API. See mcp-hub's own values.yaml comment.
+    version: "0.2.0"
     repository: "oci://ghcr.io/realnighthawk/infra/charts"

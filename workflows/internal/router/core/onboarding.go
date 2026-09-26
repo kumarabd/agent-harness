@@ -1,26 +1,28 @@
 package core
 
 // Self-serve tenant onboarding (docs/components/gateway/web.md's Phase 2):
-// POST /onboard submits a request and signal-starts
-// automationworkflow.TenantOnboardingWorkflow on the "system" namespace's
-// own task queue; GET /onboard/{request_id} lets the browser poll its
-// progress. Same SignalWithStartWorkflow + Postgres-idempotency-dedup shape
-// workflows/internal/gateway/core/inbound.go's own Ingest already uses for
-// chat messages — deliberately mirrored rather than inventing a new
-// submission pattern.
+// POST /onboard signal-starts automationworkflow.TenantOnboardingWorkflow on
+// the "system" namespace's own task queue; GET /onboard reads its live
+// progress via a Temporal Query — no database anywhere in this router
+// (2026-09-25). The workflow ID itself IS the idempotency key: it's
+// deterministic from the caller's own tenant slug
+// (tenantid.SlugForSub(sub)), so there is nothing to dedup by hand the way
+// a client-generated request_id used to require, and no separate "which
+// request is this" path parameter — a signed-in user only ever has one
+// onboarding workflow, their own.
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
-	"strings"
 
 	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 
 	automationactivities "agent-harness/workflows/internal/automation/activities"
 	automationworkflow "agent-harness/workflows/internal/automation/workflow"
-	"agent-harness/workflows/internal/onboarding"
+	"agent-harness/workflows/internal/tenantid"
 )
 
 type onboardLLMTier struct {
@@ -31,8 +33,6 @@ type onboardLLMTier struct {
 }
 
 type onboardRequest struct {
-	RequestID            string                    `json:"request_id"`
-	TenantSlug           string                    `json:"tenant_slug"`
 	LLMTiers             map[string]onboardLLMTier `json:"llm_tiers"`
 	DiscordBotToken      string                    `json:"discord_bot_token"`
 	PostgresPassword     string                    `json:"postgres_password"`
@@ -43,15 +43,19 @@ type onboardRequest struct {
 	LiteLLMAPIKey        string                    `json:"litellm_api_key"`
 }
 
+func workflowIDForSlug(slug string) string {
+	return "tenant-onboard:" + slug
+}
+
 // registerOnboarding mounts /onboard on the same mux Handler() builds — see
 // that method's own doc comment for why the whole thing is CORS-wrapped.
 func (s *Server) registerOnboarding(mux *http.ServeMux) {
 	mux.HandleFunc("POST /onboard", s.handleSubmitOnboarding)
-	mux.HandleFunc("GET /onboard/{request_id}", s.handleGetOnboarding)
+	mux.HandleFunc("GET /onboard", s.handleGetOnboarding)
 }
 
 func (s *Server) handleSubmitOnboarding(w http.ResponseWriter, r *http.Request) {
-	userID, err := s.authenticateUser(r)
+	sub, err := s.authenticateUser(r)
 	if err != nil {
 		writeJSONError(w, http.StatusUnauthorized, "invalid session token")
 		return
@@ -62,40 +66,12 @@ func (s *Server) handleSubmitOnboarding(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.RequestID == "" || req.TenantSlug == "" {
-		writeJSONError(w, http.StatusBadRequest, "request_id and tenant_slug are required")
-		return
-	}
 
-	created, err := s.onboarding.CreateRequest(r.Context(), onboarding.Request{
-		RequestID:       req.RequestID,
-		RequesterUserID: userID,
-		TenantSlug:      req.TenantSlug,
-	})
-	if err != nil {
-		// The partial unique index on tenant_slug (deploy/helm/agent-harness-shared/
-		// files/002_tenant_onboarding.sql) is the likely real cause here — a
-		// different request already claimed this slug while still pending/
-		// running/awaiting_approval — surfaced as 409, not 500, since it's a
-		// genuine client-correctable conflict, not a server failure.
-		if strings.Contains(err.Error(), "tenant_onboarding_requests_slug_active_idx") {
-			writeJSONError(w, http.StatusConflict, "tenant_slug already has an onboarding request in progress")
-			return
-		}
-		writeJSONError(w, http.StatusInternalServerError, "failed to record onboarding request")
-		return
-	}
-	if !created {
-		// Same request_id resubmitted — already accepted, not an error
-		// (identical to core.Ingest's own ON CONFLICT DO NOTHING handling).
-		writeJSON(w, http.StatusOK, map[string]string{"request_id": req.RequestID, "status": "already_accepted"})
-		return
-	}
-
+	tenantSlug := tenantid.SlugForSub(sub)
 	input := automationactivities.TenantOnboardingInput{
-		RequestID:            req.RequestID,
-		RequesterUserID:      userID,
-		TenantSlug:           req.TenantSlug,
+		RequestID:            tenantSlug,
+		RequesterUserID:      sub,
+		TenantSlug:           tenantSlug,
 		DiscordBotToken:      req.DiscordBotToken,
 		PostgresPassword:     req.PostgresPassword,
 		AgentBrainDBPassword: req.AgentBrainDBPassword,
@@ -113,57 +89,52 @@ func (s *Server) handleSubmitOnboarding(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	workflowID := "tenant-onboard:" + req.TenantSlug
+	workflowID := workflowIDForSlug(tenantSlug)
 	opts := client.StartWorkflowOptions{
 		ID:                    workflowID,
 		TaskQueue:             s.automationTaskQueue,
 		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
 	}
+	// "start" is never actually handled by the workflow — SignalWithStart's
+	// real job here is "start it if it isn't running yet"; if it's already
+	// running, this just delivers a harmless unhandled signal to it, same
+	// as a resubmit while onboarding is already in progress should do
+	// (nothing, since it's already going).
 	_, err = s.temporal.SignalWithStartWorkflow(r.Context(), workflowID, "start", nil, opts,
 		automationworkflow.TenantOnboardingWorkflow, input)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start onboarding workflow: %v", err))
+		writeJSONError(w, http.StatusInternalServerError, "failed to start onboarding workflow")
 		return
 	}
 
-	writeJSON(w, http.StatusAccepted, map[string]string{"request_id": req.RequestID, "status": "accepted"})
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
 func (s *Server) handleGetOnboarding(w http.ResponseWriter, r *http.Request) {
-	userID, err := s.authenticateUser(r)
+	sub, err := s.authenticateUser(r)
 	if err != nil {
 		writeJSONError(w, http.StatusUnauthorized, "invalid session token")
 		return
 	}
 
-	requestID := r.PathValue("request_id")
-	req, err := s.onboarding.GetRequest(r.Context(), requestID)
+	workflowID := workflowIDForSlug(tenantid.SlugForSub(sub))
+	encoded, err := s.temporal.QueryWorkflow(r.Context(), workflowID, "", automationworkflow.ProgressQuery)
 	if err != nil {
-		writeJSONError(w, http.StatusNotFound, "no such onboarding request")
-		return
-	}
-	if req.RequesterUserID != userID {
-		// Same "never another user's" discipline
-		// workflows/internal/gateway/core/access.go already applies to
-		// session ownership — a request_id is guessable/enumerable, so
-		// ownership must be checked, not just existence.
-		writeJSONError(w, http.StatusNotFound, "no such onboarding request")
+		var notFound *serviceerror.NotFound
+		if errors.As(err, &notFound) {
+			writeJSONError(w, http.StatusNotFound, "no onboarding request found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "failed to query onboarding progress")
 		return
 	}
 
-	steps, err := s.onboarding.ListSteps(r.Context(), requestID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to list onboarding steps")
+	var progress automationworkflow.Progress
+	if err := encoded.Get(&progress); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to decode onboarding progress")
 		return
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"request_id":  req.RequestID,
-		"tenant_slug": req.TenantSlug,
-		"status":      req.Status,
-		"error":       req.Error,
-		"steps":       steps,
-	})
+	writeJSON(w, http.StatusOK, progress)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -24,35 +24,33 @@ import (
 // creation is rare enough that pooling one long-lived NamespaceClient for
 // the worker's whole lifetime isn't worth the complexity.
 func (a *Activities) RegisterTemporalNamespace(ctx context.Context, ref PublicRef) error {
-	return runStep(ctx, a.Store, ref.RequestID, func(ctx context.Context) error {
-		nsClient, err := client.NewNamespaceClient(client.Options{HostPort: a.TemporalAddress})
-		if err != nil {
-			return fmt.Errorf("dial namespace client: %w", err)
-		}
-		defer nsClient.Close()
+	nsClient, err := client.NewNamespaceClient(client.Options{HostPort: a.TemporalAddress})
+	if err != nil {
+		return fmt.Errorf("dial namespace client: %w", err)
+	}
+	defer nsClient.Close()
 
-		retentionDays := a.NamespaceRetentionDays
-		if retentionDays <= 0 {
-			retentionDays = 30 // same default every other real namespace in this cluster uses today, per multi-tenancy.md's own onboarding runbook
-		}
+	retentionDays := a.NamespaceRetentionDays
+	if retentionDays <= 0 {
+		retentionDays = 30 // same default every other real namespace in this cluster uses today, per multi-tenancy.md's own onboarding runbook
+	}
 
-		err = nsClient.Register(ctx, &workflowservice.RegisterNamespaceRequest{
-			Namespace:                        ref.TenantSlug,
-			Description:                      fmt.Sprintf("agent-harness tenant %q, self-serve onboarded", ref.TenantSlug),
-			OwnerEmail:                       "",
-			WorkflowExecutionRetentionPeriod: durationpb.New(time.Duration(retentionDays) * 24 * time.Hour),
-		})
-		if err != nil {
-			var alreadyExists *serviceerror.NamespaceAlreadyExists
-			if errors.As(err, &alreadyExists) {
-				// Idempotent: a workflow retry (or a re-submitted onboarding
-				// request after a partial earlier failure) landing here a
-				// second time is not itself an error — the namespace this
-				// step wants to exist already does.
-				return nil
-			}
-			return fmt.Errorf("register temporal namespace %q: %w", ref.TenantSlug, err)
-		}
-		return nil
+	err = nsClient.Register(ctx, &workflowservice.RegisterNamespaceRequest{
+		Namespace:                        ref.TenantSlug,
+		Description:                      fmt.Sprintf("agent-harness tenant %q, self-serve onboarded", ref.TenantSlug),
+		OwnerEmail:                       "",
+		WorkflowExecutionRetentionPeriod: durationpb.New(time.Duration(retentionDays) * 24 * time.Hour),
 	})
+	if err != nil {
+		var alreadyExists *serviceerror.NamespaceAlreadyExists
+		if errors.As(err, &alreadyExists) {
+			// Idempotent: a workflow retry (or a re-submitted onboarding
+			// request after a partial earlier failure) landing here a
+			// second time is not itself an error — the namespace this
+			// step wants to exist already does.
+			return nil
+		}
+		return fmt.Errorf("register temporal namespace %q: %w", ref.TenantSlug, err)
+	}
+	return nil
 }

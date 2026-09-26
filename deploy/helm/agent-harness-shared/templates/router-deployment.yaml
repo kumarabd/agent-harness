@@ -19,9 +19,10 @@ spec:
         {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "router") | nindent 8 }}
     spec:
       serviceAccountName: {{ include "agent-harness.fullname" . }}
-      # This process talks to its own tenant_registry Postgres and, per
-      # request, to other tenants' Gateway/agent-brain Services by DNS name
-      # — never the Kubernetes API itself (workflows/cmd/router/main.go).
+      # This process resolves tenants by pure convention and talks, per
+      # request, to that tenant's own Gateway/agent-brain/mcp-hub
+      # Services by DNS name — never the Kubernetes API itself, and
+      # (2026-09-25) no database of any kind (workflows/cmd/router/main.go).
       automountServiceAccountToken: false
       containers:
         - name: router
@@ -31,27 +32,17 @@ spec:
             - name: http
               containerPort: {{ .Values.router.port }}
           env:
-            - name: CONNECTION_AUTOMATION_ENABLED
-              value: {{ .Values.connectionAutomation.enabled | quote }}
             - name: ROUTER_BIND_ADDRESS
               value: {{ printf "0.0.0.0:%d" (int .Values.router.port) | quote }}
-            # This chart's OWN postgresql subchart (Chart.yaml) — the
-            # router's tenant_registry table, never a tenant's own Postgres.
-            # Same Bitnami-generated Service/Secret naming as
-            # agent-harness-tenant's identical pattern.
-            - name: POSTGRES_HOST
-              value: "{{ .Release.Name }}-postgresql"
-            - name: POSTGRES_PORT
-              value: "5432"
-            - name: POSTGRES_DB
-              value: {{ .Values.postgresql.auth.database | quote }}
-            - name: POSTGRES_USER
-              value: {{ .Values.postgresql.auth.username | quote }}
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: "{{ .Release.Name }}-postgresql"
-                  key: password
+            # Must match agent-harness-tenant/values.yaml's own gateway.port/
+            # agent-brain subchart defaults — the router computes every
+            # tenant's Service URL by convention now
+            # (workflows/internal/router/core/tenant.go), no lookup table to
+            # get this from instead.
+            - name: TENANT_GATEWAY_PORT
+              value: "8090"
+            - name: TENANT_AGENT_BRAIN_PORT
+              value: "8080"
             # Same non-secret JWKS-only verification as agent-harness-tenant's
             # gateway.web.clerkJwksUrl/clerkIssuer — see that chart's own
             # comment for the full reasoning (no Clerk secret key anywhere).

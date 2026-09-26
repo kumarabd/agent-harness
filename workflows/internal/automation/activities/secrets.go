@@ -61,37 +61,35 @@ type k8sObjectMeta struct {
 // helm.go's HelmInstallTenant and CleanupStagedSecret below, the one
 // activity that deletes it.
 func (a *Activities) StageTenantSecrets(ctx context.Context, in TenantOnboardingInput) error {
-	return runStep(ctx, a.Store, in.RequestID, func(ctx context.Context) error {
-		tiersJSON, err := json.Marshal(in.LLMTiers)
-		if err != nil {
-			return fmt.Errorf("marshal llm tiers: %w", err)
-		}
+	tiersJSON, err := json.Marshal(in.LLMTiers)
+	if err != nil {
+		return fmt.Errorf("marshal llm tiers: %w", err)
+	}
 
-		manifest := k8sSecretManifest{
-			APIVersion: "v1",
-			Kind:       "Secret",
-			Metadata:   k8sObjectMeta{Name: stagedSecretName(in.RequestID), Namespace: a.SharedNamespace},
-			Type:       "Opaque",
-			StringData: map[string]string{
-				keyPostgresPassword:     in.PostgresPassword,
-				keyAgentBrainDBPassword: in.AgentBrainDBPassword,
-				keyAgentBrainAPIKey:     in.AgentBrainAPIKey,
-				keyAgentBrainJWTSecret:  in.AgentBrainJWTSecret,
-				keyMcpHubDBPassword:     in.McpHubDBPassword,
-				keyLiteLLMAPIKey:        in.LiteLLMAPIKey,
-				keyDiscordBotToken:      in.DiscordBotToken,
-				keyLLMTiersJSON:         string(tiersJSON),
-			},
-		}
-		manifestYAML, err := yaml.Marshal(manifest)
-		if err != nil {
-			return fmt.Errorf("marshal secret manifest: %w", err)
-		}
-		if _, err := runCommandStdin(ctx, string(manifestYAML), "kubectl", "apply", "-f", "-"); err != nil {
-			return fmt.Errorf("apply staged secret: %w", err)
-		}
-		return nil
-	})
+	manifest := k8sSecretManifest{
+		APIVersion: "v1",
+		Kind:       "Secret",
+		Metadata:   k8sObjectMeta{Name: stagedSecretName(in.RequestID), Namespace: a.SharedNamespace},
+		Type:       "Opaque",
+		StringData: map[string]string{
+			keyPostgresPassword:     in.PostgresPassword,
+			keyAgentBrainDBPassword: in.AgentBrainDBPassword,
+			keyAgentBrainAPIKey:     in.AgentBrainAPIKey,
+			keyAgentBrainJWTSecret:  in.AgentBrainJWTSecret,
+			keyMcpHubDBPassword:     in.McpHubDBPassword,
+			keyLiteLLMAPIKey:        in.LiteLLMAPIKey,
+			keyDiscordBotToken:      in.DiscordBotToken,
+			keyLLMTiersJSON:         string(tiersJSON),
+		},
+	}
+	manifestYAML, err := yaml.Marshal(manifest)
+	if err != nil {
+		return fmt.Errorf("marshal secret manifest: %w", err)
+	}
+	if _, err := runCommandStdin(ctx, string(manifestYAML), "kubectl", "apply", "-f", "-"); err != nil {
+		return fmt.Errorf("apply staged secret: %w", err)
+	}
+	return nil
 }
 
 // CleanupStagedSecret deletes the Secret StageTenantSecrets created —
@@ -100,9 +98,7 @@ func (a *Activities) StageTenantSecrets(ctx context.Context, in TenantOnboarding
 // leaves real tenant secrets sitting in this worker's own namespace
 // indefinitely.
 func (a *Activities) CleanupStagedSecret(ctx context.Context, ref PublicRef) error {
-	return runStep(ctx, a.Store, ref.RequestID, func(ctx context.Context) error {
-		_, err := runCommand(ctx, "kubectl", "delete", "secret", stagedSecretName(ref.RequestID),
-			"-n", a.SharedNamespace, "--ignore-not-found")
-		return err
-	})
+	_, err := runCommand(ctx, "kubectl", "delete", "secret", stagedSecretName(ref.RequestID),
+		"-n", a.SharedNamespace, "--ignore-not-found")
+	return err
 }

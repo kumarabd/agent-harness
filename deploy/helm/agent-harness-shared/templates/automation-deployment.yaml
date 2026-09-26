@@ -84,28 +84,6 @@ spec:
             - name: CLERK_ISSUER
               value: {{ .Values.router.clerkIssuer | quote }}
             {{- end }}
-            - name: CLERK_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}
-                  key: clerk-secret-key
-            # This chart's OWN postgresql subchart (Chart.yaml) — the same
-            # tenant_registry/tenant_onboarding_* database the router itself
-            # reads/writes (workflows/internal/onboarding), never a tenant's
-            # own Postgres.
-            - name: POSTGRES_HOST
-              value: "{{ .Release.Name }}-postgresql"
-            - name: POSTGRES_PORT
-              value: "5432"
-            - name: POSTGRES_DB
-              value: {{ .Values.postgresql.auth.database | quote }}
-            - name: POSTGRES_USER
-              value: {{ .Values.postgresql.auth.username | quote }}
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: "{{ .Release.Name }}-postgresql"
-                  key: password
           resources:
             {{- toYaml .Values.automation.resources | nindent 12 }}
       {{- with .Values.automation.nodeSelector }}

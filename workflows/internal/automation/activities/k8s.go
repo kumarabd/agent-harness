@@ -17,16 +17,14 @@ import (
 // which would fail on a namespace this same workflow already created in an
 // earlier attempt.
 func (a *Activities) CreateK8sNamespace(ctx context.Context, ref PublicRef) error {
-	return runStep(ctx, a.Store, ref.RequestID, func(ctx context.Context) error {
-		manifest, err := runCommand(ctx, "kubectl", "create", "namespace", ref.TenantSlug, "--dry-run=client", "-o", "yaml")
-		if err != nil {
-			return fmt.Errorf("render namespace manifest: %w", err)
-		}
-		if _, err := runCommandStdin(ctx, manifest, "kubectl", "apply", "-f", "-"); err != nil {
-			return fmt.Errorf("apply namespace: %w", err)
-		}
-		return nil
-	})
+	manifest, err := runCommand(ctx, "kubectl", "create", "namespace", ref.TenantSlug, "--dry-run=client", "-o", "yaml")
+	if err != nil {
+		return fmt.Errorf("render namespace manifest: %w", err)
+	}
+	if _, err := runCommandStdin(ctx, manifest, "kubectl", "apply", "-f", "-"); err != nil {
+		return fmt.Errorf("apply namespace: %w", err)
+	}
+	return nil
 }
 
 // HealthCheck polls the newly-installed tenant's Gateway and agent-brain
@@ -39,30 +37,28 @@ func (a *Activities) CreateK8sNamespace(ctx context.Context, ref PublicRef) erro
 // routine here, not a failure to surface through Temporal's own retry/
 // backoff machinery.
 func (a *Activities) HealthCheck(ctx context.Context, ref PublicRef) error {
-	return runStep(ctx, a.Store, ref.RequestID, func(ctx context.Context) error {
-		gatewayURL := fmt.Sprintf("http://%s-gateway.%s.svc.cluster.local:%d/healthz", ref.TenantSlug, ref.TenantSlug, a.gatewayPort())
-		brainURL := fmt.Sprintf("http://%s-memory-server.%s.svc.cluster.local:%d/healthz", ref.TenantSlug, ref.TenantSlug, a.agentBrainPort())
+	gatewayURL := fmt.Sprintf("http://%s-gateway.%s.svc.cluster.local:%d/healthz", ref.TenantSlug, ref.TenantSlug, a.gatewayPort())
+	brainURL := fmt.Sprintf("http://%s-memory-server.%s.svc.cluster.local:%d/healthz", ref.TenantSlug, ref.TenantSlug, a.agentBrainPort())
 
-		client := &http.Client{Timeout: 5 * time.Second}
-		deadline := time.Now().Add(5 * time.Minute)
-		for _, url := range []string{gatewayURL, brainURL} {
-			for {
-				ok, err := probeOnce(ctx, client, url)
-				if ok {
-					break
-				}
-				if time.Now().After(deadline) {
-					return fmt.Errorf("timed out waiting for %s to become healthy: %v", url, err)
-				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(5 * time.Second):
-				}
+	client := &http.Client{Timeout: 5 * time.Second}
+	deadline := time.Now().Add(5 * time.Minute)
+	for _, url := range []string{gatewayURL, brainURL} {
+		for {
+			ok, err := probeOnce(ctx, client, url)
+			if ok {
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("timed out waiting for %s to become healthy: %v", url, err)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
 			}
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // probeOnce reports whether url answered 2xx. The returned error is always
