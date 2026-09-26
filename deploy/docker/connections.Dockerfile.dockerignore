@@ -1,0 +1,17 @@
+**
+!workflows/
+!workflows/go.mod
+!workflows/go.sum
+!workflows/cmd/
+!workflows/cmd/connections/
+!workflows/cmd/connections/*.go
+!workflows/internal/
+!workflows/internal/automation/
+!workflows/internal/automation/connection_workflow.go
+!workflows/internal/automation/connections/
+!workflows/internal/automation/connections/*.go
+!deploy/
+!deploy/helm/
+!deploy/helm/agent-harness-tenant/
+!deploy/helm/agent-harness-tenant/**
+**/*_test.go

@@ -34,3 +34,12 @@ directory: the tenant's Temporal namespace itself must already exist
 (`infra/temporal`'s chart), and its namespace must be added to
 `../agent-harness-shared/values.yaml`'s `temporal.namespaces` list — that's
 what actually gets its turns scheduled, independent of this chart.
+
+A third, separate step as of 2026-09-24 (docs/components/gateway/web.md's
+"Resolved: Shared `agent-web` + Identity-Routing Router"): if this tenant
+has `gateway.enabled=true` (a Web client), it also needs a row in the
+shared router's own `tenant_registry` table — the caller's Clerk
+organization id mapped to this tenant's `<k8s-namespace>`/`<release>` —
+before any of its users can actually reach it through `agent-web`. Not a
+value in this directory's files; see that doc's Notes Log for the current
+(manual SQL insert) mechanism until a real onboarding workflow automates it.

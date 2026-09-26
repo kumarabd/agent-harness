@@ -55,17 +55,36 @@ func ConfigFromEnv() Config {
 // verifyClerkSessionJWT validates a Clerk-issued Bearer JWT (RS256) and
 // returns the subject (Clerk user_id).
 func VerifyJWT(ctx context.Context, cfg Config, tokenStr string) (string, error) {
+	claims, err := VerifyJWTClaims(ctx, cfg, tokenStr)
+	if err != nil {
+		return "", err
+	}
+	sub, _ := claims["sub"].(string)
+	if sub == "" {
+		return "", errInvalidToken
+	}
+	return sub, nil
+}
+
+// VerifyJWTClaims does the same verification as VerifyJWT but returns the
+// full claim set, not just sub. Added for the shared router (workflows/cmd/
+// router) — unlike every other caller of this package so far, the router
+// needs the token's active-organization claim (Clerk puts it in the session
+// JWT as "o": {"id": "org_..."} when Organizations is enabled on the
+// project, alongside the plain "sub") to resolve which tenant a request
+// belongs to, not just who the user is.
+func VerifyJWTClaims(ctx context.Context, cfg Config, tokenStr string) (jwt.MapClaims, error) {
 	if cfg.JWKSURL == "" {
-		return "", errors.New("clerk jwks not configured")
+		return nil, errors.New("clerk jwks not configured")
 	}
 	tokenStr = strings.TrimSpace(tokenStr)
 	if tokenStr == "" {
-		return "", errInvalidToken
+		return nil, errInvalidToken
 	}
 
 	key, err := clerkJWKS.getKey(ctx, cfg.JWKSURL, tokenStr)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
@@ -75,23 +94,19 @@ func VerifyJWT(ctx context.Context, cfg Config, tokenStr string) (string, error)
 		return key, nil
 	}, jwt.WithValidMethods([]string{"RS256"}))
 	if err != nil || !token.Valid {
-		return "", errInvalidToken
+		return nil, errInvalidToken
 	}
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
-		return "", errInvalidToken
+		return nil, errInvalidToken
 	}
 	if cfg.Issuer != "" {
 		iss, _ := claims["iss"].(string)
 		if iss != cfg.Issuer {
-			return "", errInvalidToken
+			return nil, errInvalidToken
 		}
 	}
-	sub, _ := claims["sub"].(string)
-	if sub == "" {
-		return "", errInvalidToken
-	}
-	return sub, nil
+	return claims, nil
 }
 
 type jwksCache struct {

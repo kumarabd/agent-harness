@@ -26,9 +26,7 @@ standard escape hatch.
 {{- end -}}
 
 {{/*
-Common labels, applied to every resource in this chart. No per-component
-label helpers here (unlike agent-harness-tenant) — this chart has exactly
-one workload.
+Common labels, applied to every resource in this chart.
 */}}
 {{- define "agent-harness.labels" -}}
 helm.sh/chart: {{ include "agent-harness.chart" . }}
@@ -46,4 +44,25 @@ never change across releases (Deployment selectors are immutable).
 {{- define "agent-harness.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "agent-harness.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+
+{{/*
+Per-component helpers (2026-09-24) — this chart used to have exactly one
+workload (loop-worker, using the bare helpers above unqualified), but now
+also deploys agent-web and the router as separate workloads in the same
+release. Copied verbatim from agent-harness-tenant/templates/_helpers.tpl,
+same reasoning: e.g. "<release>-web", "<release>-router".
+*/}}
+{{- define "agent-harness.componentFullname" -}}
+{{- printf "%s-%s" (include "agent-harness.fullname" .context) .component -}}
+{{- end -}}
+
+{{- define "agent-harness.componentSelectorLabels" -}}
+{{ include "agent-harness.selectorLabels" .context }}
+app.kubernetes.io/component: {{ .component }}
+{{- end -}}
+
+{{- define "agent-harness.componentLabels" -}}
+{{ include "agent-harness.labels" .context }}
+app.kubernetes.io/component: {{ .component }}
 {{- end -}}

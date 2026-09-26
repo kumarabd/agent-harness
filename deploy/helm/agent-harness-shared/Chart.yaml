@@ -1,13 +1,30 @@
 apiVersion: v2
 name: agent-harness
 description: >-
-  The shared, tenant-agnostic loop-worker pool (Session Coordinator +
-  Turn Workflow, Go) for agent-harness. Deployed ONCE for the whole cluster —
-  NOT one release per tenant, see docs/components/multi-tenancy.md's
-  "Resolved: Compute Isolation" decision. Deploys against an existing
-  Temporal server; does not bundle Temporal or its datastore, and deploys
-  none of the per-tenant components (those live in the agent-harness-tenant
-  chart — tenant workers, Postgres, tenant PV — one release per tenant).
+  The shared, tenant-agnostic components for agent-harness, deployed ONCE
+  for the whole cluster — NOT one release per tenant, see
+  docs/components/multi-tenancy.md's "Resolved: Compute Isolation" decision.
+  Deploys the loop-worker pool (Session Coordinator + Turn Workflow, Go)
+  against an existing Temporal server (does not bundle Temporal or its
+  datastore), plus, as of 2026-09-24, the shared agent-web deployment and
+  the identity-routing router in front of it (docs/components/gateway/
+  web.md) — agent-web used to be one instance per tenant in
+  agent-harness-tenant; it's shared now, and a caller's Clerk organization
+  is what resolves which tenant's own Gateway/agent-brain the router
+  forwards to. Deploys none of the per-tenant components themselves (tenant
+  workers, each tenant's own Postgres/Gateway/agent-brain, tenant PV) —
+  those still live in the agent-harness-tenant chart, one release per
+  tenant.
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+# Postgres for the router's OWN tenant_registry table (files/*.sql) — a
+# small, router-owned database, never a tenant's own Postgres. Same real
+# Bitnami dependency as agent-harness-tenant's own postgresql subchart, same
+# custom pgvector/timescaledb image (unused here, just the one image this
+# cluster already trusts/has cached — see that chart's own Chart.yaml
+# comment).
+dependencies:
+  - name: postgresql
+    version: "18.5.24"
+    repository: "https://charts.bitnami.com/bitnami"

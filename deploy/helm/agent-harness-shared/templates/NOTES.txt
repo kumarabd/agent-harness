@@ -1,16 +1,39 @@
 agent-harness has been deployed.
 
-This is the SHARED, tenant-agnostic loop-worker pool
+This is the SHARED, tenant-agnostic set of components
 (docs/components/multi-tenancy.md) — deployed ONCE for the whole cluster,
 unlike agent-harness-tenant which is one release per tenant. It deploys:
 
   - {{ include "agent-harness.fullname" . }}
     (Go — Session Coordinator + Turn Workflow; serves every namespace listed
     in temporal.namespaces from every replica)
+{{- if .Values.router.enabled }}
+  - {{ include "agent-harness.componentFullname" (dict "context" . "component" "router") }}
+    (Go — the identity-routing front door for agent-web, docs/components/
+    gateway/web.md. Resolves each request's tenant from the caller's Clerk
+    organization via its own tenant_registry table, then reverse-proxies to
+    that tenant's own Gateway/agent-brain.)
+{{- end }}
+{{- if .Values.agentWeb.enabled }}
+  - {{ include "agent-harness.componentFullname" (dict "context" . "component" "web") }}
+    (agent-web — chat UI + agent-brain memory explorer. Moved here from
+    agent-harness-tenant 2026-09-24: one shared deployment now, talking to
+    the router above instead of one tenant's own agent-brain/Gateway URLs.)
+{{- end }}
+{{- if .Values.automation.enabled }}
+  - {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}
+    (Go — self-serve tenant onboarding, docs/components/gateway/web.md's
+    Phase 2: TenantOnboardingWorkflow, on its own "{{ .Values.automation.temporalNamespace }}"
+    Temporal namespace/"{{ .Values.automation.taskQueue }}" task queue, separate from the
+    tenant turn traffic above. The one workload in this chart with real
+    Kubernetes API access — see automation-rbac.yaml's own comment.)
+{{- end }}
 
 It does NOT deploy Temporal server itself, and does NOT deploy any
-tenant-specific components (tenant workers, Postgres, tenant PV — those
-come from the agent-harness-tenant chart, one release per tenant).
+tenant-specific components (tenant workers, each tenant's own Postgres/
+Gateway/agent-brain, tenant PV — those come from the agent-harness-tenant
+chart, one release per tenant). The postgresql subchart in THIS release is
+the router's own tenant_registry database only, never a tenant's own data.
 
 This release is currently configured to serve:
 
@@ -43,3 +66,33 @@ Note: the ModelCall/ToolCall/Persist/Deliver/CompressContext activities that
 this pool's workflows dispatch to are implemented by each tenant's own
 agent-harness-tenant release (tenant-worker), not by anything in this
 chart.
+{{- if and .Values.router.enabled (not .Values.automation.enabled) }}
+
+Registering a tenant with the router: a user can't reach their tenant
+through agent-web until a row for their Clerk organization exists in this
+release's tenant_registry table (workflows/internal/router/registry) — not
+a Helm value, so no redeploy of this chart is needed to add one. Today
+that's a direct SQL insert against {{ .Release.Name }}-postgresql; enabling
+automation.enabled (below) automates this as TenantOnboardingWorkflow's
+last step instead:
+
+  INSERT INTO tenant_registry (org_id, namespace, release_name)
+  VALUES ('org_...', '<tenant k8s namespace>', '<tenant helm release name>');
+{{- end }}
+{{- if .Values.automation.enabled }}
+
+Self-serve tenant onboarding is live: POST /onboard on the router
+(workflows/internal/router/core/onboarding.go) signal-starts
+TenantOnboardingWorkflow on {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}.
+One step needs a human: RegisterSharedPoolNamespace (the step that rolls
+THIS release's own temporal.namespaces, above) waits for an explicit
+approval signal before running —
+
+  temporal workflow signal --workflow-id tenant-onboard:<slug> \
+    --name approve-shared-pool-rollout --namespace {{ .Values.automation.temporalNamespace }}
+
+Watch a request's progress (workflows/internal/onboarding's own tables):
+
+  SELECT step, status, message, updated_at FROM tenant_onboarding_steps
+  WHERE request_id = '<request_id>' ORDER BY id;
+{{- end }}

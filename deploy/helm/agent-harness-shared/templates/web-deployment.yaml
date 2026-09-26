@@ -1,0 +1,78 @@
+{{- if .Values.agentWeb.enabled -}}
+{{- if not .Values.router.enabled }}
+{{- fail "router.enabled must be true when agentWeb.enabled=true — agent-web has no per-tenant agent-brain/gateway URLs to point at anymore (docs/components/gateway/web.md); it talks to the router instead." }}
+{{- end }}
+{{- if not .Values.router.publicURL }}
+{{- fail "router.publicURL is required when agentWeb.enabled=true — 2026-09-24, the browser now calls the router directly (no more same-origin nginx proxy), so it needs the router's real public URL, not just its in-cluster Service name. Also add that same origin to router.allowedOrigins for CORS." }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "web") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "web") | nindent 4 }}
+spec:
+  replicas: {{ .Values.agentWeb.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "web") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "web") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "agent-harness.fullname" . }}
+      # This is nginx + a static SPA — it never calls the Kubernetes API,
+      # same reasoning as agent-harness-tenant's own former agent-web
+      # template (this chart's now-shared home for it).
+      automountServiceAccountToken: false
+      containers:
+        - name: web
+          image: "{{ .Values.agentWeb.image.repository }}:{{ .Values.agentWeb.image.tag }}"
+          imagePullPolicy: {{ .Values.agentWeb.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # 2026-09-24 — replaces the former AGENT_BRAIN_API_URL/
+            # GATEWAY_API_URL (agent-web's own nginx no longer reverse-
+            # proxies to either; that container is a pure static-file
+            # server now). This is the router's REAL PUBLIC URL, not an
+            # in-cluster Service name — the browser calls it directly, a
+            # genuinely cross-origin request (router.allowedOrigins must
+            # include agent-web's own public origin for CORS). Consumed by
+            # agent-web's docker-entrypoint.sh (that repo's own
+            # docker/runtime-config.js.template) to render a small
+            # window.__RUNTIME_CONFIG__ the bundle reads ahead of its Vite
+            # build-time env vars — see docs/components/gateway/web.md.
+            - name: ROUTER_PUBLIC_URL
+              value: {{ .Values.router.publicURL | quote }}
+            - name: NGINX_LISTEN_PORT
+              value: "8080"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.agentWeb.resources | nindent 12 }}
+      {{- with .Values.agentWeb.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agentWeb.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agentWeb.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

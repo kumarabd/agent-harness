@@ -1,0 +1,79 @@
+# Applies every files/*.sql file against this chart's OWN postgresql
+# subchart, in filename order (001_, 002_, ...) — the router's tenant_registry
+# table (and, once docs/components/gateway/web.md's Phase 2/3 onboarding
+# automation lands, tenant_onboarding_requests/tenant_onboarding_steps too).
+# Directly mirrors agent-harness-tenant/templates/postgres-migrate-hook.yaml's
+# pattern (real schema_migrations tracking table, same idempotency
+# reasoning) — trimmed of that file's pre-existing-deployment backfill step,
+# since this database is new, nothing predates schema_migrations existing.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agent-harness.fullname" . }}-router-migrations
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "router-postgres-migrate") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  {{- range $path, $_ := .Files.Glob "files/*.sql" }}
+  {{ base $path }}: |
+{{ $.Files.Get $path | indent 4 }}
+  {{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "agent-harness.fullname" . }}-router-postgres-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "router-postgres-migrate") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: {{ printf "%s/%s:%s" (.Values.postgresql.image.registry | default "docker.io") (.Values.postgresql.image.repository | default "bitnami/postgresql") (.Values.postgresql.image.tag | default "18") | quote }}
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .Release.Name }}-postgresql"
+                  key: password
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              HOST={{ .Release.Name }}-postgresql.{{ .Release.Namespace }}.svc.cluster.local
+              USER={{ .Values.postgresql.auth.username | quote }}
+              DB={{ .Values.postgresql.auth.database | quote }}
+              PSQL="psql -h $HOST -U $USER -d $DB -v ON_ERROR_STOP=1"
+
+              $PSQL -c "CREATE TABLE IF NOT EXISTS schema_migrations (filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());"
+
+              for f in $(ls /migrations/*.sql | sort); do
+                name=$(basename "$f")
+                already=$($PSQL -tAc "SELECT 1 FROM schema_migrations WHERE filename = '$name'")
+                if [ -z "$already" ]; then
+                  echo "applying $name"
+                  { cat "$f"; printf "\nINSERT INTO schema_migrations (filename) VALUES ('%s');\n" "$name"; } | $PSQL -1
+                else
+                  echo "$name already applied, skipping"
+                fi
+              done
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+      volumes:
+        - name: migrations
+          configMap:
+            name: {{ include "agent-harness.fullname" . }}-router-migrations

@@ -51,10 +51,174 @@ tolerations: []
 affinity: {}
 
 # -- docs/components/budget-guardrails.md, "Resolved: Metrics Export". Flat/
-# top-level, matching this chart's own existing convention (image/resources/
-# podAnnotations are all top-level too — there's only one workload in this
-# chart, unlike agent-harness-tenant's per-component nesting).
+# top-level (not nested under a loopWorker key) — kept exactly as it was
+# before agentWeb/router/postgresql below were added, so this release's
+# already-deployed loop-worker resources are untouched by this change.
 metrics:
   enabled: true
   port: 9090
   path: "/metrics"
+
+# -- agent-web (chat UI + agent-brain memory explorer), moved here from
+# agent-harness-tenant 2026-09-24 (docs/components/gateway/web.md) — one
+# shared deployment for the whole cluster now, fronted by `router` below
+# instead of pointing directly at one tenant's own agent-brain/Gateway.
+# Uses the PUBLISHED agent-web image (ghcr.io/realnighthawk/agent-web) —
+# this repo doesn't build or own that image.
+agentWeb:
+  enabled: false
+  image:
+    repository: "ghcr.io/realnighthawk/agent-web"
+    tag: "internal"
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- The shared, identity-routing front door for agent-web
+# (docs/components/gateway/web.md). Verifies the caller's Clerk session JWT,
+# resolves their tenant from their active Clerk organization (tenant_registry
+# below, NOT a values.yaml list — registering a tenant must never require
+# redeploying this chart), and reverse-proxies to that tenant's own
+# per-namespace Gateway/agent-brain. Holds no tenant credential itself.
+router:
+  enabled: false
+  image:
+    repository: "gcr.io/kumarabd/agent-harness/router"
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  port: 8080
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # -- Same "reuse agent-web's existing Clerk integration" resolution as
+  # agent-harness-tenant's gateway.web.clerkJwksUrl/clerkIssuer (that
+  # chart's own comment has the full reasoning) — REQUIRED, one of the two.
+  # As of the single-shared-Clerk-project migration (docs/components/
+  # gateway/web.md), this is the ONE issuer every tenant's own Gateway/
+  # agent-brain now verify against too, not a separate value per tenant.
+  clerkJwksUrl: ""
+  clerkIssuer: ""
+  # -- REQUIRED when agentWeb.enabled=true (web-deployment.yaml's own `fail`
+  # guard) — 2026-09-24: the router's real public URL (e.g.
+  # "https://api.example.com"), not its in-cluster Service name. Consumed by
+  # agent-web as ROUTER_PUBLIC_URL — the browser now calls this router
+  # directly instead of going through agent-web's own nginx as a same-origin
+  # proxy (docs/components/gateway/web.md's "Resolved: Shared agent-web +
+  # Identity-Routing Router"), so it needs a real, publicly-reachable
+  # address. Requires router.ingress (below) enabled and pointed at this
+  # same host, or some other externally-managed ingress doing the same job.
+  publicURL: ""
+  # -- CORS — REQUIRED (in practice) alongside publicURL above: the browser
+  # request from agent-web's own public origin is genuinely cross-origin
+  # now, so this router must explicitly allow it (workflows/internal/router/
+  # core/cors.go). Set to agent-web's own public origin (scheme+host, no
+  # path, e.g. "https://app.example.com") — or "*" to allow any origin, not
+  # recommended once this handles real tenant traffic. Comma-separated if
+  # more than one.
+  allowedOrigins: []
+  # -- Exposes this router outside the cluster — the browser calls it
+  # directly now (see publicURL's own comment), so unlike loop-worker or
+  # tenant-worker this can't stay purely internal-cluster-DNS once
+  # agentWeb.enabled=true. Same shape as the one other Ingress precedent
+  # that exists anywhere in either repo (agent-web's OWN
+  # charts/agent-web/templates/ingress.yaml) — mirrored deliberately rather
+  # than inventing a new convention.
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: api.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+connectionAutomation:
+  # Opt in only after deploying a hub image with /api/backends support.
+  enabled: false
+  image:
+    repository: "gcr.io/kumarabd/agent-harness/automation"
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  temporalNamespace: "system"
+  taskQueue: "connection-automation"
+  # Explicit Kubernetes namespaces, not Temporal namespaces. Each receives
+  # a namespaced Role/RoleBinding; the worker cannot create namespaces.
+  allowedTenantNamespaces: []
+  resources: {}
+
+# -- Self-serve tenant onboarding (docs/components/gateway/web.md's Phase
+# 2, workflows/cmd/automation) — TenantOnboardingWorkflow, run on this
+# worker's own "system" Temporal namespace/task queue. A SEPARATE binary
+# and image from connectionAutomation above (different purpose: this one
+# creates whole new tenant namespaces/Helm releases via a cluster-scoped
+# ClusterRole, connectionAutomation acts only within already-onboarded
+# tenant namespaces named in its own allowedTenantNamespaces) — deliberately
+# a different image repository so the two are never accidentally deployed
+# from the same tag.
+automation:
+  enabled: false
+  image:
+    repository: "gcr.io/kumarabd/agent-harness/tenant-automation"
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # -- This worker's own dedicated Temporal namespace/task queue — NOT one
+  # of temporal.namespaces above (that list is loop-worker's tenant
+  # namespaces). Both this and connectionAutomation happen to use the same
+  # "system" namespace (the shared control-plane namespace, plural
+  # workflows can live in it) but different task queues, so neither
+  # worker's activities are ever dispatched to the other.
+  temporalNamespace: "system"
+  taskQueue: "system"
+  # -- Temporal namespace retention for every NEW tenant namespace this
+  # worker creates (RegisterTemporalNamespaceActivity) — not this worker's
+  # own namespace's retention, which is set once, out of band, when
+  # "system" itself is created.
+  namespaceRetentionDays: 30
+  # -- Baked into this worker's own image (deploy/docker/automation.Dockerfile)
+  # — the actual chart sources `helm upgrade --install` runs against.
+  tenantChartDir: "/charts/agent-harness-tenant"
+  sharedChartDir: "/charts/agent-harness-shared"
+  # -- Must match agent-harness-tenant/values.yaml's own gateway.port /
+  # agent-brain subchart defaults — written into every new tenant's
+  # tenant_registry row (HealthCheckActivity also polls these ports
+  # directly). Only need to change these if that chart's own defaults ever
+  # do.
+  tenantGatewayPort: 8090
+  tenantAgentBrainPort: 8080
+  # -- REQUIRED when automation.enabled=true (automation-secret.yaml's own
+  # `fail` guard) — Clerk's Backend API key, for CreateClerkOrganization
+  # (workflows/internal/automation/activities/clerk.go). The FIRST real
+  # Clerk secret key anywhere in this codebase; do NOT commit a real value
+  # here — set it per-cluster in whatever this deployment's real values
+  # override is, same discipline as every other secret in this file.
+  clerkSecretKey: ""
+
+# -- The router's OWN Postgres — tenant_registry/tenant_onboarding_* only
+# (files/*.sql), never any tenant's own data. A real Bitnami dependency
+# (Chart.yaml), the stock image (no pgvector/timescaledb extensions needed
+# here, unlike agent-harness-tenant's own postgresql block). Shared by the
+# router and the automation worker above — same control-plane database,
+# not two separate ones.
+postgresql:
+  auth:
+    # -- Do NOT commit real passwords here — set real values in whatever
+    # this cluster's real values override for this release is, same
+    # discipline as agent-harness-tenant's own postgresql.auth comment.
+    postgresPassword: ""
+    username: "router"
+    password: ""
+    database: "router"
+  primary:
+    persistence:
+      size: "1Gi"

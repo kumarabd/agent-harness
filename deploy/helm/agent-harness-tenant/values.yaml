@@ -196,34 +196,17 @@ gateway:
   tolerations: []
   affinity: {}
 
-# -- This tenant's own agent-web instance (chat UI + agent-brain memory
-# explorer) — a plain template in THIS chart (templates/agent-web-*.yaml),
-# deliberately NOT the standalone agent-web/charts/agent-web subchart: the
-# only thing a tenant needs to control here is which agent-brain/gateway
-# URLs it points at, both already computable from values this chart already
-# has (agent-brain's own nameOverride, gateway.port below) — no shared
-# dependency-management benefit a real subchart would give the way
-# agent-brain/mcp-hub's actually-third-party charts get from being subcharts.
-# Uses the PUBLISHED agent-web image (ghcr.io/realnighthawk/agent-web) —
-# this repo doesn't build or own that image; see values.yaml's own comment
-# on `image.tag` below before enabling.
-agentWeb:
-  enabled: false
-  image:
-    repository: "ghcr.io/realnighthawk/agent-web"
-    # -- No default that's known-good for THIS chart's own use of the image:
-    # the chat page (docs/components/gateway/web.md) and its /gateway/ nginx
-    # proxy were added to agent-web's source this same session but have not
-    # yet been built into any published tag — set this to whatever tag
-    # agent-web's own CI (.gitlab-ci.yml) publishes once that lands, not
-    # left at a stale default here.
-    tag: "internal"
-    pullPolicy: IfNotPresent
-  replicaCount: 1
-  resources: {}
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}
+# -- agent-web (chat UI + agent-brain memory explorer) moved OUT of this
+# chart entirely (2026-09-24) — it's now a single shared deployment in
+# ../agent-harness-shared, fronted by a new shared router that resolves the
+# right tenant per request from the caller's Clerk org membership, instead
+# of one agent-web instance per tenant hardcoding this tenant's own
+# agent-brain/gateway URLs. See ../agent-harness-shared/values.yaml's
+# `agentWeb`/`router` blocks and docs/components/gateway/web.md. This
+# tenant's own Gateway (gateway.* below) is UNCHANGED — still per-tenant,
+# still holds only this tenant's own credentials; the router forwards to it
+# by Service DNS name and never re-verifies/re-issues auth, it just resolves
+# "which tenant".
 
 # -- One self-hosted Postgres instance for this tenant — now a real subchart
 # dependency (Bitnami's postgresql, same as ../../../infra/postgres's own

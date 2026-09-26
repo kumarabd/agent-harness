@@ -1,0 +1,92 @@
+{{- if .Values.router.enabled -}}
+{{- if and (not .Values.router.clerkJwksUrl) (not .Values.router.clerkIssuer) }}
+{{- fail "router.clerkJwksUrl or router.clerkIssuer is required when router.enabled=true — the router can't verify any session token without one." }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "router") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "router") | nindent 4 }}
+spec:
+  replicas: {{ .Values.router.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "router") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "router") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "agent-harness.fullname" . }}
+      # This process talks to its own tenant_registry Postgres and, per
+      # request, to other tenants' Gateway/agent-brain Services by DNS name
+      # — never the Kubernetes API itself (workflows/cmd/router/main.go).
+      automountServiceAccountToken: false
+      containers:
+        - name: router
+          image: "{{ .Values.router.image.repository }}:{{ .Values.router.image.tag }}"
+          imagePullPolicy: {{ .Values.router.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.router.port }}
+          env:
+            - name: CONNECTION_AUTOMATION_ENABLED
+              value: {{ .Values.connectionAutomation.enabled | quote }}
+            - name: ROUTER_BIND_ADDRESS
+              value: {{ printf "0.0.0.0:%d" (int .Values.router.port) | quote }}
+            # This chart's OWN postgresql subchart (Chart.yaml) — the
+            # router's tenant_registry table, never a tenant's own Postgres.
+            # Same Bitnami-generated Service/Secret naming as
+            # agent-harness-tenant's identical pattern.
+            - name: POSTGRES_HOST
+              value: "{{ .Release.Name }}-postgresql"
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .Release.Name }}-postgresql"
+                  key: password
+            # Same non-secret JWKS-only verification as agent-harness-tenant's
+            # gateway.web.clerkJwksUrl/clerkIssuer — see that chart's own
+            # comment for the full reasoning (no Clerk secret key anywhere).
+            {{- if .Values.router.clerkJwksUrl }}
+            - name: CLERK_JWKS_URL
+              value: {{ .Values.router.clerkJwksUrl | quote }}
+            {{- end }}
+            {{- if .Values.router.clerkIssuer }}
+            - name: CLERK_ISSUER
+              value: {{ .Values.router.clerkIssuer | quote }}
+            {{- end }}
+            # 2026-09-24 — the browser now calls this router directly
+            # (agent-web's own nginx no longer reverse-proxies in front of
+            # it, docs/components/gateway/web.md's "Resolved: Shared
+            # agent-web + Identity-Routing Router"), making this genuinely
+            # cross-origin traffic for the first time in this codebase.
+            # Comma-separated exact origins, or "*" — same parsing as
+            # workflows/internal/gateway/web/web.go's sibling
+            # GATEWAY_WEB_ALLOWED_ORIGINS (workflows/internal/router/core/cors.go).
+            {{- if .Values.router.allowedOrigins }}
+            - name: ROUTER_ALLOWED_ORIGINS
+              value: {{ join "," .Values.router.allowedOrigins | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.router.resources | nindent 12 }}
+      {{- with .Values.router.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.router.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.router.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

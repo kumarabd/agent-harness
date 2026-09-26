@@ -1,0 +1,61 @@
+{{- if .Values.automation.enabled -}}
+# The single biggest new privilege surface in this codebase
+# (docs/components/gateway/web.md's Phase 2) — isolated to this one
+# ServiceAccount only, never the shared bare SA loop-worker/web/router use
+# (deploy/helm/agent-harness-shared/templates/serviceaccount.yaml, which
+# stays automountServiceAccountToken: false — every OTHER workload in this
+# chart still never calls the Kubernetes API). This worker shells out to
+# kubectl/helm (workflows/internal/automation/activities/exec.go) to
+# provision a whole tenant namespace + Helm release on a self-serve
+# request, so it genuinely needs broad-but-scoped cluster permissions —
+# documented here rather than left implicit.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "automation") | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "automation") | nindent 4 }}
+rules:
+  # Namespace creation itself — CreateK8sNamespaceActivity.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create"]
+  # Everything `helm upgrade --install` needs to manage every resource kind
+  # agent-harness-tenant (and its postgresql/agent-brain/mcp-hub
+  # dependencies) actually renders — Deployments/StatefulSets, their
+  # Services/Secrets/ConfigMaps/ServiceAccounts/PVCs, and the migrate/
+  # init-roles Jobs. Scoped to these resource kinds, not a blanket "*", but
+  # cluster-wide since a new tenant's namespace doesn't exist yet when this
+  # worker first needs to act in it.
+  - apiGroups: [""]
+    resources: ["services", "secrets", "configmaps", "persistentvolumeclaims", "serviceaccounts", "pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "automation") | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

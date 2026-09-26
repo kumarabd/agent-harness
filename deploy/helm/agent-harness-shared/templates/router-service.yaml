@@ -1,0 +1,16 @@
+{{- if .Values.router.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "router") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "router") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "router") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.router.port }}
+      targetPort: http
+{{- end }}

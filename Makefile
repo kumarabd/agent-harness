@@ -28,23 +28,39 @@ GATEWAY_IMAGE_NAME := $(call yaml_field,$(TENANT_VALUES_FILE),['gateway']['image
 # it's a sidecar container in the gateway pod, not its own top-level chart
 # section).
 VAD_IMAGE_NAME     := $(call yaml_field,$(TENANT_VALUES_FILE),['gateway']['vadSidecar']['image']['repository'])
+# docs/components/gateway/web.md — the shared, identity-routing front door
+# for agent-web, added to agent-harness-shared (not agent-harness-tenant)
+# 2026-09-24: it's a cluster-wide singleton like loop-worker, not per-tenant.
+ROUTER_IMAGE_NAME  := $(call yaml_field,$(SHARED_VALUES_FILE),['router']['image']['repository'])
+# docs/components/gateway/web.md's Phase 2 — self-serve tenant onboarding.
+# Deliberately its own image repository, distinct from the separate
+# connectionAutomation.image this chart's values.yaml also has (same
+# "automation" family name, different worker/purpose — see automation's own
+# values.yaml comment).
+AUTOMATION_IMAGE_NAME := $(call yaml_field,$(SHARED_VALUES_FILE),['automation']['image']['repository'])
 
 ifeq ($(TAG),)
 LOOP_IMAGE_TAG     := $(call yaml_field,$(SHARED_VALUES_FILE),['image']['tag'])
 TENANT_IMAGE_TAG   := $(call yaml_field,$(TENANT_VALUES_FILE),['tenantWorker']['image']['tag'])
 GATEWAY_IMAGE_TAG  := $(call yaml_field,$(TENANT_VALUES_FILE),['gateway']['image']['tag'])
 VAD_IMAGE_TAG      := $(call yaml_field,$(TENANT_VALUES_FILE),['gateway']['vadSidecar']['image']['tag'])
+ROUTER_IMAGE_TAG   := $(call yaml_field,$(SHARED_VALUES_FILE),['router']['image']['tag'])
+AUTOMATION_IMAGE_TAG := $(call yaml_field,$(SHARED_VALUES_FILE),['automation']['image']['tag'])
 else
 LOOP_IMAGE_TAG     := $(TAG)
 TENANT_IMAGE_TAG   := $(TAG)
 GATEWAY_IMAGE_TAG  := $(TAG)
 VAD_IMAGE_TAG      := $(TAG)
+ROUTER_IMAGE_TAG   := $(TAG)
+AUTOMATION_IMAGE_TAG := $(TAG)
 endif
 
 LOOP_IMAGE    := $(LOOP_IMAGE_NAME):$(LOOP_IMAGE_TAG)
 TENANT_IMAGE  := $(TENANT_IMAGE_NAME):$(TENANT_IMAGE_TAG)
 GATEWAY_IMAGE := $(GATEWAY_IMAGE_NAME):$(GATEWAY_IMAGE_TAG)
 VAD_IMAGE     := $(VAD_IMAGE_NAME):$(VAD_IMAGE_TAG)
+ROUTER_IMAGE  := $(ROUTER_IMAGE_NAME):$(ROUTER_IMAGE_TAG)
+AUTOMATION_IMAGE := $(AUTOMATION_IMAGE_NAME):$(AUTOMATION_IMAGE_TAG)
 
 # Exported tar filenames use just the last path component of the repository
 # (e.g. gcr.io/kumarabd/agent-harness/loop-worker -> loop-worker) — the full
@@ -53,9 +69,11 @@ LOOP_TAR    := $(EXPORT_DIR)/$(notdir $(LOOP_IMAGE_NAME))-$(LOOP_IMAGE_TAG).tar
 TENANT_TAR  := $(EXPORT_DIR)/$(notdir $(TENANT_IMAGE_NAME))-$(TENANT_IMAGE_TAG).tar
 GATEWAY_TAR := $(EXPORT_DIR)/$(notdir $(GATEWAY_IMAGE_NAME))-$(GATEWAY_IMAGE_TAG).tar
 VAD_TAR     := $(EXPORT_DIR)/$(notdir $(VAD_IMAGE_NAME))-$(VAD_IMAGE_TAG).tar
+ROUTER_TAR  := $(EXPORT_DIR)/$(notdir $(ROUTER_IMAGE_NAME))-$(ROUTER_IMAGE_TAG).tar
+AUTOMATION_TAR := $(EXPORT_DIR)/$(notdir $(AUTOMATION_IMAGE_NAME))-$(AUTOMATION_IMAGE_TAG).tar
 
-.PHONY: help build build-loop-worker build-tenant-worker build-gateway build-vad-sidecar \
-        export export-loop-worker export-tenant-worker export-gateway export-vad-sidecar \
+.PHONY: help build build-loop-worker build-tenant-worker build-gateway build-vad-sidecar build-router build-automation \
+        export export-loop-worker export-tenant-worker export-gateway export-vad-sidecar export-router export-automation \
         clean clean-images clean-exports
 
 help: ## Show this help
@@ -65,6 +83,8 @@ help: ## Show this help
 	@echo "  tenant worker: $(TENANT_IMAGE)  ($(TENANT_VALUES_FILE))"
 	@echo "  gateway:       $(GATEWAY_IMAGE)  ($(TENANT_VALUES_FILE))"
 	@echo "  vad-sidecar:   $(VAD_IMAGE)  ($(TENANT_VALUES_FILE), gateway.vadSidecar.image)"
+	@echo "  router:        $(ROUTER_IMAGE)  ($(SHARED_VALUES_FILE))"
+	@echo "  automation:    $(AUTOMATION_IMAGE)  ($(SHARED_VALUES_FILE), automation.image)"
 	@echo
 	@echo "Not covered here: infra/model/whisperlive/Dockerfile — a separate"
 	@echo "repo's own image (self-hosted third-party infra, not an"
@@ -72,7 +92,7 @@ help: ## Show this help
 	@echo
 	@grep -E '^[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*##"}; {printf "  %-24s %s\n", $$1, $$2}'
 
-build: build-loop-worker build-tenant-worker build-gateway build-vad-sidecar ## Build all four images
+build: build-loop-worker build-tenant-worker build-gateway build-vad-sidecar build-router build-automation ## Build all six images
 
 build-loop-worker: ## Build the Go loop-worker image
 	podman build -f deploy/docker/loop-worker.Dockerfile -t $(LOOP_IMAGE) .
@@ -86,7 +106,13 @@ build-gateway: ## Build the Go gateway image
 build-vad-sidecar: ## Build the Silero VAD sidecar image
 	podman build -f deploy/docker/vad-sidecar.Dockerfile -t $(VAD_IMAGE) .
 
-export: export-loop-worker export-tenant-worker export-gateway export-vad-sidecar ## Build and export all four images as tars under $(EXPORT_DIR)
+build-router: ## Build the Go router image
+	podman build -f deploy/docker/router.Dockerfile -t $(ROUTER_IMAGE) .
+
+build-automation: ## Build the Go automation (tenant onboarding) worker image
+	podman build -f deploy/docker/automation.Dockerfile -t $(AUTOMATION_IMAGE) .
+
+export: export-loop-worker export-tenant-worker export-gateway export-vad-sidecar export-router export-automation ## Build and export all six images as tars under $(EXPORT_DIR)
 
 export-loop-worker: build-loop-worker ## Build and export the loop-worker image
 	mkdir -p $(EXPORT_DIR)
@@ -108,10 +134,20 @@ export-vad-sidecar: build-vad-sidecar ## Build and export the vad-sidecar image
 	rm -f $(VAD_TAR)
 	podman save -o $(VAD_TAR) $(VAD_IMAGE)
 
+export-router: build-router ## Build and export the router image
+	mkdir -p $(EXPORT_DIR)
+	rm -f $(ROUTER_TAR)
+	podman save -o $(ROUTER_TAR) $(ROUTER_IMAGE)
+
+export-automation: build-automation ## Build and export the automation worker image
+	mkdir -p $(EXPORT_DIR)
+	rm -f $(AUTOMATION_TAR)
+	podman save -o $(AUTOMATION_TAR) $(AUTOMATION_IMAGE)
+
 clean-exports: ## Remove exported image tars
 	rm -rf $(EXPORT_DIR)
 
 clean-images: ## Remove the locally built images from Podman's store
-	-podman rmi $(LOOP_IMAGE) $(TENANT_IMAGE) $(GATEWAY_IMAGE) $(VAD_IMAGE)
+	-podman rmi $(LOOP_IMAGE) $(TENANT_IMAGE) $(GATEWAY_IMAGE) $(VAD_IMAGE) $(ROUTER_IMAGE) $(AUTOMATION_IMAGE)
 
 clean: clean-exports clean-images ## Remove all exported tars and built images

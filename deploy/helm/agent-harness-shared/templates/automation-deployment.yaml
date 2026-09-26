@@ -1,0 +1,123 @@
+{{- if .Values.automation.enabled -}}
+{{- if and (not .Values.router.clerkJwksUrl) (not .Values.router.clerkIssuer) }}
+{{- fail "router.clerkJwksUrl or router.clerkIssuer is required when automation.enabled=true — every tenant this worker provisions gets that same shared issuer written into its own gateway.web.clerkIssuer (workflows/internal/automation/activities/helm.go)." }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "automation") | nindent 4 }}
+spec:
+  # Deliberately 1, not configurable up like other components here — two
+  # replicas would double-poll the same "system" task queue, which Temporal
+  # itself handles fine (activities are still dispatched to exactly one
+  # worker), but there is no throughput reason to run more than one for a
+  # feature whose whole premise is "tenant onboarding is a slow, deliberate
+  # event" (docs/components/multi-tenancy.md), and it keeps this worker's
+  # unusually broad RBAC (automation-rbac.yaml) running in the fewest
+  # possible places.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "automation") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "automation") | nindent 8 }}
+      {{- if .Values.metrics.enabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.metrics.port | quote }}
+        prometheus.io/path: {{ .Values.metrics.path | quote }}
+      {{- end }}
+    spec:
+      # The one workload in this chart that DOES need real Kubernetes API
+      # access — automation-rbac.yaml's own comment has the full reasoning.
+      serviceAccountName: {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}
+      automountServiceAccountToken: true
+      containers:
+        - name: automation
+          image: "{{ .Values.automation.image.repository }}:{{ .Values.automation.image.tag }}"
+          imagePullPolicy: {{ .Values.automation.image.pullPolicy }}
+          {{- if .Values.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+          {{- end }}
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: {{ .Values.temporal.address | quote }}
+            # This worker's OWN dedicated namespace — deliberately NOT one of
+            # temporal.namespaces above (that list is loop-worker's tenant
+            # namespaces; this is the control-plane namespace, separate task
+            # queue, see workflows/cmd/automation/main.go's own comment).
+            - name: TEMPORAL_NAMESPACE
+              value: {{ .Values.automation.temporalNamespace | quote }}
+            - name: TEMPORAL_TASK_QUEUE
+              value: {{ .Values.automation.taskQueue | quote }}
+            - name: TENANT_NAMESPACE_RETENTION_DAYS
+              value: {{ .Values.automation.namespaceRetentionDays | quote }}
+            - name: TENANT_CHART_DIR
+              value: {{ .Values.automation.tenantChartDir | quote }}
+            - name: SHARED_CHART_DIR
+              value: {{ .Values.automation.sharedChartDir | quote }}
+            # This chart's own release name/namespace — always knowable from
+            # .Release, never a value someone has to remember to set to
+            # match how this same chart was actually installed.
+            - name: SHARED_RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+            - name: SHARED_RELEASE_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: TENANT_GATEWAY_PORT
+              value: {{ .Values.automation.tenantGatewayPort | quote }}
+            - name: TENANT_AGENT_BRAIN_PORT
+              value: {{ .Values.automation.tenantAgentBrainPort | quote }}
+            # Same single shared Clerk project every tenant's own Gateway
+            # verifies against (router-deployment.yaml's identical value) —
+            # written into every generated tenant's gateway.web.clerkIssuer.
+            {{- if .Values.router.clerkJwksUrl }}
+            - name: CLERK_JWKS_URL
+              value: {{ .Values.router.clerkJwksUrl | quote }}
+            {{- end }}
+            {{- if .Values.router.clerkIssuer }}
+            - name: CLERK_ISSUER
+              value: {{ .Values.router.clerkIssuer | quote }}
+            {{- end }}
+            - name: CLERK_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}
+                  key: clerk-secret-key
+            # This chart's OWN postgresql subchart (Chart.yaml) — the same
+            # tenant_registry/tenant_onboarding_* database the router itself
+            # reads/writes (workflows/internal/onboarding), never a tenant's
+            # own Postgres.
+            - name: POSTGRES_HOST
+              value: "{{ .Release.Name }}-postgresql"
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .Release.Name }}-postgresql"
+                  key: password
+          resources:
+            {{- toYaml .Values.automation.resources | nindent 12 }}
+      {{- with .Values.automation.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.automation.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.automation.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
