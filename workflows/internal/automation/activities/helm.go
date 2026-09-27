@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -47,12 +48,15 @@ func (a *Activities) readStagedSecret(ctx context.Context, requestID string) (ma
 // automatically rather than hand-copied. Deliberately narrow: storage
 // class/access mode and per-backend mcp-hub OAuth manifests are left at
 // chart defaults — see docs/components/gateway/web.md's Phase 2 section for
-// why those stayed out of a v1 onboarding form. Pure and side-effect-free
-// (no exec, no I/O) specifically so a values-schema gap like the
-// agent-brain.llm/.temporal one below can be caught by a unit test instead
-// of only by manually cross-referencing every field against a real tenant's
-// working values.yaml — which is how both were actually found.
-func buildTenantValues(ref PublicRef, clerkIssuer, webOrigin, temporalAddress, tenantTemporalNamespace string, secrets map[string]string) (map[string]any, error) {
+// why those stayed out of a v1 onboarding form. mcp-hub's own OAuth
+// redirect base URL (oauth.mcpHubBaseUrl) is NOT left at that default,
+// though (see routerPublicURL below) — that default points at an unrelated,
+// pre-existing standalone mcp-hub instance, not this tenant's own. Pure and
+// side-effect-free (no exec, no I/O) specifically so a values-schema gap
+// like the agent-brain.llm/.temporal one below can be caught by a unit test
+// instead of only by manually cross-referencing every field against a real
+// tenant's working values.yaml — which is how both were actually found.
+func buildTenantValues(ref PublicRef, clerkIssuer, webOrigin, routerPublicURL, temporalAddress, tenantTemporalNamespace string, secrets map[string]string) (map[string]any, error) {
 	var llmTiers map[string]LLMTier
 	if err := json.Unmarshal([]byte(secrets[keyLLMTiersJSON]), &llmTiers); err != nil {
 		return nil, fmt.Errorf("decode staged llm tiers: %w", err)
@@ -141,6 +145,25 @@ func buildTenantValues(ref PublicRef, clerkIssuer, webOrigin, temporalAddress, t
 			// hand-written tenant files.
 			"host": fmt.Sprintf("postgresql.%s.svc.cluster.local", ref.TenantSlug),
 		},
+		// mcp-hub's own oauth_start/oauth_callback (src/mcp_hub/server.py)
+		// build an OAuth backend's redirect_uri from this base URL when the
+		// connection didn't set one explicitly (the common case — see
+		// mcp-hub's own registry.py comment on "managed connections"). It
+		// MUST route through the shared router's unauthenticated
+		// GET /hub/{tenant}/oauth/{backend}/callback (proxy.go's
+		// handleOAuthCallback), not point at this tenant's mcp-hub directly
+		// — the OAuth provider's redirect back carries no Clerk bearer
+		// token, so only the tenant slug embedded in this path lets the
+		// router know whose mcp-hub instance to proxy the callback to.
+		// Left unset, this falls through to the mcp-hub chart's own
+		// default (infra/mcp-hub/chart/values.yaml's oauth.mcpHubBaseUrl)
+		// — an unrelated, pre-existing standalone mcp-hub instance's own
+		// hostname, so the provider completes consent against THAT
+		// instance instead, which has no record of this tenant's pending
+		// state ("Invalid or expired state").
+		"oauth": map[string]any{
+			"mcpHubBaseUrl": fmt.Sprintf("%s/hub/%s", strings.TrimRight(routerPublicURL, "/"), ref.TenantSlug),
+		},
 	}
 	if key := secrets[keyLiteLLMAPIKey]; key != "" {
 		agentBrainSecret["litellmAPIKey"] = key
@@ -200,7 +223,7 @@ func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error
 		return err
 	}
 
-	values, err := buildTenantValues(ref, a.ClerkIssuer, a.WebOrigin, a.TemporalAddress, a.TenantTemporalNamespace, secrets)
+	values, err := buildTenantValues(ref, a.ClerkIssuer, a.WebOrigin, a.RouterPublicURL, a.TemporalAddress, a.TenantTemporalNamespace, secrets)
 	if err != nil {
 		return err
 	}

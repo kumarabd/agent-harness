@@ -102,6 +102,7 @@ func main() {
 		SharedNamespace:         envOrDefault("SHARED_RELEASE_NAMESPACE", "agents"),
 		ClerkIssuer:             os.Getenv("CLERK_ISSUER"),
 		WebOrigin:               os.Getenv("WEB_ORIGIN"),
+		RouterPublicURL:         os.Getenv("ROUTER_PUBLIC_URL"),
 		GatewayPort:             envIntOrDefault("TENANT_GATEWAY_PORT", 8090),
 		AgentBrainPort:          envIntOrDefault("TENANT_AGENT_BRAIN_PORT", 8080),
 	}
@@ -110,6 +111,9 @@ func main() {
 	}
 	if a.WebOrigin == "" {
 		log.Fatalf("WEB_ORIGIN is required — every generated tenant's gateway.web.allowedOrigins comes from this (agent-web's own public origin, e.g. https://mission-control.nighthawklabs.org)")
+	}
+	if a.RouterPublicURL == "" {
+		log.Fatalf("ROUTER_PUBLIC_URL is required — every generated tenant's mcp-hub.oauth.mcpHubBaseUrl comes from this (the shared router's own public URL, e.g. https://harness-router.nighthawklabs.org), without which every self-serve tenant's OAuth backends (e.g. Notion) complete consent against the wrong mcp-hub instance")
 	}
 
 	taskQueue := envOrDefault("TEMPORAL_TASK_QUEUE", "system")

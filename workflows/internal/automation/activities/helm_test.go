@@ -46,7 +46,7 @@ func TestBuildTenantValuesSetsAgentBrainLLMFromMediumTier(t *testing.T) {
 		"medium": {Provider: "openai", Model: "medium-model", BaseURL: "https://medium.example"},
 	})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "https://router.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestBuildTenantValuesFallsBackWhenNoMediumTier(t *testing.T) {
 		"expert": {Provider: "openai", Model: "expert-model", BaseURL: "https://expert.example"},
 	})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "https://router.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestBuildTenantValuesSetsAgentBrainTemporalToSharedNamespace(t *testing.T) 
 	ref := PublicRef{TenantSlug: "acme"}
 	secrets := stagedSecretsFor(t, map[string]LLMTier{"medium": {Model: "m", BaseURL: "https://x"}})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal-frontend.core.svc.cluster.local:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "https://router.example", "temporal-frontend.core.svc.cluster.local:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestBuildTenantValuesPassesThroughClerkIssuer(t *testing.T) {
 	ref := PublicRef{TenantSlug: "acme"}
 	secrets := stagedSecretsFor(t, map[string]LLMTier{"medium": {Model: "m", BaseURL: "https://x"}})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "https://router.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestBuildTenantValuesOmitsEmbeddingOverrideWhenLiteLLMKeyEmpty(t *testing.T
 	})
 	secrets[keyLiteLLMAPIKey] = ""
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "https://router.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestBuildTenantValuesSetsEmbeddingOverrideWhenLiteLLMKeyGiven(t *testing.T)
 	})
 	secrets[keyLiteLLMAPIKey] = "my-own-key"
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "https://router.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestBuildTenantValuesSetsGatewayWebAllowedOrigins(t *testing.T) {
 		"medium": {Provider: "openai", Model: "medium-model", BaseURL: "https://medium.example"},
 	})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "https://router.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -186,12 +186,51 @@ func TestBuildTenantValuesSetsGatewayWebAllowedOrigins(t *testing.T) {
 	}
 }
 
+func TestBuildTenantValuesSetsMcpHubOAuthBaseURLThroughRouter(t *testing.T) {
+	ref := PublicRef{TenantSlug: "acme", RequesterUserID: "user_123"}
+	secrets := stagedSecretsFor(t, map[string]LLMTier{
+		"medium": {Provider: "openai", Model: "medium-model", BaseURL: "https://medium.example"},
+	})
+
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "https://router.example", "temporal:7233", "agents", secrets)
+	if err != nil {
+		t.Fatalf("buildTenantValues: %v", err)
+	}
+
+	// MUST route through the shared router's own unauthenticated
+	// GET /hub/{tenant}/oauth/{backend}/callback (proxy.go's
+	// handleOAuthCallback), not mcp-hub's own chart default — that default
+	// points at an unrelated, pre-existing standalone mcp-hub instance, so
+	// any tenant relying on it would complete OAuth consent (e.g. Notion)
+	// against the wrong instance entirely and fail with "Invalid or expired
+	// state" (the bug this override fixes).
+	if got := atPath(t, values, "mcp-hub", "oauth", "mcpHubBaseUrl"); got != "https://router.example/hub/acme" {
+		t.Errorf("mcp-hub.oauth.mcpHubBaseUrl = %v, want %q", got, "https://router.example/hub/acme")
+	}
+}
+
+func TestBuildTenantValuesSetsMcpHubOAuthBaseURLTrimsTrailingSlash(t *testing.T) {
+	ref := PublicRef{TenantSlug: "acme", RequesterUserID: "user_123"}
+	secrets := stagedSecretsFor(t, map[string]LLMTier{
+		"medium": {Provider: "openai", Model: "medium-model", BaseURL: "https://medium.example"},
+	})
+
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "https://router.example/", "temporal:7233", "agents", secrets)
+	if err != nil {
+		t.Fatalf("buildTenantValues: %v", err)
+	}
+
+	if got := atPath(t, values, "mcp-hub", "oauth", "mcpHubBaseUrl"); got != "https://router.example/hub/acme" {
+		t.Errorf("mcp-hub.oauth.mcpHubBaseUrl = %v, want %q (trailing slash on routerPublicURL must not produce a double slash)", got, "https://router.example/hub/acme")
+	}
+}
+
 func TestBuildTenantValuesRejectsMalformedStagedTiers(t *testing.T) {
 	ref := PublicRef{TenantSlug: "acme"}
 	secrets := stagedSecretsFor(t, nil)
 	secrets[keyLLMTiersJSON] = "not json"
 
-	if _, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets); err == nil {
+	if _, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "https://router.example", "temporal:7233", "agents", secrets); err == nil {
 		t.Fatal("expected an error decoding malformed staged llm tiers, got nil")
 	}
 }

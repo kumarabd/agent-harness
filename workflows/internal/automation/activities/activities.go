@@ -53,6 +53,23 @@ type Activities struct {
 	// is the router's own hostname by then, never agent-web's).
 	WebOrigin string
 
+	// RouterPublicURL — the shared router's real public URL (e.g.
+	// "https://harness-router.nighthawklabs.org"), same value as
+	// agent-harness-shared's router.publicURL/ROUTER_PUBLIC_URL. Written into
+	// every generated tenant's mcp-hub.oauth.mcpHubBaseUrl as
+	// "{RouterPublicURL}/hub/{tenant-slug}", so an OAuth backend's redirect_uri
+	// (mcp-hub's own oauth_start/oauth_callback, src/mcp_hub/server.py) points
+	// at the router's own unauthenticated GET /hub/{tenant}/oauth/{backend}/
+	// callback route (proxy.go's handleOAuthCallback) instead of falling
+	// through to mcp-hub's own chart default — that default is this
+	// tenant-subchart's own baked-in value (an unrelated, pre-existing
+	// standalone mcp-hub instance's hostname), so any tenant relying on it
+	// completes OAuth consent against the WRONG mcp-hub instance entirely:
+	// the provider redirects there directly, that instance has no record of
+	// this tenant's pending state, and the callback fails with "Invalid or
+	// expired state" (found 2026-09-27 debugging exactly that).
+	RouterPublicURL string
+
 	GatewayPort    int // matches agent-harness-tenant/values.yaml's gateway.port default (8090) — must match core.Tenant's own defaults on the router side
 	AgentBrainPort int // matches that chart's agent-brain subchart default (8080)
 }

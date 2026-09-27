@@ -5,6 +5,9 @@
 {{- if not .Values.router.allowedOrigins }}
 {{- fail "router.allowedOrigins is required when automation.enabled=true — every tenant this worker provisions gets it written into its own gateway.web.allowedOrigins (workflows/internal/automation/activities/helm.go, cmd/automation/main.go's own WEB_ORIGIN check), without which every browser's WebSocket upgrade to that tenant's gateway is silently rejected." }}
 {{- end }}
+{{- if not .Values.router.publicURL }}
+{{- fail "router.publicURL is required when automation.enabled=true — every tenant this worker provisions gets it written into its own mcp-hub.oauth.mcpHubBaseUrl (workflows/internal/automation/activities/helm.go, cmd/automation/main.go's own ROUTER_PUBLIC_URL check), without which that tenant's OAuth backends (e.g. Notion) complete consent against the wrong mcp-hub instance entirely." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -94,6 +97,12 @@ spec:
             # gateway.web.allowedOrigins (GATEWAY_WEB_ALLOWED_ORIGINS).
             - name: WEB_ORIGIN
               value: {{ join "," .Values.router.allowedOrigins | quote }}
+            # Same value as web-deployment.yaml's own ROUTER_PUBLIC_URL —
+            # written into every generated tenant's mcp-hub.oauth.mcpHubBaseUrl
+            # (see helm.go's buildTenantValues doc comment for why this can't
+            # be left at the mcp-hub chart's own default).
+            - name: ROUTER_PUBLIC_URL
+              value: {{ .Values.router.publicURL | quote }}
           resources:
             {{- toYaml .Values.automation.resources | nindent 12 }}
       {{- with .Values.automation.nodeSelector }}
