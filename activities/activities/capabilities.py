@@ -152,7 +152,7 @@ CAPABILITIES: list[Capability] = [
     # schema itself is generated into llm.TOOLS_SCHEMA directly from this
     # same registry (llm.py), so schema_for's existing _SCHEMA_BY_NAME[c.name]
     # lookup finds it with no changes needed there.
-    Capability(e["name"], Layer.CONTROL, _MAIN, resolved_workflow_type=e["workflow_type"])
+    Capability(e["name"], Layer.CONTROL, _MAIN, resolved_workflow_type=e["name"])
     for e in _skills_registry.SKILLS
 ]
 

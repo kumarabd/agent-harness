@@ -54,6 +54,7 @@ import (
 	"go.temporal.io/sdk/client"
 	contribtally "go.temporal.io/sdk/contrib/tally"
 	"go.temporal.io/sdk/worker"
+	temporalworkflow "go.temporal.io/sdk/workflow"
 
 	wf "agent-harness/workflows/internal/workflow"
 	skillswf "agent-harness/workflows/internal/workflow/skills"
@@ -119,14 +120,24 @@ func run(ctx context.Context, address, namespace, taskQueue string, metricsHandl
 	w.RegisterWorkflow(wf.IntentionWorkflow)
 	// docs/05-architecture-domain-control-loops.md — every "skill" lives in
 	// its own package (workflows/internal/workflow/skills/) and is
-	// registered under its own type name here; turn.go dispatches it
+	// registered under its own snake_case name here, matching
+	// activities/activities/skills.py's registry entry `name` exactly —
+	// that name IS the Temporal workflow type now (2026-09-27 collapsed the
+	// two, previously-separate "name"/"workflow_type" strings into one,
+	// closing the only way they could silently drift). turn.go dispatches
 	// dynamically by that name string (types.ToolCallRef.ResolvedWorkflowType),
 	// not by a Go-side switch, and never imports this package itself. This
 	// is the only Go-side registration a new skill needs beyond its own
-	// file. Must match the "workflow_type" declared alongside its registry
-	// entry in activities/activities/skills.py.
-	w.RegisterWorkflow(skillswf.DraftNoteSkillWorkflow)
-	w.RegisterWorkflow(skillswf.JournalingSkillWorkflow)
+	// file and its entry in workflows/internal/workflow/skills/registry.go
+	// (the gateway's own GET /skills mirror of skills.py).
+	w.RegisterWorkflowWithOptions(skillswf.JournalingSkill, temporalworkflow.RegisterOptions{Name: "journaling"})
+	w.RegisterWorkflowWithOptions(skillswf.ServiceMonitoringSkill, temporalworkflow.RegisterOptions{Name: "service_monitoring"})
+	// Keep every former type name registered during rollout so an
+	// already-open execution under one of them can continue replaying. New
+	// calls use the snake_case names above, matching skills.py directly.
+	w.RegisterWorkflowWithOptions(skillswf.JournalingSkill, temporalworkflow.RegisterOptions{Name: "JournalingSkill"})
+	w.RegisterWorkflowWithOptions(skillswf.JournalingSkill, temporalworkflow.RegisterOptions{Name: "JournalingSkillWorkflow"})
+	w.RegisterWorkflowWithOptions(skillswf.ServiceMonitoringSkill, temporalworkflow.RegisterOptions{Name: "ServiceMonitoringSkill"})
 
 	log.Printf("loop worker starting: temporal=%q namespace=%q task_queue=%q", address, namespace, taskQueue)
 

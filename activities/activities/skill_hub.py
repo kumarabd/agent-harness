@@ -38,9 +38,9 @@ _COLLECTION_PATH = "/tmp/agent-harness-skill-hub"
 _embedder: "zvec.OpenAIDenseEmbedding | None" = None
 _collection: "zvec.Collection | None" = None
 
-# name -> full registry entry ({name, description, input_schema, workflow_type}),
-# so search() can return the whole entry without round-tripping input_schema/
-# workflow_type through zvec's own doc fields (only name/description need to be
+# name -> full registry entry ({name, description, input_schema}), so
+# search() can return the whole entry without round-tripping input_schema
+# through zvec's own doc fields (only name/description need to be
 # indexed — the rest is a plain local dict lookup by name).
 _BY_NAME: dict[str, dict] = {}
 
@@ -121,9 +121,11 @@ def _fts_safe(query: str) -> str:
 
 async def search(query: str, top_k: int = 5) -> list[dict]:
     """Returns matched skill registry entries: {name, description,
-    input_schema, workflow_type}. No {server, tool} shape here — a skill
-    isn't a resolved mcp-hub/shell-hub tool identity, it's dispatched as its
-    own child workflow by turn.go, keyed by workflow_type directly."""
+    input_schema}. No {server, tool} shape here — a skill isn't a resolved
+    mcp-hub/shell-hub tool identity, it's dispatched as its own child
+    workflow by turn.go, keyed by `name` directly (2026-09-27: `name` is the
+    registered Temporal workflow type now, not a separate `workflow_type`
+    field)."""
     if _collection is None or _embedder is None:
         return []
 
@@ -149,7 +151,6 @@ async def search(query: str, top_k: int = 5) -> list[dict]:
                 "name": entry["name"],
                 "description": entry["description"],
                 "input_schema": entry["input_schema"],
-                "workflow_type": entry["workflow_type"],
             }
         )
     return matched

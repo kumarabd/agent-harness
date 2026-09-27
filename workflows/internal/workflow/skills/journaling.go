@@ -7,10 +7,10 @@ import (
 	wf "agent-harness/workflows/internal/workflow"
 )
 
-// JournalingSkillWorkflow — docs/05-architecture-domain-control-loops.md.
+// JournalingSkill — docs/05-architecture-domain-control-loops.md.
 // Records a journal entry into today's page of the user's Notion journal.
 // Registered under "journaling" in activities/activities/skills.py; must
-// have a matching w.RegisterWorkflow(skillswf.JournalingSkillWorkflow) line
+// have a matching w.RegisterWorkflow(skillswf.JournalingSkill) line
 // in cmd/loop-worker/main.go.
 //
 // Everything upstream of this skill — deciding something is journal-worthy
@@ -31,7 +31,7 @@ import (
 // interacts with Notion directly via the existing discover_tools/call_tool
 // path, and calls ask_user itself when it needs to confirm or disambiguate
 // (already durably delivered to the user's real connection, no new plumbing).
-func JournalingSkillWorkflow(ctx workflow.Context, input types.SkillWorkflowInput) (types.SkillWorkflowOutput, error) {
+func JournalingSkill(ctx workflow.Context, input types.SkillWorkflowInput) (types.SkillWorkflowOutput, error) {
 	ctx = wf.WithTenantTaskQueue(ctx, input.TenantSlug)
 	out := types.SkillWorkflowOutput{ToolCallID: input.ToolCallID}
 

@@ -20,21 +20,6 @@ package, instead of re-deriving verification from scratch every time.
 > wrote what it found into `turn_retrieval` under the turn's own id, the
 > mechanism that lets a mid-turn discovery be called by name on the next
 > step.
->
-> `discover-skill-dispatch` covers skills (docs/
-> 05-architecture-domain-control-loops.md): `draft_note` is a static,
-> always-on capability, directly callable by its own real name from turn 1 —
-> no discovery/minting step required. It scripts an (optional) `discover_skills`
-> call, then a call to `draft_note` by name, and checks
-> `tool_calls.resolved_workflow_type` and that the real `DraftNoteSkillWorkflow`
-> child ran to completion —
-> its own internal permission gate is caught by the existing `AUTO_APPROVE`
-> poller with no changes needed, since the request's `turn_id` is this
-> turn's own root id. The `skill-interrupt` chained pair covers the
-> cooperative-cancel path the same way `interrupt` does for `shell_exec`,
-> but must be run manually with `AUTO_APPROVE=0` on the `-initial` half (see
-> its own scenario file) — otherwise the always-on approver would resolve
-> the gate before the follow-up interrupt has a chance to land.
 
 ## Running it
 

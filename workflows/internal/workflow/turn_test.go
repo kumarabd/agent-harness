@@ -13,9 +13,7 @@ import (
 )
 
 // testSkillWorkflowOK/testSkillWorkflowCancel are stub domain workflows
-// registered only for these tests — they don't exercise
-// DraftNoteSkillWorkflow's own real logic (that's scenario-tested against a
-// live cluster, workflows/scenarios/), just prove turn.go's isSkill dispatch
+// registered only for these tests. They prove turn.go's isSkill dispatch
 // branch (docs/05-architecture-domain-control-loops.md, docs/components/
 // turn-pipeline.md "Skills") actually starts a child workflow of the
 // type-name STRING ModelCall resolved at mint time, awaits it, and reads its
@@ -87,7 +85,7 @@ func TestTurnWorkflow_SkillDispatch(t *testing.T) {
 		{
 			Status: "working",
 			ToolCalls: []types.ToolCallRef{
-				{ToolCallID: "t1:act:1", ToolName: "draft_note", UseSkill: "TestSkillWorkflow"},
+				{ToolCallID: "t1:act:1", ToolName: "service_monitoring", UseSkill: "TestSkillWorkflow"},
 			},
 		},
 		{Status: "done", HasContent: true},
@@ -115,7 +113,7 @@ func TestTurnWorkflow_SkillDispatch_CancelledOnInterrupt(t *testing.T) {
 		{
 			Status: "working",
 			ToolCalls: []types.ToolCallRef{
-				{ToolCallID: "t1:act:1", ToolName: "draft_note", UseSkill: "TestSkillWorkflow"},
+				{ToolCallID: "t1:act:1", ToolName: "service_monitoring", UseSkill: "TestSkillWorkflow"},
 			},
 		},
 		{Status: "done", HasContent: true},

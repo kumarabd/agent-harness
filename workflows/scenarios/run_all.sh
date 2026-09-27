@@ -87,7 +87,6 @@ SCENARIOS=(
   parallel-subagents
   real-assembly
   resolved-tool-dispatch
-  discover-skill-dispatch
   blocked-terminal
   no-progress-guard
   ceiling-raise
@@ -95,9 +94,6 @@ SCENARIOS=(
 
 # <name>-initial started, then <name>-followup signalled into the same
 # still-running session. Only <name>-followup.expect.sh is checked.
-# skill-interrupt's -initial half must run with AUTO_APPROVE=0 (see its own
-# _comment) — not run by this loop today; run it manually, same as any other
-# pair needing a non-default env var.
 CHAINED_PAIRS=(
   interrupt
   ask-user

@@ -72,6 +72,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("POST /respond", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleRespond)))
 	mux.Handle("POST /cancel", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleCancel)))
 	mux.Handle("GET /sessions", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleListSessions)))
+	mux.Handle("GET /skills", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleListSkills)))
 	// Browser authentication happens in the first WebSocket frame so this
 	// shares the native realtime protocol. Origin verification is handled by
 	// the upgrader rather than HTTP middleware.
