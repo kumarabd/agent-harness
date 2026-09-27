@@ -72,7 +72,7 @@ func corsMiddleware(cfg corsConfig, next http.Handler) http.Handler {
 			// calls; X-API-Key covers api.ts's separate token-exchange auth
 			// scheme against agent-brain — same header list agent-brain's own
 			// cors middleware allows, since both flow through this router now.
-			w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-API-Key")
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-API-Key, X-Agent-ID")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 		}
 		if r.Method == http.MethodOptions {
