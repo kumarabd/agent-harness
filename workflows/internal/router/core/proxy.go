@@ -2,12 +2,24 @@
 // Clerk identity, resolve which tenant they belong to, and reverse-proxy
 // the request to that tenant's own per-namespace Gateway, agent-brain, or
 // mcp-hub instance — docs/components/gateway/web.md's "the web becomes
-// shared, fronted by an identity-routing router" resolution. This package
-// never re-implements or weakens the downstream auth: it forwards the
-// original Authorization header unchanged, and each tenant's own
-// Gateway/agent-brain keeps verifying it exactly as before — the router
-// only ever adds one more thing in front (compute which tenant this is), it
-// never removes a check.
+// shared, fronted by an identity-routing router" resolution. This router is
+// the platform's one auth checkpoint for browser traffic: it verifies the
+// Clerk JWT once per request and stamps the verified sub onto
+// headerVerifiedUser before proxying, which agent-brain's explorer routes
+// trust directly instead of holding a session store of their own (see
+// agent-brain's auth.RouterTrustMiddleware). The original Authorization
+// header is still forwarded unchanged alongside it — Gateway independently
+// re-verifies the same Clerk JWT itself (its own auth boundary, unrelated to
+// agent-brain's former one), so that path is untouched.
+//
+// 2026-09-26: agent-brain used to exchange the Clerk JWT for its own
+// self-minted session token on first contact and expect that token on every
+// later call. Once this router started gating /brain/ with its own Clerk
+// check, that became two independent, incompatible token formats on the
+// same header — the router only ever accepted a genuine Clerk JWT, so every
+// call after the first exchange was rejected here before ever reaching
+// agent-brain. headerVerifiedUser replaces that whole exchange: one
+// checkpoint, one identity assertion, forwarded down.
 //
 // 2026-09-26: the connections service (a Go worker that shelled out to
 // `helm upgrade` to inject mcp-hub manifest config) is gone entirely —
@@ -50,6 +62,14 @@ import (
 )
 
 var errMissingToken = errors.New("missing bearer token")
+
+// headerVerifiedUser carries the Clerk sub this router already verified for
+// the current request — agent-brain's explorer routes trust it instead of
+// re-verifying credentials themselves (see the package comment above and
+// agent-brain's auth.HeaderVerifiedUser, which must be kept in sync with
+// this exact header name). Any client-supplied copy is always overwritten,
+// never merged: a caller cannot set its own identity by sending this header.
+const headerVerifiedUser = "X-Nighthawk-Verified-User"
 
 // tenantSlugPattern mirrors workflows/internal/automation/activities/
 // validate.go's own — used here only to validate an UNAUTHENTICATED path
@@ -232,10 +252,11 @@ func (s *Server) handleProxy(prefix string, target func(Tenant) string) http.Han
 			}
 			originalDirector(req)
 			// Authorization header is carried over as-is by the reverse
-			// proxy's default director (it only rewrites URL/Host) — the
-			// downstream service re-verifies the same JWT itself,
-			// deliberately: this router adds a check, it doesn't become a
-			// trusted-identity boundary on its own.
+			// proxy's default director (it only rewrites URL/Host) — Gateway
+			// still re-verifies it itself. headerVerifiedUser is this
+			// router's own added assertion, always overwritten here
+			// regardless of anything the caller sent.
+			req.Header.Set(headerVerifiedUser, sub)
 		}
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			var dnsErr *net.DNSError
@@ -257,13 +278,30 @@ func (s *Server) handleProxy(prefix string, target func(Tenant) string) http.Han
 // Clerk user id ("sub") — the one thing every proxy/onboarding route needs,
 // now that tenant identity is derived from it directly instead of an active
 // organization.
+//
+// A browser's native WebSocket constructor cannot set an Authorization
+// header on the upgrade request — there is no API for it — so
+// useGatewayThread.ts's /gateway/web/ws connection carries the Clerk token
+// as a `token` query parameter instead, only for an actual upgrade request
+// (never accepted as a substitute for the header on a normal call, so a
+// regular API request can't sidestep the header requirement this way).
+// Gateway's own realtime handler still separately verifies this same token
+// again from the WS protocol's first frame — this only gets the request
+// past the router's own tenant-routing check.
 func (s *Server) authenticateUser(r *http.Request) (userID string, err error) {
 	authHeader := r.Header.Get("Authorization")
 	token := strings.TrimPrefix(authHeader, "Bearer ")
+	if (token == "" || token == authHeader) && isWebSocketUpgrade(r) {
+		token = r.URL.Query().Get("token")
+	}
 	if token == "" || token == authHeader {
 		return "", errMissingToken
 	}
 	return clerkauth.VerifyJWT(r.Context(), s.clerkCfg, token)
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 }
 
 func writeJSONError(w http.ResponseWriter, status int, code string) {

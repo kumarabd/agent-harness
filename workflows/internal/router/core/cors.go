@@ -68,10 +68,12 @@ func corsMiddleware(cfg corsConfig, next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			// Accept/Authorization/Content-Type cover gateway.ts's Bearer-JWT
-			// calls; X-API-Key covers api.ts's separate token-exchange auth
-			// scheme against agent-brain — same header list agent-brain's own
-			// cors middleware allows, since both flow through this router now.
+			// Accept/Authorization/Content-Type/X-Agent-ID cover both
+			// gateway.ts's and api.ts's Bearer-JWT calls (both send the live
+			// Clerk token now — see proxy.go's headerVerifiedUser). X-API-Key
+			// remains for legacy/self-hosted mode, where there's no Clerk
+			// session and api.ts falls back to a pasted long-lived credential
+			// (Login.tsx's dev form) that agent-brain verifies itself.
 			w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-API-Key, X-Agent-ID")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 		}
