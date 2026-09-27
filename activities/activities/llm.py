@@ -799,6 +799,7 @@ def tools_schema_for(
     is_subagent: bool,
     resolved: "list | tuple" = (),
     offer_delivery_tools: bool = False,
+    exclude_skill_name: "str | None" = None,
 ) -> list[dict]:
     """`model_call.py`'s one call site for the model-facing tool schema. Thin
     adapter to `capabilities.schema_for`. `resolved` is the per-turn list of
@@ -807,12 +808,16 @@ def tools_schema_for(
     `offer_delivery_tools` — turn.go's delivery-recovery round — force-includes
     deliver_reply/deliver_attachment via `schema_for`'s `also`, since those two
     are never in a turn kind's default set (situational, not standing).
+
+    `exclude_skill_name` — see `capabilities.schema_for`'s own doc comment;
+    model_call.py passes the currently-running skill's own name for a caller
+    whose `parent_type` is "skill", so that skill can't call itself again.
     """
     from . import capabilities
 
     kind = capabilities.turn_kind_of(is_subagent)
     also = frozenset({"deliver_reply", "deliver_attachment"}) if offer_delivery_tools else frozenset()
-    return capabilities.schema_for(kind, resolved, also)
+    return capabilities.schema_for(kind, resolved, also, exclude_skill_name=exclude_skill_name)
 
 
 @dataclass

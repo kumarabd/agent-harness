@@ -18,8 +18,11 @@ import (
 // connected Grafana MCP capability so it can interpret the deployment's real
 // dashboards, metrics, and existing alerts.
 //
-// It is registered under "service_monitoring" in skills.py. Its first native
-// state obtains consent to investigate and set up this monitoring commitment,
+// Its declared {name, description, input_schema, visibility} lives in each
+// tenant's own Postgres `skills` table (activities/migrations/040_skills.sql
+// — name "service_monitoring", visibility "private", OFF by default — a
+// tenant opts in per-row), not in Go. Its first native state obtains consent
+// to investigate and set up this monitoring commitment,
 // which protects agent-initiated invocations as well as explicit requests.
 // The subsequent Grafana discovery/provisioning path remains on the scoped
 // reasoning bridge during the incremental migration to native states. That

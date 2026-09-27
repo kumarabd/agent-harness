@@ -192,6 +192,7 @@ def schema_for(
     kind: TurnKind,
     resolved: "list[Capability] | tuple[Capability, ...]" = (),
     also: frozenset[str] = frozenset(),
+    exclude_skill_name: "str | None" = None,
 ) -> list[dict]:
     """The model-facing tool schema for a turn: the static capabilities whose
     `turn_kinds` include `kind`, then any per-turn resolved tools appended.
@@ -200,11 +201,29 @@ def schema_for(
     `also` force-includes named capabilities regardless of `turn_kinds` —
     for capabilities like `deliver_reply`/`deliver_attachment` that are never
     part of any turn kind's default set, only offered situationally by the
-    caller (turn.go's delivery-recovery round, the plan-presentation turn)."""
+    caller (turn.go's delivery-recovery round, the plan-presentation turn).
+
+    `exclude_skill_name` — model_call.py passes the currently-running
+    skill's own name when the CALLING turn's own `parent_type` is "skill" (a
+    skill's own scoped reasoning turn, RunReasoningTurn/support.go), so that
+    one skill is omitted from that turn's own schema. Found 2026-09-27
+    debugging a real stuck production turn: skills default to
+    `turn_kinds=_MAIN` like any other always-on capability, so a skill's own
+    internal reasoning turn — which reuses this exact function — otherwise
+    offers that same skill (itself) as a callable tool, with nothing
+    stopping the model from invoking it recursively on itself; that
+    recursion has no legitimate case to weigh against (a skill's own
+    workflow already owns its retries/approval gate/finish condition).
+    Deliberately narrow — only the one skill currently running is excluded,
+    not every registered skill: a skill legitimately composing a
+    DIFFERENT skill from its own reasoning turn is a real, intentionally
+    unforeclosed case, unlike calling itself again mid-flight."""
     from .llm import _SCHEMA_BY_NAME, _SPAWN_SUBAGENT_NESTED_SCHEMA  # lazy — avoids an import cycle
 
     out: list[dict] = []
     for c in CAPABILITIES:
+        if exclude_skill_name is not None and c.name == exclude_skill_name:
+            continue
         if kind not in c.turn_kinds and c.name not in also:
             continue
         if kind is TurnKind.SUBAGENT and c.has_subagent_variant:

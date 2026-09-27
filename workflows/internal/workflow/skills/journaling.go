@@ -12,9 +12,11 @@ import (
 
 // JournalingSkill — docs/05-architecture-domain-control-loops.md.
 // Records a journal entry into today's page of the user's Notion journal.
-// Registered under "journaling" in activities/activities/skills.py; must
-// have a matching w.RegisterWorkflow(skillswf.JournalingSkill) line
-// in cmd/loop-worker/main.go.
+// Its declared {name, description, input_schema, visibility} lives in each
+// tenant's own Postgres `skills` table (activities/migrations/040_skills.sql
+// — name "journaling", visibility "public", enabled by default), not in Go;
+// must have a matching w.RegisterWorkflowWithOptions(skillswf.JournalingSkill,
+// workflow.RegisterOptions{Name: "journaling"}) line in cmd/loop-worker/main.go.
 //
 // Everything upstream of this skill — deciding something is journal-worthy
 // vs. just thinking out loud, resolving what the user is referring to via

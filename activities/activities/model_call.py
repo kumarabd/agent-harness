@@ -77,7 +77,7 @@ class ModelCallActivity:
             # (InsertMessage created it); `_test_scripted_responses.content` is
             # NOT NULL, so a NULL here means no fixture matched.
             head = await conn.fetchrow(
-                "SELECT t.parent_type, s.content, s.tool_calls, s.usage, s.status, s.next_step "
+                "SELECT t.parent_type, t.parent_id, s.content, s.tool_calls, s.usage, s.status, s.next_step "
                 "FROM turns t "
                 "LEFT JOIN _test_scripted_responses s ON s.turn_id = t.turn_id AND s.seq = $2 "
                 "WHERE t.turn_id = $1",
@@ -92,6 +92,29 @@ class ModelCallActivity:
             # shadow this one inside the loop.
             caller_is_subagent = bool(head and head["parent_type"] == "turn")
             fixture = head if (head and head["content"] is not None) else None
+
+            # A skill's own scoped reasoning turn (RunReasoningTurn/support.go,
+            # parent_type "skill") must never be able to call ITSELF again —
+            # found 2026-09-27 debugging a real stuck production turn: the
+            # journaling skill's own reasoning turn called `journaling` on
+            # itself recursively, since nothing excluded it from that turn's
+            # own schema. Only the currently-running skill is excluded, not
+            # every registered skill — a skill legitimately composing a
+            # DIFFERENT skill is a real future case this shouldn't foreclose;
+            # self-recursion has no legitimate case to weigh against (a
+            # skill's own workflow already owns its retries/approval
+            # gate/finish condition — calling itself again while still
+            # running can't accomplish anything that isn't already its own
+            # job). `turns.parent_id` for a parent_type="skill" row IS the
+            # tool_call_id of the skill invocation that spawned it
+            # (support.go's InsertMessageInput.ParentID) — one extra lookup,
+            # only on this rare path, to name it.
+            caller_skill_name: str | None = None
+            if head and head["parent_type"] == "skill":
+                skill_row = await conn.fetchrow(
+                    "SELECT tool_name FROM tool_calls WHERE tool_call_id = $1", head["parent_id"]
+                )
+                caller_skill_name = skill_row["tool_name"] if skill_row else None
 
             if fixture is not None:
                 content: str = fixture["content"]
@@ -186,6 +209,7 @@ class ModelCallActivity:
                     caller_is_subagent,
                     resolved=resolved,
                     offer_delivery_tools=input.offer_delivery_tools,
+                    exclude_skill_name=caller_skill_name,
                 )
 
                 # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
