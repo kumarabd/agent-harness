@@ -1495,6 +1495,34 @@ loop:
 				break loop
 			}
 
+			if len(*in.PendingMessages) == 0 {
+				// A skill's own scoped reasoning turn (RunReasoningTurn/
+				// support.go) never gets CancelRequested or PendingMessages
+				// fed — by design, it's "cascade-cancelled via ctx when the
+				// outer turn is interrupted" instead (support.go's own doc
+				// comment). But ctx cancellation unblocks the
+				// workflow.Await above by returning a CanceledError, not by
+				// making either flag true — and that error is deliberately
+				// discarded (workflow.Await's own doc: it returns
+				// NewCanceledError once ctx.Done() closes, even if the
+				// condition itself never became true). Reaching here with
+				// neither a real cancel signal nor a real pending message
+				// can only mean that's what happened. Found 2026-09-27
+				// debugging why hitting Cancel from the web UI on a turn
+				// wedged inside a skill's scoped reasoning turn silently did
+				// nothing: this used to fall straight through to indexing
+				// PendingMessages[0] on a permanently empty slice, panicking
+				// the workflow task — Temporal retries a panicking task
+				// forever, so the workflow looked completely unresponsive to
+				// any further signal, including a second cancel attempt.
+				// skill_reasoning.py's SummarizeReasoningTurn already maps
+				// "cancelled_by_user" to status "cancelled" for exactly this
+				// "outer interrupt" case (its own comment) — this was always
+				// the intended outcome, just never reachable from here.
+				stopReason = "cancelled_by_user"
+				break loop
+			}
+
 			// Dequeue exactly ONE pending message — never batch multiple
 			// queued messages into a single fold-in (components/temporal-workflow.md,
 			// Resolved: Signal Coalescing).
