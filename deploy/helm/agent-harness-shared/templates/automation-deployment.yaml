@@ -2,6 +2,9 @@
 {{- if not .Values.router.clerkIssuer }}
 {{- fail "router.clerkIssuer is required when automation.enabled=true — every tenant this worker provisions gets that same shared issuer written into its own gateway.web.clerkIssuer (workflows/internal/automation/activities/helm.go, cmd/automation/main.go's own CLERK_ISSUER check). Unlike the router (which can verify tokens with just clerkJwksUrl), this worker needs the literal issuer string to embed into each generated tenant's config — clerkJwksUrl alone does not substitute here." }}
 {{- end }}
+{{- if not .Values.router.allowedOrigins }}
+{{- fail "router.allowedOrigins is required when automation.enabled=true — every tenant this worker provisions gets it written into its own gateway.web.allowedOrigins (workflows/internal/automation/activities/helm.go, cmd/automation/main.go's own WEB_ORIGIN check), without which every browser's WebSocket upgrade to that tenant's gateway is silently rejected." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -86,6 +89,11 @@ spec:
             - name: CLERK_ISSUER
               value: {{ .Values.router.clerkIssuer | quote }}
             {{- end }}
+            # Same origin list router-deployment.yaml's own ROUTER_ALLOWED_ORIGINS
+            # (CORS) uses — written into every generated tenant's
+            # gateway.web.allowedOrigins (GATEWAY_WEB_ALLOWED_ORIGINS).
+            - name: WEB_ORIGIN
+              value: {{ join "," .Values.router.allowedOrigins | quote }}
           resources:
             {{- toYaml .Values.automation.resources | nindent 12 }}
       {{- with .Values.automation.nodeSelector }}

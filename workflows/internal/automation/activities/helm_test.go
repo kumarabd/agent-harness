@@ -46,7 +46,7 @@ func TestBuildTenantValuesSetsAgentBrainLLMFromMediumTier(t *testing.T) {
 		"medium": {Provider: "openai", Model: "medium-model", BaseURL: "https://medium.example"},
 	})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestBuildTenantValuesFallsBackWhenNoMediumTier(t *testing.T) {
 		"expert": {Provider: "openai", Model: "expert-model", BaseURL: "https://expert.example"},
 	})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestBuildTenantValuesSetsAgentBrainTemporalToSharedNamespace(t *testing.T) 
 	ref := PublicRef{TenantSlug: "acme"}
 	secrets := stagedSecretsFor(t, map[string]LLMTier{"medium": {Model: "m", BaseURL: "https://x"}})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "temporal-frontend.core.svc.cluster.local:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal-frontend.core.svc.cluster.local:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestBuildTenantValuesPassesThroughClerkIssuer(t *testing.T) {
 	ref := PublicRef{TenantSlug: "acme"}
 	secrets := stagedSecretsFor(t, map[string]LLMTier{"medium": {Model: "m", BaseURL: "https://x"}})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestBuildTenantValuesOmitsEmbeddingOverrideWhenLiteLLMKeyEmpty(t *testing.T
 	})
 	secrets[keyLiteLLMAPIKey] = ""
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestBuildTenantValuesSetsEmbeddingOverrideWhenLiteLLMKeyGiven(t *testing.T)
 	})
 	secrets[keyLiteLLMAPIKey] = "my-own-key"
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", "agents", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -170,12 +170,28 @@ func TestBuildTenantValuesSetsEmbeddingOverrideWhenLiteLLMKeyGiven(t *testing.T)
 	}
 }
 
+func TestBuildTenantValuesSetsGatewayWebAllowedOrigins(t *testing.T) {
+	ref := PublicRef{TenantSlug: "acme", RequesterUserID: "user_123"}
+	secrets := stagedSecretsFor(t, map[string]LLMTier{
+		"medium": {Provider: "openai", Model: "medium-model", BaseURL: "https://medium.example"},
+	})
+
+	values, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets)
+	if err != nil {
+		t.Fatalf("buildTenantValues: %v", err)
+	}
+
+	if got := atPath(t, values, "gateway", "web", "allowedOrigins"); got != "https://web.example" {
+		t.Errorf("gateway.web.allowedOrigins = %v, want %q", got, "https://web.example")
+	}
+}
+
 func TestBuildTenantValuesRejectsMalformedStagedTiers(t *testing.T) {
 	ref := PublicRef{TenantSlug: "acme"}
 	secrets := stagedSecretsFor(t, nil)
 	secrets[keyLLMTiersJSON] = "not json"
 
-	if _, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", "agents", secrets); err == nil {
+	if _, err := buildTenantValues(ref, "https://issuer.example", "https://web.example", "temporal:7233", "agents", secrets); err == nil {
 		t.Fatal("expected an error decoding malformed staged llm tiers, got nil")
 	}
 }

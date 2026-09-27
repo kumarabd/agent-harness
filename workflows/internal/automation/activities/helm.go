@@ -52,7 +52,7 @@ func (a *Activities) readStagedSecret(ctx context.Context, requestID string) (ma
 // agent-brain.llm/.temporal one below can be caught by a unit test instead
 // of only by manually cross-referencing every field against a real tenant's
 // working values.yaml — which is how both were actually found.
-func buildTenantValues(ref PublicRef, clerkIssuer, temporalAddress, tenantTemporalNamespace string, secrets map[string]string) (map[string]any, error) {
+func buildTenantValues(ref PublicRef, clerkIssuer, webOrigin, temporalAddress, tenantTemporalNamespace string, secrets map[string]string) (map[string]any, error) {
 	var llmTiers map[string]LLMTier
 	if err := json.Unmarshal([]byte(secrets[keyLLMTiersJSON]), &llmTiers); err != nil {
 		return nil, fmt.Errorf("decode staged llm tiers: %w", err)
@@ -156,7 +156,7 @@ func buildTenantValues(ref PublicRef, clerkIssuer, temporalAddress, tenantTempor
 		},
 		"gateway": map[string]any{
 			"enabled": true,
-			"web":     map[string]any{"clerkIssuer": clerkIssuer},
+			"web":     map[string]any{"clerkIssuer": clerkIssuer, "allowedOrigins": webOrigin},
 			"discord": map[string]any{"bots": discordBots},
 		},
 		"llm": map[string]any{
@@ -200,7 +200,7 @@ func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error
 		return err
 	}
 
-	values, err := buildTenantValues(ref, a.ClerkIssuer, a.TemporalAddress, a.TenantTemporalNamespace, secrets)
+	values, err := buildTenantValues(ref, a.ClerkIssuer, a.WebOrigin, a.TemporalAddress, a.TenantTemporalNamespace, secrets)
 	if err != nil {
 		return err
 	}

@@ -113,6 +113,24 @@ gateway:
     # clerkIssuer (clerk.go's own precedence).
     clerkJwksUrl: ""
     clerkIssuer: ""
+    # -- REQUIRED when gateway.enabled=true. The browser app's own public
+    # origin (agent-web, e.g. "https://mission-control.nighthawklabs.org") —
+    # NOT this tenant's own gateway/router hostname. Wired into
+    # GATEWAY_WEB_ALLOWED_ORIGINS (workflows/internal/gateway/web/web.go's
+    # webSocketOriginAllowed). 2026-09-27: this was never set anywhere in
+    # this chart or in buildTenantValues, and /web/ws's own same-host
+    # fallback (`u.Host == r.Host`) can never match in this shared-router
+    # architecture — the request that reaches this Deployment has already
+    # been proxied through harness-router, so r.Host is the router's own
+    # public hostname, never agent-web's. With neither check able to pass,
+    # EVERY browser's WebSocket upgrade was rejected (a fast, silent
+    # rejection the gorilla/websocket upgrader itself sends — the browser
+    # only ever sees this as a bare, reason-less code 1006), regardless of
+    # how valid the caller's Clerk session was. Same value as
+    # deploy/helm/agent-harness-shared/values.yaml's router.allowedOrigins —
+    # there is one agent-web deployment for the whole cluster, so this is a
+    # platform-wide constant, not really per-tenant.
+    allowedOrigins: ""
   discord:
     # -- Optional — docs/components/gateway/discord.md's "Resolved: Auth",
     # docs/components/gateway/discord-voice.md's multi-bot resolution

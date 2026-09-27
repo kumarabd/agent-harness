@@ -43,6 +43,16 @@ type Activities struct {
 
 	ClerkIssuer string // the one shared Clerk issuer (Phase 1's single-project migration) — written into every generated tenant's gateway.web.clerkIssuer
 
+	// WebOrigin — agent-web's own public origin (one deployment serves every
+	// tenant), written into every generated tenant's gateway.web.
+	// allowedOrigins. 2026-09-27: found missing entirely — every self-serve
+	// tenant's /web/ws WebSocket upgrade was being silently rejected by
+	// gorilla/websocket's own CheckOrigin, since the same-host fallback
+	// (workflows/internal/gateway/web/web.go's webSocketOriginAllowed) can
+	// never pass once a request has gone through the shared router (r.Host
+	// is the router's own hostname by then, never agent-web's).
+	WebOrigin string
+
 	GatewayPort    int // matches agent-harness-tenant/values.yaml's gateway.port default (8090) — must match core.Tenant's own defaults on the router side
 	AgentBrainPort int // matches that chart's agent-brain subchart default (8080)
 }

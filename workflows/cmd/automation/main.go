@@ -101,11 +101,15 @@ func main() {
 		ChartDir:                envOrDefault("TENANT_CHART_DIR", "/charts/agent-harness-tenant"),
 		SharedNamespace:         envOrDefault("SHARED_RELEASE_NAMESPACE", "agents"),
 		ClerkIssuer:             os.Getenv("CLERK_ISSUER"),
+		WebOrigin:               os.Getenv("WEB_ORIGIN"),
 		GatewayPort:             envIntOrDefault("TENANT_GATEWAY_PORT", 8090),
 		AgentBrainPort:          envIntOrDefault("TENANT_AGENT_BRAIN_PORT", 8080),
 	}
 	if a.ClerkIssuer == "" {
 		log.Fatalf("CLERK_ISSUER is required — every generated tenant's gateway.web.clerkIssuer comes from this")
+	}
+	if a.WebOrigin == "" {
+		log.Fatalf("WEB_ORIGIN is required — every generated tenant's gateway.web.allowedOrigins comes from this (agent-web's own public origin, e.g. https://mission-control.nighthawklabs.org)")
 	}
 
 	taskQueue := envOrDefault("TEMPORAL_TASK_QUEUE", "system")

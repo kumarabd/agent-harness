@@ -2,6 +2,9 @@
 {{- if and (not .Values.gateway.web.clerkJwksUrl) (not .Values.gateway.web.clerkIssuer) }}
 {{- fail "gateway.web.clerkJwksUrl or gateway.web.clerkIssuer is required when gateway.enabled=true — the gateway can't verify any session token without one." }}
 {{- end }}
+{{- if not .Values.gateway.web.allowedOrigins }}
+{{- fail "gateway.web.allowedOrigins is required when gateway.enabled=true — agent-web's own public origin, without it every browser's /web/ws WebSocket upgrade is rejected (values.yaml's own comment has the full story)." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -78,6 +81,11 @@ spec:
             - name: CLERK_ISSUER
               value: {{ .Values.gateway.web.clerkIssuer | quote }}
             {{- end }}
+            # webSocketOriginAllowed's env-var fallback (workflows/internal/
+            # gateway/web/web.go) — see values.yaml's own comment on why the
+            # same-host fallback alone can never pass in this architecture.
+            - name: GATEWAY_WEB_ALLOWED_ORIGINS
+              value: {{ .Values.gateway.web.allowedOrigins | quote }}
             # docs/components/gateway/discord.md, "Resolved: Auth" — real bot
             # token(s), unlike Clerk's issuer/JWKS above: leaking one lets
             # someone impersonate that bot in every server it's in. A
