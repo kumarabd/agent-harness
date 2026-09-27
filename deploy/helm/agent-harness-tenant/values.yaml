@@ -243,6 +243,13 @@ gateway:
 # instead (mirrors ../../../infra/postgres's own init-roles Job, trimmed to
 # the one extra role this chart needs).
 postgresql:
+  # -- 2026-09-27: this tenant already gets its own dedicated Kubernetes
+  # namespace, so a release-name/tenant-slug prefix on top of "postgresql" is
+  # pure redundancy, not a real collision guard — drop it. Every other
+  # template/value in this chart, plus workflows/internal/router/core/
+  # tenant.go's endpoint builders and workflows/internal/automation/
+  # activities/helm.go's buildTenantValues, assumes this exact bare name.
+  fullnameOverride: "postgresql"
   # -- Custom Postgres image: a Bitnami-postgresql-compatible build with the
   # pgvector and timescaledb extensions baked in. Because it is not one of
   # Bitnami's own published images, the subchart's image-verification guard
@@ -430,13 +437,19 @@ llm:
 # config) keeps its vendored default. Do NOT commit real secret values here —
 # set them per tenant in deploy/helm/tenants/<tenant>.yaml instead.
 agent-brain:
-  # -- Renders this subchart's resources as <release>-memory(-server/...)
-  # instead of the default <release>-agent-brain — this tenant's memory
-  # instance, named for what it does rather than the vendored chart's own
-  # name. Referenced directly (not computed) by
+  # -- Renders this subchart's resources as memory(-server/...) — named for
+  # what it does rather than the vendored chart's own name ("agent-brain"),
+  # and bare, no release-name/tenant-slug prefix (2026-09-27: this tenant
+  # already gets its own dedicated Kubernetes namespace, so that prefix was
+  # pure redundancy — see fullnameOverride below and postgresql's own comment
+  # above). nameOverride kept alongside fullnameOverride purely so the
+  # app.kubernetes.io/name label still reads "memory" too, not
+  # "agent-brain" — fullnameOverride alone wouldn't affect that label.
+  # Referenced directly (not computed) by
   # templates/tenant-worker-deployment.yaml's AGENT_BRAIN_RETAIN_BASE_URL and
-  # templates/agent-web-deployment.yaml's AGENT_BRAIN_API_URL.
+  # workflows/internal/router/core/tenant.go's AgentBrainBaseURL.
   nameOverride: "memory"
+  fullnameOverride: "memory"
   image:
     registry: "ghcr.io"
     repositoryOwner: "realnighthawk"
@@ -578,13 +591,17 @@ mcpHub:
 # versions hardcode their fullname to the bare release name and ignore
 # nameOverride/fullnameOverride entirely.
 mcp-hub:
-  # -- Renders this subchart's resources as <release>-tools instead of the
-  # upstream default of just <release> — this tenant's tool-registry
-  # instance, named for what it does. Requires >= 0.1.1 (see above).
-  # Referenced directly (not computed) by
-  # templates/tenant-worker-deployment.yaml's MCP_HUB_URL and
-  # EMBEDDING_API_KEY.
+  # -- Renders this subchart's resources as bare "tools" — this tenant's
+  # tool-registry instance, named for what it does, with no release-name/
+  # tenant-slug prefix (2026-09-27: pure redundancy on top of this tenant's
+  # own dedicated namespace — see postgresql's own comment above). Requires
+  # >= 0.1.1 (see above). nameOverride kept alongside fullnameOverride so the
+  # app.kubernetes.io/name label still reads "tools" too. Referenced directly
+  # (not computed) by templates/tenant-worker-deployment.yaml's MCP_HUB_URL
+  # and EMBEDDING_API_KEY, and workflows/internal/router/core/tenant.go's
+  # McpHubBaseURL.
   nameOverride: "tools"
+  fullnameOverride: "tools"
   database:
     name: "mcphub"
     user: "mcphub"

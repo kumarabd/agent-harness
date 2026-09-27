@@ -20,22 +20,20 @@ type Tenant struct {
 	AgentBrainPort int
 }
 
-// Namespace and ReleaseName are the same value by convention — kept as
-// separate methods (rather than collapsing to just Slug everywhere) so call
-// sites read the same way they did when these could differ under the old
-// registry-backed design.
-func (t Tenant) Namespace() string   { return t.Slug }
-func (t Tenant) ReleaseName() string { return t.Slug }
+func (t Tenant) Namespace() string { return t.Slug }
 
-// GatewayBaseURL/AgentBrainBaseURL — same cross-namespace Service DNS shape
-// as before (deploy/helm/agent-harness-tenant/templates/gateway-service.yaml's
-// componentFullname convention, agent-brain subchart's "memory" nameOverride).
+// GatewayBaseURL/AgentBrainBaseURL — bare Service names, no release-name/
+// tenant-slug prefix (2026-09-27: each tenant already gets its own
+// dedicated Kubernetes namespace — deploy/helm/agent-harness-tenant/
+// templates/gateway-service.yaml's componentFullname helper and the
+// agent-brain subchart's "memory" fullnameOverride, values.yaml — so the
+// namespace alone disambiguates these, a prefix was pure redundancy).
 func (t Tenant) GatewayBaseURL() string {
-	return fmt.Sprintf("http://%s-gateway.%s.svc.cluster.local:%d", t.ReleaseName(), t.Namespace(), t.GatewayPort)
+	return fmt.Sprintf("http://gateway.%s.svc.cluster.local:%d", t.Namespace(), t.GatewayPort)
 }
 
 func (t Tenant) AgentBrainBaseURL() string {
-	return fmt.Sprintf("http://%s-memory-server.%s.svc.cluster.local:%d", t.ReleaseName(), t.Namespace(), t.AgentBrainPort)
+	return fmt.Sprintf("http://memory-server.%s.svc.cluster.local:%d", t.Namespace(), t.AgentBrainPort)
 }
 
 // McpHubBaseURL — 2026-09-26: the router proxies connection-management
@@ -44,9 +42,9 @@ func (t Tenant) AgentBrainBaseURL() string {
 // callback}) — there is no more separate "connections" service in this
 // chart; mcp-hub owns its connections entirely (mcp-hub's own
 // src/mcp_hub/store.py ConnectionRecord table). "tools" matches this
-// tenant's mcp-hub subchart nameOverride (agent-harness-tenant/values.yaml).
+// tenant's mcp-hub subchart fullnameOverride (agent-harness-tenant/values.yaml).
 func (t Tenant) McpHubBaseURL() string {
-	return fmt.Sprintf("http://%s-tools.%s.svc.cluster.local:8000", t.ReleaseName(), t.Namespace())
+	return fmt.Sprintf("http://tools.%s.svc.cluster.local:8000", t.Namespace())
 }
 
 func TenantForSub(sub string, gatewayPort, agentBrainPort int) Tenant {

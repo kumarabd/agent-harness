@@ -22,7 +22,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: migrations
+  name: {{ include "agent-harness.resourceName" (dict "context" . "name" "migrations") }}
   labels:
     {{- include "agent-harness.componentLabels" (dict "context" . "component" "postgres-migrate") | nindent 4 }}
   annotations:
@@ -43,7 +43,7 @@ data:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: postgres-migrate
+  name: {{ include "agent-harness.resourceName" (dict "context" . "name" "postgres-migrate") }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "agent-harness.componentLabels" (dict "context" . "component" "postgres-migrate") | nindent 4 }}
@@ -68,14 +68,14 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: "postgresql"
+                  name: "{{ include "agent-harness.postgresqlName" . }}"
                   key: password
           command:
             - /bin/bash
             - -c
             - |
               set -euo pipefail
-              HOST=postgresql.{{ .Release.Namespace }}.svc.cluster.local
+              HOST={{ include "agent-harness.postgresqlName" . }}.{{ .Release.Namespace }}.svc.cluster.local
               USER={{ .Values.postgresql.auth.username | quote }}
               DB={{ .Values.postgresql.auth.database | quote }}
               PSQL="psql -h $HOST -U $USER -d $DB -v ON_ERROR_STOP=1"
@@ -113,10 +113,13 @@ spec:
                 fi
               done
           volumeMounts:
+            # A pod-local volume reference, not a real Kubernetes resource
+            # name — no tenant-slug prefix ever applied here, unlike the
+            # ConfigMap it points at below.
             - name: migrations
               mountPath: /migrations
               readOnly: true
       volumes:
         - name: migrations
           configMap:
-            name: migrations
+            name: {{ include "agent-harness.resourceName" (dict "context" . "name" "migrations") }}

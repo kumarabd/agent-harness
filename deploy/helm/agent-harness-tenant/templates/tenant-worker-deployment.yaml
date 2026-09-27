@@ -49,7 +49,7 @@ spec:
         {{- end }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "agent-harness.fullname" . }}
+      serviceAccountName: {{ include "agent-harness.resourceName" (dict "context" . "name" "tenant") }}
       # This worker never calls the Kubernetes API — it only polls Temporal
       # and (per docs/components/multi-tenancy.md) talks to this tenant's own
       # Postgres and mounts this tenant's own session filesystem PV.
@@ -65,16 +65,17 @@ spec:
           {{- end }}
           envFrom:
             - configMapRef:
-                name: {{ include "agent-harness.fullname" . }}-config
+                name: {{ include "agent-harness.resourceName" (dict "context" . "name" "config") }}
           {{- if or .Values.postgresql .Values.llm.enabled .Values.agentBrain.enabled }}
           env:
-            # Bitnami postgresql subchart's own generated Service/Secret
-            # naming — {release-name}-postgresql, NOT nested through this
-            # chart's own fullname helper. Each subchart computes its own
-            # fullname independently from .Release.Name + its own Chart.Name
-            # (confirmed by rendering, not assumed — see Notes Log).
+            # Bitnami postgresql subchart's own generated Service/Secret name
+            # — this chart sets postgresql.fullnameOverride: "postgresql"
+            # (values.yaml) so it renders bare, not release-prefixed. Each
+            # subchart computes its own fullname independently of this
+            # chart's own fullname helper (confirmed by rendering, not
+            # assumed — see Notes Log).
             - name: POSTGRES_HOST
-              value: "{{ .Release.Name }}-postgresql"
+              value: "{{ include "agent-harness.postgresqlName" . }}"
             - name: POSTGRES_PORT
               value: "5432"
             - name: POSTGRES_DB
@@ -84,7 +85,7 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: "{{ .Release.Name }}-postgresql"
+                  name: "{{ include "agent-harness.postgresqlName" . }}"
                   key: password
           {{- if .Values.tenantVolume.enabled }}
             # docs/components/user-input.md — PERMISSION_LIST reads this
@@ -127,7 +128,7 @@ spec:
             - name: LANGUAGE_{{ $upper }}_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "agent-harness.fullname" $ }}-llm
+                  name: {{ include "agent-harness.resourceName" (dict "context" $ "name" "llm") }}
                   key: LANGUAGE_{{ $upper }}_API_KEY
             {{- if $t.contextWindow }}
             - name: LANGUAGE_{{ $upper }}_CONTEXT_WINDOW
@@ -157,17 +158,17 @@ spec:
             # not a secret, a plain per-install identifier.
             - name: AGENT_BRAIN_AGENT_ID
               value: {{ .Values.agentBrain.agentID | quote }}
-            # Service name computed, not a value — the agent-brain subchart is
-            # installed under nameOverride "memory" (values.yaml's
-            # agent-brain.nameOverride), so this Deployment's Service renders as
-            # <release>-memory-retain-mcp (charts/agent-brain/templates/
-            # service-retain-mcp.yaml), deterministic from this release's own name.
+            # Service name computed, not a value — the agent-brain subchart
+            # has fullnameOverride: "memory" (values.yaml), so this
+            # Deployment's Service renders as bare memory-retain-mcp
+            # (charts/agent-brain/templates/service-retain-mcp.yaml), no
+            # release-name prefix.
             - name: AGENT_BRAIN_RETAIN_BASE_URL
-              value: "http://{{ .Release.Name }}-memory-retain-mcp:8890"
+              value: {{ printf "http://%s-retain-mcp:8890" (include "agent-harness.agentBrainName" .) | quote }}
             - name: AGENT_BRAIN_RETAIN_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "agent-harness.fullname" . }}-agent-brain
+                  name: {{ include "agent-harness.resourceName" (dict "context" . "name" "agent-brain-retain-key") }}
                   key: AGENT_BRAIN_RETAIN_API_KEY
                   optional: true
           {{- end }}
@@ -180,16 +181,15 @@ spec:
             # redirect base URL, oauth.mcpHubBaseUrl), and while they're
             # separate pods so there's no real conflict, reusing the name
             # would be confusing to read later. Computed, not a value —
-            # mcp-hub is installed under nameOverride "tools" (values.yaml's
-            # mcp-hub.nameOverride), so its Service renders as
-            # <release>-tools (charts/mcp-hub/templates/_helpers.tpl's
-            # mcp-hub.fullname), deterministic from this release's own name.
-            # Port 8000 hardcoded matching that chart's own service.port
-            # default, same convention as AGENT_BRAIN_RETAIN_BASE_URL's hardcoded
-            # 8890 above — if mcp-hub.service.port is ever overridden
-            # per-tenant, update this too.
+            # mcp-hub has fullnameOverride: "tools" (values.yaml), so its
+            # Service renders as bare tools (charts/mcp-hub/templates/
+            # _helpers.tpl's mcp-hub.fullname), no release-name prefix. Port
+            # 8000 hardcoded matching that chart's own service.port default,
+            # same convention as AGENT_BRAIN_RETAIN_BASE_URL's hardcoded 8890
+            # above — if mcp-hub.service.port is ever overridden per-tenant,
+            # update this too.
             - name: MCP_HUB_URL
-              value: "http://{{ .Release.Name }}-tools:8000"
+              value: {{ printf "http://%s:8000" (include "agent-harness.mcpHubName" .) | quote }}
             # docs/components/tool-registry.md's "Resolved: Native-Tool
             # Discovery" — shell_hub.py's own embedding provider, reusing
             # mcp-hub's own LiteLLM config rather than a third credential.
@@ -205,7 +205,7 @@ spec:
             - name: EMBEDDING_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Release.Name }}-tools
+                  name: {{ include "agent-harness.mcpHubName" . }}
                   key: EMBEDDING_API_KEY
           {{- end }}
           {{- end }}
@@ -236,7 +236,7 @@ spec:
       volumes:
         - name: tenant-data
           persistentVolumeClaim:
-            claimName: {{ include "agent-harness.fullname" . }}-data
+            claimName: {{ include "agent-harness.resourceName" (dict "context" . "name" "data") }}
       {{- end }}
       {{- with .Values.tenantWorker.nodeSelector }}
       nodeSelector:

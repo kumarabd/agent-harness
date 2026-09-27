@@ -24,7 +24,7 @@ spec:
         prometheus.io/path: {{ .Values.gateway.metrics.path | quote }}
         {{- end }}
     spec:
-      serviceAccountName: {{ include "agent-harness.fullname" . }}
+      serviceAccountName: {{ include "agent-harness.resourceName" (dict "context" . "name" "tenant") }}
       # Same reasoning as tenant-worker: this process never calls the
       # Kubernetes API, only Temporal and this tenant's own Postgres.
       automountServiceAccountToken: false
@@ -41,18 +41,18 @@ spec:
             {{- end }}
           envFrom:
             - configMapRef:
-                name: {{ include "agent-harness.fullname" . }}-config
+                name: {{ include "agent-harness.resourceName" (dict "context" . "name" "config") }}
           env:
             - name: GATEWAY_BIND_ADDRESS
               value: {{ printf "0.0.0.0:%d" (int .Values.gateway.port) | quote }}
-            # Bitnami postgresql subchart's own generated Service/Secret
-            # naming, same as tenant-worker-deployment.yaml's identical block
-            # — this is the gateway's own Postgres connection for the
+            # Bitnami postgresql subchart's own generated Service/Secret name,
+            # same as tenant-worker-deployment.yaml's identical block — this
+            # is the gateway's own Postgres connection for the
             # dedup/session-upsert writes and the direct poll reads
             # (docs/components/gateway/web.md's "delivery collapses" finding),
             # never a shared connection with tenant-worker.
             - name: POSTGRES_HOST
-              value: "{{ .Release.Name }}-postgresql"
+              value: "{{ include "agent-harness.postgresqlName" . }}"
             - name: POSTGRES_PORT
               value: "5432"
             - name: POSTGRES_DB
@@ -62,7 +62,7 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: "{{ .Release.Name }}-postgresql"
+                  name: "{{ include "agent-harness.postgresqlName" . }}"
                   key: password
             # docs/components/gateway/web.md, "Resolved: Auth" — plain,
             # non-secret values (clerk.go: verified against the project's own
@@ -94,7 +94,7 @@ spec:
             - name: DISCORD_BOT_TOKENS
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "agent-harness.fullname" . }}-gateway-discord
+                  name: {{ include "agent-harness.resourceName" (dict "context" . "name" "gateway-discord") }}
                   key: DISCORD_BOT_TOKENS
             {{- end }}
             # workflows/cmd/gateway/voice_stt_tts.go's SPEECH_API_KEY —
@@ -104,7 +104,7 @@ spec:
             - name: SPEECH_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "agent-harness.fullname" . }}-gateway-speech
+                  name: {{ include "agent-harness.resourceName" (dict "context" . "name" "gateway-speech") }}
                   key: SPEECH_API_KEY
             {{- end }}
             # workflows/cmd/gateway/voice_stt_tts.go's TTS_VOICE — not a

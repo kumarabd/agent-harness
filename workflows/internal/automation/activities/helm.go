@@ -132,10 +132,14 @@ func buildTenantValues(ref PublicRef, clerkIssuer, temporalAddress, tenantTempor
 	mcpHubOverrides := map[string]any{
 		"database": map[string]any{
 			"password": secrets[keyMcpHubDBPassword],
-			// Same computed form deploy/helm/tenants/README.md documents
-			// for hand-written tenant files — release name == k8s
-			// namespace == ref.TenantSlug, this repo's own convention.
-			"host": fmt.Sprintf("%s-postgresql.%s.svc.cluster.local", ref.TenantSlug, ref.TenantSlug),
+			// Bare "postgresql" — no release-name/tenant-slug prefix
+			// (2026-09-27: the postgresql subchart now sets
+			// fullnameOverride: "postgresql", deploy/helm/agent-harness-
+			// tenant/values.yaml — this tenant's own namespace already
+			// disambiguates it, a prefix was pure redundancy). Same
+			// computed form deploy/helm/tenants/README.md documents for
+			// hand-written tenant files.
+			"host": fmt.Sprintf("postgresql.%s.svc.cluster.local", ref.TenantSlug),
 		},
 	}
 	if key := secrets[keyLiteLLMAPIKey]; key != "" {
