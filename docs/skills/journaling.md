@@ -1,25 +1,26 @@
 # Journaling skill loop
 
-`journaling` is the control loop for turning a user-approved thought into an
-entry in their Notion journal. The parent agent calls it with `entry_text`
-once it has decided the content is journal-worthy.
+`journaling` is the control loop for turning a thought the agent judges worth
+preserving into an entry in the user's Notion journal. The user can explicitly
+ask to journal something, or the agent can invoke the skill implicitly; either
+way, the skill obtains confirmation before writing.
 
 ## Logical loop
 
 ```mermaid
 flowchart TD
-    Start([D: Invoke skill with entry text]) --> Locate[M: Locate the user's journal in Notion]
+    Start([M or user: identify an entry worth preserving]) --> Confirm[D: Request durable confirmation]
+    Confirm --> Approved{D: Explicit confirmation recorded?}
+    Approved -- no --> Stop([D: Close without writing])
+    Approved -- yes --> Locate[M: Locate the user's journal in Notion]
     Locate --> Found{M: One usable journal?}
     Found -- no / ambiguous --> Clarify[M: Ask the user where to journal or whether to create one]
     Clarify --> Locate
     Found -- yes --> Today[M: Find today's page]
     Today --> Page{M: Today's page exists?}
     Page -- no --> CreatePage[M: Create today's page]
-    Page -- yes --> Confirm
-    CreatePage --> Confirm[M: Show the proposed entry and ask for confirmation]
-    Confirm --> Approved{M: User confirms?}
-    Approved -- revise / no --> Clarify
-    Approved -- yes --> Write[M: Append the entry]
+    Page -- yes --> Write
+    CreatePage --> Write[M: Append the entry]
     Write --> Verify{M: Write succeeded?}
     Verify -- no / unclear --> Diagnose[M: Inspect the result or explain the blocker]
     Diagnose --> Locate
@@ -27,8 +28,8 @@ flowchart TD
 ```
 
 `D` = deterministic workflow behavior. `M` = a model-directed step inside the
-scoped reasoning turn; the harness provides durable tool dispatch and user-input
-waiting, but does not make the decision itself.
+scoped reasoning turn. The confirmation wait is durable and deterministic; the
+human, rather than the model, supplies the approval.
 
 The loop repeats whenever the agent lacks enough information to safely proceed:
 it asks the user to resolve an ambiguity, or inspects Notion again after an
@@ -48,11 +49,13 @@ agent can clearly explain why it cannot safely continue.
 ## Runtime boundary
 
 This is the intended work loop, not a literal Temporal execution trace. The
-`JournalingSkill` workflow creates a scoped reasoning turn and records its
-outcome; the model decides how to use the real Notion tools at each stage. A
-failure to load the initial arguments, a parent cancellation, or a loop
-budget/error ends the durable invocation without pretending that the journal
-entry was written.
+first native state is already implemented: `JournalingSkill` requests and
+waits for durable confirmation itself. After approval, the current
+implementation still uses a scoped reasoning bridge for dynamic Notion
+discovery and interpretation. That bridge is being replaced state-by-state by
+native capability and model-decision primitives; a failure, parent
+cancellation, or loop budget/error never pretends that the journal entry was
+written.
 
 Relevant implementation: `workflows/internal/workflow/skills/journaling.go`,
 `workflows/internal/workflow/skills/support.go`,

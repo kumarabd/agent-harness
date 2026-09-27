@@ -1,6 +1,9 @@
 package skills
 
 import (
+	"strings"
+
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/workflow"
 
 	"agent-harness/workflows/internal/types"
@@ -20,17 +23,14 @@ import (
 // loop; none of that is this workflow's concern. This skill starts only once
 // the model has already decided to commit an entry.
 //
-// The mechanical work (finding or creating the right Notion database,
-// confirming with the user before writing, finding or creating today's page)
-// is NOT hand-coded here — interpreting a messy real-world API response is a
-// model's job, not brittle guessed parsing. This skill's only structural
-// contribution is the two deterministic bookends: read the model's original
-// arguments, and close out the outer tool_calls row. Everything else is
-// delegated to a single scoped reasoning turn (RunReasoningTurn,
-// support.go) that reuses turn.go's own reason-act loop verbatim — the model
-// interacts with Notion directly via the existing discover_tools/call_tool
-// path, and calls ask_user itself when it needs to confirm or disambiguate
-// (already durably delivered to the user's real connection, no new plumbing).
+// The first native state is an explicit confirmation gate. It deliberately
+// uses the harness's existing durable UserInputRequestWorkflow directly,
+// rather than asking a nested generic reasoning loop to remember to do it.
+// Dynamic Notion capability discovery and interpretation remain on the legacy
+// scoped-reasoning bridge for now; those are the next states to extract once
+// the state-oriented capability invocation primitive lands. That bridge keeps
+// the skill useful while this workflow is migrated incrementally instead of
+// replacing a real integration with guessed Notion API parsing.
 func JournalingSkill(ctx workflow.Context, input types.SkillWorkflowInput) (types.SkillWorkflowOutput, error) {
 	ctx = wf.WithTenantTaskQueue(ctx, input.TenantSlug)
 	out := types.SkillWorkflowOutput{ToolCallID: input.ToolCallID}
@@ -46,16 +46,60 @@ func JournalingSkill(ctx workflow.Context, input types.SkillWorkflowInput) (type
 		return out, nil
 	}
 	entryText, _ := args["entry_text"].(string)
+	entryText = strings.TrimSpace(entryText)
+	if entryText == "" {
+		out.Status = closeSkillCall(ctx, input.ToolCallID, "error", nil, "entry_text_is_required", "none")
+		return out, nil
+	}
+
+	// Native skill state: the write cannot proceed until the person confirms
+	// the exact entry. A direct child UserInputRequestWorkflow preserves its
+	// durable wait, delivery, timeout, cancellation, and response-routing
+	// behavior without involving TurnWorkflow or RunReasonActLoop.
+	confirmID := input.ToolCallID + ":journal-confirm"
+	confirmCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
+		WorkflowID:        confirmID,
+		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
+	})
+	var confirmation types.UserInputRequestWorkflowOutput
+	confirmErr := workflow.ExecuteChildWorkflow(confirmCtx, wf.UserInputRequestWorkflow, types.UserInputRequestWorkflowInput{
+		Request: types.UserInputRequest{
+			RequestID: confirmID,
+			TurnID:    input.TurnID,
+			Kind:      "decision",
+			Prompt:    "Record this in your journal?\n\n" + entryText,
+			Options: []types.UserInputOption{
+				{ID: "approve", Label: "Record it"},
+				{ID: "decline", Label: "Do not record it"},
+			},
+			AllowFreeText: true,
+			Context:       map[string]any{"skill": "journaling", "state": "confirm_entry"},
+		},
+		SessionKey:   input.SessionKey,
+		ConnectionID: input.ConnectionID,
+		TenantSlug:   input.TenantSlug,
+	}).Get(confirmCtx, &confirmation)
+	if confirmErr != nil {
+		out.Status = closeSkillCall(ctx, input.ToolCallID, "cancelled", nil, "confirmation_cancelled", "none")
+		return out, nil
+	}
+	if confirmation.Response.SelectedOptionID == nil || *confirmation.Response.SelectedOptionID != "approve" {
+		out.Status = closeSkillCall(ctx, input.ToolCallID, "cancelled", nil, "entry_not_confirmed", "none")
+		return out, nil
+	}
 
 	objective := "Record this as a journal entry: " + entryText + "\n\n" +
+		"The user has explicitly approved this exact entry. Do not ask for confirmation again. " +
+		"Write in a first-person diary voice that preserves the user's wording, perspective, " +
+		"and uncertainty; do not turn it into a generic summary. If essential context is missing " +
+		"or a reference is ambiguous, use recall before asking the user a focused clarification. " +
 		"Find the user's Journal database in Notion (search for one titled roughly " +
 		"\"Journal\"; use discover_tools/call_tool for the real Notion tools). If none " +
 		"exists, or more than one plausible match exists, use ask_user to find out " +
 		"whether/where to create one, or which existing one to use. Then find today's " +
 		"page in that database (or create it if this is the first entry of the day) " +
-		"and append the entry text to it. Confirm with the user via ask_user, showing " +
-		"them the entry text, before actually writing anything. Once written, report " +
-		"what you did and finish."
+		"and append the entry text to it. Once written, verify the result, report what " +
+		"you did, and finish."
 
 	outcome, err := RunReasoningTurn(ctx, input, "reason", objective)
 	if err != nil {
