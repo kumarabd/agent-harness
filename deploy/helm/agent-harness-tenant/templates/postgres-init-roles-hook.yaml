@@ -15,7 +15,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "agent-harness.fullname" . }}-postgres-init-roles
+  name: postgres-init-roles
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "agent-harness.componentLabels" (dict "context" . "component" "postgres-init-roles") | nindent 4 }}
@@ -40,7 +40,7 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: "{{ .Release.Name }}-postgresql"
+                  name: "postgresql"
                   key: postgres-password
             - name: AGENTBRAIN_USER_PASSWORD
               value: {{ .Values.agentBrain.postgres.password | quote }}
@@ -50,7 +50,7 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: "{{ .Release.Name }}-postgresql"
+                  name: "postgresql"
                   key: postgres-password
             {{- end }}
             - name: MCPHUB_USER_PASSWORD
@@ -61,7 +61,7 @@ spec:
             - -c
             - |
               set -euo pipefail
-              HOST={{ .Release.Name }}-postgresql.{{ .Release.Namespace }}.svc.cluster.local
+              HOST=postgresql.{{ .Release.Namespace }}.svc.cluster.local
 
               psql -h "$HOST" -U postgres -d postgres -v ON_ERROR_STOP=1 -f - <<SQL
               {{- if .Values.agentBrain.enabled }}

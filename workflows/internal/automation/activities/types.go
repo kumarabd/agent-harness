@@ -58,11 +58,18 @@ type TenantOnboardingInput struct {
 	AgentBrainAPIKey     string // agentBrain.apiKey
 	AgentBrainJWTSecret  string // agent-brain.secret.jwtSecret
 	McpHubDBPassword     string // mcpHub.postgres.password / mcp-hub.database.password (must match, see values.yaml's own comment)
-	// One shared key reused across agent-brain.secret.litellmAPIKey,
-	// mcp-hub.embedding.apiKey, and (if voice is ever enabled later)
-	// gateway.speechAPIKey — the exact same real-world pattern
-	// deploy/helm/tenants/abishekk.yaml already uses (one litellm-service
-	// key, several consumers), not a new convention invented here.
+	// Optional — empty means "use the platform's shared embedding model",
+	// the chart's own default for agent-brain.secret.litellmAPIKey /
+	// mcp-hub.embedding.apiKey (deploy/helm/agent-harness-tenant/values.yaml).
+	// Set only when the requester chose to bring their own external
+	// embedding endpoint instead (buildTenantValues omits the override
+	// entirely otherwise, so the chart default is what actually applies —
+	// see that function's own comment). 2026-09-27: this used to be
+	// required and browser-generated as if it were just another random
+	// per-tenant secret (agent-web's NewWorkspace.tsx) — it never could be,
+	// since this cluster's litellm-service has no per-tenant virtual-key
+	// system, only one shared master key. Every self-serve tenant's
+	// embeddings were broken by construction until this was made optional.
 	LiteLLMAPIKey string
 }
 

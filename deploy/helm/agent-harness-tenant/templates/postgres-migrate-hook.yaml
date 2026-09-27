@@ -22,7 +22,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "agent-harness.fullname" . }}-migrations
+  name: migrations
   labels:
     {{- include "agent-harness.componentLabels" (dict "context" . "component" "postgres-migrate") | nindent 4 }}
   annotations:
@@ -43,7 +43,7 @@ data:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "agent-harness.fullname" . }}-postgres-migrate
+  name: postgres-migrate
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "agent-harness.componentLabels" (dict "context" . "component" "postgres-migrate") | nindent 4 }}
@@ -68,14 +68,14 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: "{{ .Release.Name }}-postgresql"
+                  name: "postgresql"
                   key: password
           command:
             - /bin/bash
             - -c
             - |
               set -euo pipefail
-              HOST={{ .Release.Name }}-postgresql.{{ .Release.Namespace }}.svc.cluster.local
+              HOST=postgresql.{{ .Release.Namespace }}.svc.cluster.local
               USER={{ .Values.postgresql.auth.username | quote }}
               DB={{ .Values.postgresql.auth.database | quote }}
               PSQL="psql -h $HOST -U $USER -d $DB -v ON_ERROR_STOP=1"
@@ -119,4 +119,4 @@ spec:
       volumes:
         - name: migrations
           configMap:
-            name: {{ include "agent-harness.fullname" . }}-migrations
+            name: migrations

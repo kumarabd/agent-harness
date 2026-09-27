@@ -115,6 +115,34 @@ func buildTenantValues(ref PublicRef, clerkIssuer, temporalAddress, tenantTempor
 		}
 	}
 
+	// agentBrainSecret/mcpHubValues: litellmAPIKey/embedding.apiKey are only
+	// set when the requester brought their own external embedding endpoint.
+	// Left empty (the common case — "use the platform's shared model"), the
+	// key is omitted from this values override entirely rather than sent as
+	// "", so Helm falls through to the chart's own default
+	// (deploy/helm/agent-harness-tenant/values.yaml's agentBrain.secret.
+	// litellmAPIKey / mcpHub.embedding.apiKey) instead of overwriting it with
+	// an empty string. This cluster's litellm-service has exactly one real
+	// key (its master key, already the chart default) — there is no
+	// per-tenant virtual-key system to generate a new one from, so a
+	// self-serve tenant that doesn't bring their own must get that one.
+	agentBrainSecret := map[string]any{
+		"jwtSecret": secrets[keyAgentBrainJWTSecret],
+	}
+	mcpHubOverrides := map[string]any{
+		"database": map[string]any{
+			"password": secrets[keyMcpHubDBPassword],
+			// Same computed form deploy/helm/tenants/README.md documents
+			// for hand-written tenant files — release name == k8s
+			// namespace == ref.TenantSlug, this repo's own convention.
+			"host": fmt.Sprintf("%s-postgresql.%s.svc.cluster.local", ref.TenantSlug, ref.TenantSlug),
+		},
+	}
+	if key := secrets[keyLiteLLMAPIKey]; key != "" {
+		agentBrainSecret["litellmAPIKey"] = key
+		mcpHubOverrides["embedding"] = map[string]any{"apiKey": key}
+	}
+
 	return map[string]any{
 		"temporal": map[string]any{"namespace": tenantTemporalNamespace},
 		"agentBrain": map[string]any{
@@ -141,10 +169,7 @@ func buildTenantValues(ref PublicRef, clerkIssuer, temporalAddress, tenantTempor
 			"postgres": map[string]any{"password": secrets[keyMcpHubDBPassword]},
 		},
 		"agent-brain": map[string]any{
-			"secret": map[string]any{
-				"litellmAPIKey": secrets[keyLiteLLMAPIKey],
-				"jwtSecret":     secrets[keyAgentBrainJWTSecret],
-			},
+			"secret": agentBrainSecret,
 			"llm": map[string]any{
 				"baseURL": retainTier.BaseURL,
 				"model":   retainTier.Model,
@@ -155,16 +180,7 @@ func buildTenantValues(ref PublicRef, clerkIssuer, temporalAddress, tenantTempor
 				"retainTaskQueue": ref.TenantSlug + "-memory",
 			},
 		},
-		"mcp-hub": map[string]any{
-			"database": map[string]any{
-				"password": secrets[keyMcpHubDBPassword],
-				// Same computed form deploy/helm/tenants/README.md documents
-				// for hand-written tenant files — release name == k8s
-				// namespace == ref.TenantSlug, this repo's own convention.
-				"host": fmt.Sprintf("%s-postgresql.%s.svc.cluster.local", ref.TenantSlug, ref.TenantSlug),
-			},
-			"embedding": map[string]any{"apiKey": secrets[keyLiteLLMAPIKey]},
-		},
+		"mcp-hub": mcpHubOverrides,
 	}, nil
 }
 

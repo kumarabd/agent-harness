@@ -2,20 +2,21 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "agent-harness.fullname" . }}-data
+  name: data
   labels:
     {{- include "agent-harness.labels" . | nindent 4 }}
 spec:
-  # ReadWriteMany by default: this PV is mounted by the whole tenant-worker
-  # fleet simultaneously (docs/components/session-filesystem.md — the session
-  # tree must be reachable by any replica). Postgres no longer shares this PV
-  # (the postgresql subchart provisions its own dedicated PVC — see
-  # values.yaml's postgresql.* comment), so this volume is session-filesystem
-  # only now. Most cloud block-storage classes (EBS gp3, PD-SSD, Azure managed
-  # disks) only support RWO — this requires a file-storage-backed class (EFS,
-  # Azure Files, Filestore, or an equivalent CSI driver). Set
-  # tenantVolume.accessMode: ReadWriteOnce only if tenantWorker.replicaCount
-  # is pinned to 1, which defeats the point of a worker fleet.
+  # ReadWriteOnce by default, matching tenantWorker.replicaCount's own default
+  # of 1 (values.yaml's tenantVolume.accessMode comment has the full story).
+  # Postgres no longer shares this PV (the postgresql subchart provisions its
+  # own dedicated PVC — see values.yaml's postgresql.* comment), so this
+  # volume is session-filesystem only now
+  # (docs/components/session-filesystem.md). Set accessMode: ReadWriteMany
+  # (and storageClassName to a file-storage-backed class — EFS, Azure Files,
+  # Filestore, or an equivalent CSI driver, since most cloud block-storage
+  # classes are ReadWriteOnce-only) only for a real multi-replica worker
+  # fleet — the session tree must be reachable by every replica
+  # simultaneously in that case.
   accessModes:
     - {{ .Values.tenantVolume.accessMode }}
   {{- if .Values.tenantVolume.storageClassName }}

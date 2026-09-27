@@ -42,13 +42,17 @@ func (a *Activities) ValidateRequest(ctx context.Context, in TenantOnboardingInp
 			return fmt.Errorf("LLM tier %q: provider must be \"openai\" or \"anthropic\"", tier)
 		}
 	}
+	// LiteLLMAPIKey is deliberately NOT required here — empty means "use the
+	// platform's shared embedding model", the chart's own default
+	// (deploy/helm/agent-harness-tenant/values.yaml's agentBrain.secret.
+	// litellmAPIKey / mcpHub.embedding.apiKey). A value is only needed when
+	// the requester opted into their own external embedding endpoint.
 	for name, v := range map[string]string{
 		"postgres password":       in.PostgresPassword,
 		"agent-brain db password": in.AgentBrainDBPassword,
 		"agent-brain api key":     in.AgentBrainAPIKey,
 		"agent-brain jwt secret":  in.AgentBrainJWTSecret,
 		"mcp-hub db password":     in.McpHubDBPassword,
-		"litellm api key":         in.LiteLLMAPIKey,
 	} {
 		if v == "" {
 			return fmt.Errorf("%s is required", name)

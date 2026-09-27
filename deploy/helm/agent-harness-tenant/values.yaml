@@ -451,10 +451,21 @@ agent-brain:
     # values into a Secret this subchart reads via existingSecret instead of
     # generating its own. Set the password/key once, in ONE place.
     create: false
-    # -- REQUIRED. This tenant's embedding provider key (LiteLLM or direct) —
-    # genuinely independent of anything else in this file, no single source
-    # to derive it from.
-    litellmAPIKey: ""
+    # -- Defaults to the platform's own shared litellm-service master key —
+    # every tenant's embedding calls go through that one in-cluster instance
+    # (http://litellm-service.core.svc:4000, see embed.litellmBaseURL below)
+    # unless a tenant brings their own external embedding endpoint, in which
+    # case override this with that provider's key
+    # (deploy/helm/tenants/<tenant>.yaml). 2026-09-27: this used to default to
+    # "" and be marked REQUIRED, with the self-serve onboarding form
+    # generating a random per-tenant string for it — that could never work,
+    # since this litellm-service has no per-tenant virtual-key system, only
+    # this one static master key (core namespace's litellm-config
+    # ConfigMap). workflows/internal/automation/activities/helm.go's
+    # buildTenantValues now only overrides this when the requester actually
+    # opted into an external endpoint, so this default is what most tenants
+    # actually run on.
+    litellmAPIKey: "sk-change-this-to-a-secure-key"
     # -- REQUIRED. Any random per-tenant secret; do not reuse across tenants.
     jwtSecret: ""
     # -- Guards agent-brain's /admin/reset-memory endpoint. Explicitly
@@ -589,9 +600,11 @@ mcp-hub:
     # name/namespace that tenant is actually installed under.
     host: ""
   embedding:
-    # -- REQUIRED. Do NOT leave the upstream chart's own insecure default
-    # ("sk-change-this-to-a-secure-key") — set a real value per tenant.
-    apiKey: ""
+    # -- Same platform-shared litellm-service master key as
+    # agentBrain.secret.litellmAPIKey above — see that field's comment. Only
+    # override this (deploy/helm/tenants/<tenant>.yaml) when the tenant
+    # brings their own external embedding endpoint instead of the platform's.
+    apiKey: "sk-change-this-to-a-secure-key"
   manifests:
     agent-brain.yaml: null
     maps-engine.yaml: null
@@ -612,15 +625,20 @@ mcp-hub:
 tenantVolume:
   enabled: true
   size: "10Gi"
-  # -- REQUIRED to be a ReadWriteMany-capable class if tenantWorker.replicaCount
-  # > 1 — the session filesystem must be reachable by every tenant-worker
-  # replica simultaneously. Most cloud block-storage classes (EBS gp3, GCP
-  # PD-SSD, Azure Managed Disks) are ReadWriteOnce only; you need a
-  # file-storage-backed class (EFS, Filestore, Azure Files, or an equivalent
-  # CSI driver) for a real multi-replica deployment. Leave unset to use the
-  # cluster's default StorageClass.
+  # -- ReadWriteOnce by default, matching tenantWorker.replicaCount's own
+  # default of 1 — this cluster's actual StorageClass (Rancher's
+  # rancher.io/local-path) only supports ReadWriteOnce/ReadWriteOncePod
+  # anyway. 2026-09-27: this used to default to ReadWriteMany, which every
+  # self-serve-onboarded tenant's worker Pod would then get stuck Pending on
+  # forever (ProvisioningFailed: "NodePath only supports ReadWriteOnce and
+  # ReadWriteOncePod") — abishekk.yaml already carried the correct override,
+  # this default just never matched it. Bump tenantWorker.replicaCount above
+  # 1 for a real multi-replica worker fleet ONLY on a cluster whose
+  # StorageClass is file-storage-backed (EFS, Filestore, Azure Files, or an
+  # equivalent CSI driver) — set accessMode back to ReadWriteMany and
+  # storageClassName to that class together when you do.
   storageClassName: ""
-  accessMode: "ReadWriteMany"
+  accessMode: "ReadWriteOnce"
   sessionsSubPath: "sessions"
   # -- docs/components/user-input.md's PERMISSION_LIST — disjoint from
   # sessionsSubPath above so a runtime-edited policy file never collides

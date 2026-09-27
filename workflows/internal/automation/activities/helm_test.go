@@ -121,6 +121,55 @@ func TestBuildTenantValuesPassesThroughClerkIssuer(t *testing.T) {
 	}
 }
 
+func TestBuildTenantValuesOmitsEmbeddingOverrideWhenLiteLLMKeyEmpty(t *testing.T) {
+	ref := PublicRef{TenantSlug: "acme", RequesterUserID: "user_123"}
+	secrets := stagedSecretsFor(t, map[string]LLMTier{
+		"medium": {Provider: "openai", Model: "medium-model", BaseURL: "https://medium.example"},
+	})
+	secrets[keyLiteLLMAPIKey] = ""
+
+	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", "agents", secrets)
+	if err != nil {
+		t.Fatalf("buildTenantValues: %v", err)
+	}
+
+	agentBrainSecret, ok := atPath(t, values, "agent-brain", "secret").(map[string]any)
+	if !ok {
+		t.Fatalf("agent-brain.secret is not a map")
+	}
+	if _, present := agentBrainSecret["litellmAPIKey"]; present {
+		t.Errorf("agent-brain.secret.litellmAPIKey should be omitted (falls through to the chart default) when no external key was given, got %v", agentBrainSecret["litellmAPIKey"])
+	}
+
+	mcpHub, ok := values["mcp-hub"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcp-hub is not a map")
+	}
+	if _, present := mcpHub["embedding"]; present {
+		t.Errorf("mcp-hub.embedding should be omitted entirely (falls through to the chart default) when no external key was given, got %v", mcpHub["embedding"])
+	}
+}
+
+func TestBuildTenantValuesSetsEmbeddingOverrideWhenLiteLLMKeyGiven(t *testing.T) {
+	ref := PublicRef{TenantSlug: "acme", RequesterUserID: "user_123"}
+	secrets := stagedSecretsFor(t, map[string]LLMTier{
+		"medium": {Provider: "openai", Model: "medium-model", BaseURL: "https://medium.example"},
+	})
+	secrets[keyLiteLLMAPIKey] = "my-own-key"
+
+	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", "agents", secrets)
+	if err != nil {
+		t.Fatalf("buildTenantValues: %v", err)
+	}
+
+	if got := atPath(t, values, "agent-brain", "secret", "litellmAPIKey"); got != "my-own-key" {
+		t.Errorf("agent-brain.secret.litellmAPIKey = %v, want %q", got, "my-own-key")
+	}
+	if got := atPath(t, values, "mcp-hub", "embedding", "apiKey"); got != "my-own-key" {
+		t.Errorf("mcp-hub.embedding.apiKey = %v, want %q", got, "my-own-key")
+	}
+}
+
 func TestBuildTenantValuesRejectsMalformedStagedTiers(t *testing.T) {
 	ref := PublicRef{TenantSlug: "acme"}
 	secrets := stagedSecretsFor(t, nil)
