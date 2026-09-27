@@ -40,8 +40,8 @@ agent can clearly explain why it cannot safely continue.
 
 | Stage | Intent |
 |---|---|
-| Locate | Use the connected Notion capability to identify exactly one journal destination. |
-| Establish today’s page | Reuse today’s page if it exists; otherwise create it only after the destination is known. |
+| Locate | Use the connected Notion capability to identify exactly one page titled `My Diary`, the diary root. |
+| Establish today’s page | Reuse the `YYYY-MM-DD` child page for the user’s current local date, or create it beneath `My Diary` if it does not exist. |
 | Confirm | Let the user see and approve the actual proposed entry before it is written. |
 | Write and verify | Append the entry, then use the returned evidence to decide whether the write was successful. |
 | Recover or stop | If a tool result is unclear, re-inspect and continue; if required information or access is unavailable, explain the blocker rather than guessing. |

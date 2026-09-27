@@ -30,8 +30,6 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 
-from . import skills as _skills_registry
-
 
 class Layer(str, Enum):
     INTERFACE = "interface"
@@ -95,7 +93,7 @@ class Capability:
 # lcm_expand and gets the nested spawn_subagent variant (schema_for handles both).
 _MAIN = frozenset(TurnKind)
 
-CAPABILITIES: list[Capability] = [
+_STATIC_CAPABILITIES: list[Capability] = [
     Capability("shell_exec", Layer.INTERFACE, _MAIN, handler_ref="shell_exec", timing=HEAVY),
     Capability("merge_subagent_output", Layer.CONTROL, _MAIN, handler_ref="merge_subagent_output", timing=HEAVY),
     # Renamed 2026-09-16 (from search_memory/reflect_on_entity) to match the
@@ -142,24 +140,48 @@ CAPABILITIES: list[Capability] = [
     # same shape as spawn_subagent being dispatched as a child workflow.
     Capability("deliver_reply", Layer.CONTROL, frozenset()),
     Capability("deliver_attachment", Layer.CONTROL, frozenset()),
-] + [
-    # docs/05-architecture-domain-control-loops.md — a skill is a static,
-    # always-on capability, exactly like ask_user/spawn_subagent above, not a
-    # per-turn-resolved one: there are few of them, hand-authored, known at
-    # process start, so there's no reason to gate them behind discovery. No
-    # handler_ref — turn.go dispatches a child workflow of
-    # resolved_workflow_type, same as ask_user has no handler_ref. The raw
-    # schema itself is generated into llm.TOOLS_SCHEMA directly from this
-    # same registry (llm.py), so schema_for's existing _SCHEMA_BY_NAME[c.name]
-    # lookup finds it with no changes needed there.
-    Capability(e["name"], Layer.CONTROL, _MAIN, resolved_workflow_type=e["name"])
-    for e in _skills_registry.SKILLS
 ]
 
-BY_NAME: dict[str, Capability] = {c.name: c for c in CAPABILITIES}
+# CAPABILITIES/BY_NAME/HANDLER_REFS all include this tenant's own enabled
+# skills (docs/05-architecture-domain-control-loops.md — a skill is a static,
+# always-on capability, exactly like ask_user/spawn_subagent above, not a
+# per-turn-resolved one: there are few of them, hand-authored, so there's no
+# reason to gate them behind discovery), rebuilt by load_skills below rather
+# than baked in at import time — 2026-09-27, skills moved from a hardcoded
+# process-wide list (skills.py) to this tenant's own Postgres `skills` table,
+# so they aren't known until tenant_worker.py's own startup query resolves.
+# Empty (base capabilities only) until load_skills runs, same "just isn't
+# offered yet" shape shell_hub/skill_hub already have before their own init().
+CAPABILITIES: list[Capability] = []
+BY_NAME: dict[str, Capability] = {}
+HANDLER_REFS: dict[str, str] = {}
 
-# Names with a real activity handler — what tools.py builds TOOL_REGISTRY from.
-HANDLER_REFS: dict[str, str] = {c.name: c.handler_ref for c in CAPABILITIES if c.handler_ref}
+
+def load_skills(entries: list[dict]) -> None:
+    """Rebuilds CAPABILITIES/BY_NAME/HANDLER_REFS from this tenant's freshly
+    loaded skills (skills.init's return value) — tenant_worker.py calls this
+    once at startup, after skills.init(pool) and before the Temporal worker
+    starts polling, so every real ModelCall sees the tenant's actual enabled
+    set. Idempotent (safe to call again if skills are ever reloaded without a
+    process restart, though nothing does that today).
+
+    No handler_ref — turn.go dispatches a child workflow of
+    resolved_workflow_type, same as ask_user has no handler_ref. The raw
+    schema itself is rebuilt into llm.TOOLS_SCHEMA by llm.load_skills (called
+    alongside this, same entries), so schema_for's existing
+    _SCHEMA_BY_NAME[c.name] lookup finds it with no changes needed there.
+    """
+    skill_capabilities = [
+        Capability(e["name"], Layer.CONTROL, _MAIN, resolved_workflow_type=e["name"]) for e in entries
+    ]
+    CAPABILITIES[:] = _STATIC_CAPABILITIES + skill_capabilities
+    BY_NAME.clear()
+    BY_NAME.update({c.name: c for c in CAPABILITIES})
+    HANDLER_REFS.clear()
+    HANDLER_REFS.update({c.name: c.handler_ref for c in CAPABILITIES if c.handler_ref})
+
+
+load_skills([])
 
 
 def turn_kind_of(is_subagent: bool) -> TurnKind:

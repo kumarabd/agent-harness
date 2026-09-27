@@ -86,7 +86,7 @@ from temporalio.client import Client
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
-from . import agent_brain, llm_client, shell_hub, skill_hub
+from . import agent_brain, capabilities, llm, llm_client, shell_hub, skill_hub, skills
 from .metrics import LATENCY_BUCKETS_SECONDS, SECONDS_LATENCY_METRICS
 from .compress_context import CompressContextActivity
 from .db import create_pool
@@ -119,8 +119,20 @@ async def main() -> None:
     # builds shell_hub's in-process zvec index once at startup.
     # No-op if shell_hub.CATALOG is empty or EMBEDDING_BASE_URL isn't set.
     await shell_hub.init()
-    # docs/05-architecture-domain-control-loops.md — same mechanism, its own
-    # index, sourced from skills.SKILLS instead of a $PATH scan.
+    # docs/05-architecture-domain-control-loops.md — this tenant's own
+    # enabled skills, loaded from its own Postgres `skills` table
+    # (2026-09-27, replacing a hardcoded process-wide list). Must run before
+    # capabilities.load_skills/llm.load_skills (which need the same entries
+    # to build the model-facing schema/dispatch tables) and before
+    # skill_hub.init (which reads skills.SKILLS, populated by this call, for
+    # its own zvec index) — all three before the Temporal worker below
+    # starts polling, so no ModelCall ever runs against a stale/empty set.
+    skill_entries = await skills.init(pool)
+    capabilities.load_skills(skill_entries)
+    llm.load_skills(skill_entries)
+    # docs/05-architecture-domain-control-loops.md — same mechanism as
+    # shell_hub above, its own index, sourced from skills.SKILLS (just
+    # populated by skills.init above) instead of a $PATH scan.
     await skill_hub.init()
 
     # docs/components/memory-slot.md, "Resolved: Persona/Directive Content via Mental

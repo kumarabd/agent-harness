@@ -120,16 +120,15 @@ func run(ctx context.Context, address, namespace, taskQueue string, metricsHandl
 	w.RegisterWorkflow(wf.IntentionWorkflow)
 	// docs/05-architecture-domain-control-loops.md — every "skill" lives in
 	// its own package (workflows/internal/workflow/skills/) and is
-	// registered under its own snake_case name here, matching
-	// activities/activities/skills.py's registry entry `name` exactly —
-	// that name IS the Temporal workflow type now (2026-09-27 collapsed the
-	// two, previously-separate "name"/"workflow_type" strings into one,
-	// closing the only way they could silently drift). turn.go dispatches
-	// dynamically by that name string (types.ToolCallRef.ResolvedWorkflowType),
-	// not by a Go-side switch, and never imports this package itself. This
-	// is the only Go-side registration a new skill needs beyond its own
-	// file and its entry in workflows/internal/workflow/skills/registry.go
-	// (the gateway's own GET /skills mirror of skills.py).
+	// registered under its own snake_case name here, matching this tenant's
+	// own `skills` table `name` column exactly (migration 040_skills.sql) —
+	// that name IS the Temporal workflow type (turn.go dispatches
+	// dynamically by that name string, types.ToolCallRef.ResolvedWorkflowType,
+	// not by a Go-side switch, and never imports this package itself). This
+	// is the only Go-side registration a new skill needs beyond its own file
+	// and its row in that table — 2026-09-27, the gateway's own GET /skills
+	// (workflows/internal/gateway/web/skills.go) now queries that same
+	// table directly instead of a hand-synced registry.go mirror (deleted).
 	w.RegisterWorkflowWithOptions(skillswf.JournalingSkill, temporalworkflow.RegisterOptions{Name: "journaling"})
 	w.RegisterWorkflowWithOptions(skillswf.ServiceMonitoringSkill, temporalworkflow.RegisterOptions{Name: "service_monitoring"})
 	// Keep every former type name registered during rollout so an

@@ -93,13 +93,13 @@ func JournalingSkill(ctx workflow.Context, input types.SkillWorkflowInput) (type
 		"Write in a first-person diary voice that preserves the user's wording, perspective, " +
 		"and uncertainty; do not turn it into a generic summary. If essential context is missing " +
 		"or a reference is ambiguous, use recall before asking the user a focused clarification. " +
-		"Find the user's Journal database in Notion (search for one titled roughly " +
-		"\"Journal\"; use discover_tools/call_tool for the real Notion tools). If none " +
-		"exists, or more than one plausible match exists, use ask_user to find out " +
-		"whether/where to create one, or which existing one to use. Then find today's " +
-		"page in that database (or create it if this is the first entry of the day) " +
-		"and append the entry text to it. Once written, verify the result, report what " +
-		"you did, and finish."
+		"Use Notion as a diary hierarchy, not a database. Find the page titled \"My Diary\" " +
+		"and treat it as the diary's root. If it does not exist, or more than one plausible " +
+		"page exists, use ask_user to decide whether/where to create it or which one to use. " +
+		"Under that root, find the child page named for the user's current local calendar date " +
+		"in YYYY-MM-DD format (for example, 2026-09-27). Create that dated child page if this " +
+		"is the first entry for the day, then append the entry text there. Once written, verify " +
+		"the result, report what you did, and finish."
 
 	outcome, err := RunReasoningTurn(ctx, input, "reason", objective)
 	if err != nil {

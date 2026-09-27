@@ -92,10 +92,19 @@ def session_fs_path(turn_id: str) -> str:
     from the root turn would get; the checkpoint it came from isn't a
     filesystem boundary.
 
-    Only ever called with an actual turn_id (a tool_calls row's parent_id,
-    which is always a turn or subagent-turn ID, never an ":act:" activity
-    ID) — not meant for arbitrary strings.
+    A skill's own scoped reasoning turn (RunReasoningTurn, support.go) mints
+    its turn_id as "{tool_call_id}:{suffix}" (e.g. "...:turn:6:act:1:reason")
+    so it can have its own turns/messages row without a new ID scheme —
+    despite the name, this DOES reach here (found 2026-09-27 debugging a
+    skill's first ModelCall raising ValueError on exactly this shape). Per
+    turn_id_of_tool_call's own comment, ":act:" only ever appears once,
+    terminating the id — so it's never a filesystem boundary either:
+    truncate there first, before path-mapping. A skill invoked from turn 6
+    directly and one invoked from "sess-1:turn:1:sub:1" both end up using
+    their dispatching turn's/subagent's own scratchpad, same as the
+    checkpoint example above.
     """
+    turn_id, _, _ = turn_id.partition(":act:")
     session_key, sep, rest = turn_id.partition(":turn:")
     if not sep:
         raise ValueError(f"not a turn_id (missing ':turn:'): {turn_id!r}")

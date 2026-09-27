@@ -1,16 +1,20 @@
 # Service monitoring skill loop
 
 `service_monitoring` is the control loop for configuring a monitoring
-commitment for one Kubernetes service. Grafana is mandatory as the evidence
-source: a Kubernetes, Prometheus, or other tool cannot substitute for a
-Grafana-derived signal.
+commitment for one Kubernetes service. The user can explicitly request it, or
+the agent can propose it implicitly; either route requires confirmation before
+the skill begins setup. Grafana is mandatory as the evidence source: a
+Kubernetes, Prometheus, or other tool cannot substitute for a Grafana-derived
+signal.
 
 ## Logical loop
 
 ```mermaid
 flowchart TD
-    Start([Monitoring request]) --> Scope[Identify service, namespace, cluster, and notification intent]
-    Scope --> Grafana[Discover and inspect Grafana]
+    Start([M or user: monitoring request]) --> Scope[M: Identify service, namespace, cluster, and notification intent]
+    Scope --> SetupApproval{D: Setup confirmation recorded?}
+    SetupApproval -- no --> Stop([D: Close without monitoring])
+    SetupApproval -- yes --> Grafana[M: Discover and inspect Grafana]
     Grafana --> Evidence{Trustworthy Grafana signal available?}
     Evidence -- no --> Blocked([Explain the blocker; do not arm monitoring])
     Evidence -- yes --> Decide[Choose the simplest suitable mechanism]
@@ -21,7 +25,7 @@ flowchart TD
     Query -- yes --> Connect
     Query -- no --> Proposal[Propose a Grafana alert rule and threshold]
 
-    Proposal --> Approval{User approves the external change?}
+    Proposal --> Approval{D: User approves the external change?}
     Approval -- no / expired --> Blocked
     Approval -- yes --> Provision[Create or update the approved Grafana alert]
     Provision --> Verify{Alert works and is scoped correctly?}
@@ -34,6 +38,10 @@ flowchart TD
     Diagnose --> Grafana
     Armed -- yes --> Report([Report evidence, mechanism, and commitment])
 ```
+
+`D` = deterministic workflow behavior. `M` = a model-directed step inside the
+scoped reasoning bridge. The initial setup confirmation and any later alert
+configuration approval are durable waits; the human supplies the choice.
 
 The main cycle is **inspect Grafana → make a decision from real evidence →
 verify → inspect again when necessary**. It is intentionally not a generic
@@ -62,12 +70,13 @@ monitoring commitment. The intention is not this workflow: it is a separate
 intentions for recurring schedules.
 
 This is the intended work loop, not a literal Temporal execution trace. The
-`ServiceMonitoringSkill` workflow validates the service name, creates the
-scoped reasoning turn, and records its outcome; the model performs the
-evidence-driven decisions inside the loop. The current implementation can
-author a Grafana-backed polling intention or explicit recurring review, but it
-does not yet turn an arbitrary Grafana alert webhook into a push-triggered
-intention. That would be an extension to the generic intention trigger path.
+first native states are implemented: `ServiceMonitoringSkill` validates the
+target and obtains durable setup confirmation itself. After approval, the
+current implementation still uses a scoped reasoning bridge for dynamic
+Grafana discovery, evidence interpretation, and provisioning. It can author a
+Grafana-backed polling intention or explicit recurring review, but it does not
+yet turn an arbitrary Grafana alert webhook into a push-triggered intention.
+That would be an extension to the generic intention trigger path.
 
 Relevant implementation: `workflows/internal/workflow/skills/service_monitoring.go`,
 `workflows/internal/workflow/skills/support.go`,

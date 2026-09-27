@@ -50,7 +50,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import prompt
-from . import skills as _skills_registry
 from .types import Usage
 
 # docs/components/turn-pipeline.md, "Model I/O schema" — the model authors
@@ -228,7 +227,7 @@ VOICE_SYSTEM_PROMPT = (
     "and note anything the next step needs to remember."
 )
 
-TOOLS_SCHEMA = [
+_STATIC_TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
@@ -620,19 +619,14 @@ TOOLS_SCHEMA = [
 
 # docs/05-architecture-domain-control-loops.md — each registered skill is a
 # static, always-on capability, built directly from its own registry entry
-# (activities/activities/skills.py) rather than hand-written here: nothing to
-# hand-sync when a skill is added. Appended before _SCHEMA_BY_NAME is built
-# below, so it's picked up the same way every other static tool schema is —
-# capabilities.CAPABILITIES has a matching static Capability per skill
-# (capabilities.py), so schema_for's existing _SCHEMA_BY_NAME[c.name] lookup
-# finds these with no changes needed there.
-TOOLS_SCHEMA.extend(
-    {
-        "type": "function",
-        "function": {"name": e["name"], "description": e["description"], "parameters": e["input_schema"]},
-    }
-    for e in _skills_registry.SKILLS
-)
+# rather than hand-written here: nothing to hand-sync when a skill is added.
+# TOOLS_SCHEMA/_SCHEMA_BY_NAME are rebuilt by load_skills below (called from
+# tenant_worker.py after skills.init(pool) resolves), not populated at import
+# time — 2026-09-27, skills moved from a hardcoded process-wide list
+# (skills.py) to this tenant's own Postgres `skills` table, so they aren't
+# known until that startup query resolves. Empty (static schema only) until
+# then, same "just isn't offered yet" shape shell_hub/skill_hub already have.
+TOOLS_SCHEMA: list[dict] = list(_STATIC_TOOLS_SCHEMA)
 
 # docs/components/context-slot.md's Memory-Access Tools — lcm_expand is
 # subagent-only at the schema level (excluded from a main-agent turn's schema
@@ -761,17 +755,44 @@ _ASK_USER_SCHEMA = {
 
 
 # name -> schema dict, over every model-facing schema this module defines.
-# `capabilities.schema_for` reads this back; the nested spawn_subagent variant
-# is passed separately.
-_SCHEMA_BY_NAME: dict[str, dict] = {
-    t["function"]["name"]: t
-    for t in [
-        *TOOLS_SCHEMA,
-        _ASK_USER_SCHEMA,
-        _DELIVER_REPLY_SCHEMA,
-        _DELIVER_ATTACHMENT_SCHEMA,
+# `capabilities.schema_for` reads this back (via a fresh `from .llm import
+# _SCHEMA_BY_NAME` each call, so it always sees whatever load_skills last
+# rebuilt this into); the nested spawn_subagent variant is passed separately.
+_SCHEMA_BY_NAME: dict[str, dict] = {}
+
+
+def load_skills(entries: list[dict]) -> None:
+    """Rebuilds TOOLS_SCHEMA/_SCHEMA_BY_NAME from this tenant's freshly loaded
+    skills (skills.init's return value) — tenant_worker.py calls this once at
+    startup, after skills.init(pool) and before the Temporal worker starts
+    polling, alongside the matching capabilities.load_skills(entries) call
+    (same entries, same ordering requirement — capabilities.CAPABILITIES
+    needs a matching skill Capability for schema_for to ever reach the schema
+    this rebuilds). Idempotent.
+    """
+    skill_schemas = [
+        {
+            "type": "function",
+            "function": {"name": e["name"], "description": e["description"], "parameters": e["input_schema"]},
+        }
+        for e in entries
     ]
-}
+    TOOLS_SCHEMA[:] = _STATIC_TOOLS_SCHEMA + skill_schemas
+    _SCHEMA_BY_NAME.clear()
+    _SCHEMA_BY_NAME.update(
+        {
+            t["function"]["name"]: t
+            for t in [
+                *TOOLS_SCHEMA,
+                _ASK_USER_SCHEMA,
+                _DELIVER_REPLY_SCHEMA,
+                _DELIVER_ATTACHMENT_SCHEMA,
+            ]
+        }
+    )
+
+
+load_skills([])
 
 
 def tools_schema_for(

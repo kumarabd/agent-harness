@@ -3,8 +3,6 @@ package web
 import (
 	"encoding/json"
 	"net/http"
-
-	skillswf "agent-harness/workflows/internal/workflow/skills"
 )
 
 type skillSummary struct {
@@ -17,18 +15,41 @@ type listSkillsResponse struct {
 	Skills []skillSummary `json:"skills"`
 }
 
-// handleListSkills serves workflows/internal/workflow/skills/registry.go's
-// hand-maintained mirror of activities/activities/skills.py — a skill IS its
-// own Temporal workflow (docs/05-architecture-domain-control-loops.md, "A
-// Skill Is a Workflow, Not a Document"), so there is no separate "steps" or
-// "prompt" field to show here: registry.go's InputSchema plus skills.py's
-// own description are the whole of what a skill declares about itself from
-// the outside. Same shape for every user — skills are process-wide, hand-
-// authored, never per-tenant or per-session.
+// handleListSkills queries this tenant's own `skills` table (migration
+// 040_skills.sql) directly — 2026-09-27, replacing a hand-maintained mirror
+// of activities/activities/skills.py (workflows/internal/workflow/skills/
+// registry.go, deleted alongside this). A skill IS its own Temporal workflow
+// (docs/05-architecture-domain-control-loops.md, "A Skill Is a Workflow, Not
+// a Document"), so there is no separate "steps" or "prompt" field to show
+// here: this table's input_schema plus description are the whole of what a
+// skill declares about itself from the outside.
+//
+// Same Postgres this tenant's own tenant-worker already reads via
+// skills.init(pool) (activities/activities/skills.py) — no new cross-service
+// plumbing, and `enabled` now actually varies per tenant instead of every
+// tenant's image shipping the same hardcoded global list.
 func (h *Handler) handleListSkills(w http.ResponseWriter, r *http.Request) {
-	out := make([]skillSummary, len(skillswf.Registry))
-	for i, s := range skillswf.Registry {
-		out[i] = skillSummary{Name: s.Name, Description: s.Description, InputSchema: s.InputSchema}
+	ctx := r.Context()
+	rows, err := h.pool.Query(ctx,
+		"SELECT name, description, input_schema FROM skills WHERE enabled ORDER BY name",
+	)
+	if err != nil {
+		http.Error(w, "failed to list skills", http.StatusInternalServerError)
+		return
 	}
+	defer rows.Close()
+
+	var out []skillSummary
+	for rows.Next() {
+		var s skillSummary
+		var inputSchema []byte
+		if err := rows.Scan(&s.Name, &s.Description, &inputSchema); err != nil {
+			http.Error(w, "failed to list skills", http.StatusInternalServerError)
+			return
+		}
+		s.InputSchema = json.RawMessage(inputSchema)
+		out = append(out, s)
+	}
+
 	writeJSON(w, http.StatusOK, listSkillsResponse{Skills: out})
 }

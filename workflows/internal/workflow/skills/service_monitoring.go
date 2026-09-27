@@ -3,6 +3,7 @@ package skills
 import (
 	"strings"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/workflow"
 
 	"agent-harness/workflows/internal/types"
@@ -17,11 +18,13 @@ import (
 // connected Grafana MCP capability so it can interpret the deployment's real
 // dashboards, metrics, and existing alerts.
 //
-// It is registered under "service_monitoring" in skills.py. Like the other
-// skills, it owns only the process bookends: read its real arguments and close
-// its outer tool call. The shared RunReasoningTurn supplies the same durable
-// reason-act loop, tool discovery, approval requests, and generic intention
-// creation that an ordinary turn uses.
+// It is registered under "service_monitoring" in skills.py. Its first native
+// state obtains consent to investigate and set up this monitoring commitment,
+// which protects agent-initiated invocations as well as explicit requests.
+// The subsequent Grafana discovery/provisioning path remains on the scoped
+// reasoning bridge during the incremental migration to native states. That
+// bridge still independently requires specific approval before an external
+// alerting configuration is changed.
 func ServiceMonitoringSkill(ctx workflow.Context, input types.SkillWorkflowInput) (types.SkillWorkflowOutput, error) {
 	ctx = wf.WithTenantTaskQueue(ctx, input.TenantSlug)
 	out := types.SkillWorkflowOutput{ToolCallID: input.ToolCallID}
@@ -55,8 +58,47 @@ func ServiceMonitoringSkill(ctx workflow.Context, input types.SkillWorkflowInput
 		target += " on cluster " + cluster
 	}
 
+	// Native skill state: approval to begin a durable monitoring setup. This
+	// is intentionally distinct from the later, signal-specific approval for a
+	// Grafana alert rule change. It gives a user control over an implicit skill
+	// invocation without pretending that the eventual signal/threshold is known
+	// before Grafana has been inspected.
+	confirmID := input.ToolCallID + ":monitoring-confirm"
+	confirmCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
+		WorkflowID:        confirmID,
+		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
+	})
+	var confirmation types.UserInputRequestWorkflowOutput
+	confirmErr := workflow.ExecuteChildWorkflow(confirmCtx, wf.UserInputRequestWorkflow, types.UserInputRequestWorkflowInput{
+		Request: types.UserInputRequest{
+			RequestID: confirmID,
+			TurnID:    input.TurnID,
+			Kind:      "decision",
+			Prompt: "Set up monitoring for Kubernetes " + target + "?\n\n" +
+				"I will inspect Grafana to establish a signal for: " + notifyWhen + ". " +
+				"Any external Grafana alerting change will require a separate, specific approval.",
+			Options: []types.UserInputOption{
+				{ID: "approve", Label: "Set up monitoring"},
+				{ID: "decline", Label: "Do not set it up"},
+			},
+			Context: map[string]any{"skill": "service_monitoring", "state": "confirm_setup"},
+		},
+		SessionKey:   input.SessionKey,
+		ConnectionID: input.ConnectionID,
+		TenantSlug:   input.TenantSlug,
+	}).Get(confirmCtx, &confirmation)
+	if confirmErr != nil {
+		out.Status = closeSkillCall(ctx, input.ToolCallID, "cancelled", nil, "setup_confirmation_cancelled", "none")
+		return out, nil
+	}
+	if confirmation.Response.SelectedOptionID == nil || *confirmation.Response.SelectedOptionID != "approve" {
+		out.Status = closeSkillCall(ctx, input.ToolCallID, "cancelled", nil, "monitoring_not_confirmed", "none")
+		return out, nil
+	}
+
 	objective := "Configure durable monitoring for Kubernetes " + target + ". The requested " +
 		"notification condition is: " + notifyWhen + ".\n\n" +
+		"The user has approved monitoring setup for this target. Do not ask for setup approval again. " +
 		"Grafana is mandatory for this task. First call discover_tools specifically for Grafana, then use " +
 		"a discovered Grafana capability to inspect the real monitoring details for this target: relevant " +
 		"dashboards, metrics, queries, and any existing alerts. Do not substitute Kubernetes, Prometheus, " +
