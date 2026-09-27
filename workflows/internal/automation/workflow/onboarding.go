@@ -41,15 +41,32 @@ type Progress struct {
 }
 
 // defaultActivityOptions applies to every activity below except HealthCheck
-// (which runs its own bounded polling loop internally, see activities/
-// k8s.go) — a real `helm upgrade --install` pulling three chart
-// dependencies can legitimately take minutes, so this is generous on
-// purpose; heartbeating (exec.go) is what actually detects a truly stuck
-// subprocess, not this timeout.
+// — a real `helm upgrade --install` pulling three chart dependencies can
+// legitimately take minutes, so this is generous on purpose; heartbeating
+// (exec.go) is what actually detects a truly stuck subprocess, not this
+// timeout.
 func defaultActivityOptions() workflow.ActivityOptions {
 	return workflow.ActivityOptions{
 		StartToCloseTimeout: 10 * time.Minute,
 		HeartbeatTimeout:    30 * time.Second,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+	}
+}
+
+// healthCheckActivityOptions — HealthCheck (activities/k8s.go) runs its own
+// bounded polling loop internally (up to 5 minutes, heartbeating every
+// iteration), so its HeartbeatTimeout/StartToCloseTimeout need to actually
+// cover that, unlike defaultActivityOptions' 30s heartbeat timeout tuned for
+// activities with no internal loop of their own. 2026-09-27: this exemption
+// used to be a comment only — defaultActivityOptions' ctx was applied to
+// HealthCheck too, so Temporal killed it as heartbeat-timed-out after 30s
+// almost every time, regardless of how much of its own 5-minute deadline
+// was left (activities/k8s.go's own fix — it never called
+// activity.RecordHeartbeat at all — closes the other half of this).
+func healthCheckActivityOptions() workflow.ActivityOptions {
+	return workflow.ActivityOptions{
+		StartToCloseTimeout: 6 * time.Minute,
+		HeartbeatTimeout:    20 * time.Second,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
 	}
 }
@@ -132,8 +149,9 @@ func TenantOnboardingWorkflow(ctx workflow.Context, in activities.TenantOnboardi
 	// that same slug (already done, above) is the only thing that was ever
 	// missing.
 
+	healthCheckCtx := workflow.WithActivityOptions(ctx, healthCheckActivityOptions())
 	if err := runStep("HealthCheck", func() error {
-		return workflow.ExecuteActivity(ctx, a.HealthCheck, ref).Get(ctx, nil)
+		return workflow.ExecuteActivity(healthCheckCtx, a.HealthCheck, ref).Get(healthCheckCtx, nil)
 	}); err != nil {
 		cleanup()
 		return fail(err)
