@@ -40,7 +40,12 @@ class FireIntentionActivity:
     def __init__(self, pool, temporal_client):
         self._pool = pool  # unused today; kept for symmetry with the other activities
         self._client = temporal_client
-        self._task_queue = os.environ.get("TEMPORAL_TASK_QUEUE", "agent-loop")
+        # 2026-09-26: renamed from TEMPORAL_TASK_QUEUE — see tools_intention.py's
+        # identical rename. CoordinatorWorkflow is a separate execution the
+        # shared loop-worker pool polls on the fixed workflow-task queue,
+        # never this tenant's own activity queue.
+        self._task_queue = os.environ.get("TEMPORAL_WORKFLOW_TASK_QUEUE", "agent-loop")
+        self._tenant_slug = os.environ.get("TENANT_SLUG", "")
 
     @activity.defn(name="FireIntention")
     async def __call__(self, input: FireIntentionInput) -> None:
@@ -49,7 +54,7 @@ class FireIntentionActivity:
         # routes to Postgres, surfaced on next open — proactivity.md "Delivery").
         await self._client.start_workflow(
             _COORDINATOR_WORKFLOW,
-            {"session_key": input.session_key},
+            {"session_key": input.session_key, "tenant_slug": self._tenant_slug},
             id=input.session_key,
             task_queue=self._task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,

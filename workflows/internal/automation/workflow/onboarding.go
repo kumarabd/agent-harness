@@ -15,19 +15,6 @@ import (
 	"agent-harness/workflows/internal/automation/activities"
 )
 
-// ApproveSharedPoolRolloutSignal is the human-approval gate before
-// RegisterSharedPoolNamespace — the one step in this workflow that mutates
-// the single, cluster-wide agent-harness-shared release every OTHER
-// tenant's turns already depend on (that chart's own values.yaml comment:
-// "this rolls the whole shared pool"). Every other step here is safely
-// scoped to just the new tenant's own namespace; this one alone touches
-// shared state, so it waits for an operator to send this signal rather than
-// running automatically.
-//
-//	temporal workflow signal --workflow-id tenant-onboard:<slug> \
-//	  --name approve-shared-pool-rollout --namespace system
-const ApproveSharedPoolRolloutSignal = "approve-shared-pool-rollout"
-
 // ProgressQuery is how the router's GET /onboard/{request_id}
 // (workflows/internal/router/core/onboarding.go) reads live status — a
 // Temporal Query against this workflow directly, not a database read. There
@@ -42,6 +29,12 @@ type StepProgress struct {
 }
 
 type Progress struct {
+	// 2026-09-26: "awaiting_approval" no longer occurs — the shared-pool
+	// rollout step it gated (RegisterSharedPoolNamespace) is gone along
+	// with per-tenant Temporal namespaces; this workflow now runs straight
+	// through with no human gate. Kept as a documented possible value only
+	// because the router/agent-web side still know how to render it, not
+	// because anything sets it anymore.
 	Status string         `json:"status"` // pending|running|awaiting_approval|completed|failed
 	Error  string         `json:"error,omitempty"`
 	Steps  []StepProgress `json:"steps"`
@@ -101,11 +94,6 @@ func TenantOnboardingWorkflow(ctx workflow.Context, in activities.TenantOnboardi
 	}); err != nil {
 		return fail(err)
 	}
-	if err := runStep("RegisterTemporalNamespace", func() error {
-		return workflow.ExecuteActivity(ctx, a.RegisterTemporalNamespace, ref).Get(ctx, nil)
-	}); err != nil {
-		return fail(err)
-	}
 	if err := runStep("CreateK8sNamespace", func() error {
 		return workflow.ExecuteActivity(ctx, a.CreateK8sNamespace, ref).Get(ctx, nil)
 	}); err != nil {
@@ -131,17 +119,6 @@ func TenantOnboardingWorkflow(ctx workflow.Context, in activities.TenantOnboardi
 
 	if err := runStep("HelmInstallTenant", func() error {
 		return workflow.ExecuteActivity(ctx, a.HelmInstallTenant, ref).Get(ctx, nil)
-	}); err != nil {
-		cleanup()
-		return fail(err)
-	}
-
-	progress.Status = "awaiting_approval"
-	workflow.GetSignalChannel(ctx, ApproveSharedPoolRolloutSignal).Receive(ctx, nil)
-	progress.Status = "running"
-
-	if err := runStep("RegisterSharedPoolNamespace", func() error {
-		return workflow.ExecuteActivity(ctx, a.RegisterSharedPoolNamespace, ref).Get(ctx, nil)
 	}); err != nil {
 		cleanup()
 		return fail(err)

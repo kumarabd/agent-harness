@@ -71,6 +71,14 @@ type Message struct {
 type TurnInput struct {
 	SessionKey string `json:"session_key"`
 	TurnID     string `json:"turn_id"`
+	// TenantSlug — docs/components/multi-tenancy.md's "Resolved: Shared
+	// Temporal Namespace, Per-Tenant Task Queues" (2026-09-26). Every tenant
+	// now shares one Temporal namespace; this is what routes each activity
+	// dispatch (ModelCall, ToolCall, InsertMessage, ...) to that tenant's own
+	// tenant-worker fleet's queue (workflow.TenantActivityQueue) instead of
+	// leaking onto another tenant's. Threaded from CoordinatorInput exactly
+	// like ConnectionID already is.
+	TenantSlug string `json:"tenant_slug"`
 	ParentType string `json:"parent_type"` // "session" | "turn" — see components/state-layer.md turns.parent_type
 	// ParentID/TurnSeq are only meaningful for a top-level turn (ParentType ==
 	// "session") — passed through so the turn workflow's start-of-turn
@@ -299,6 +307,7 @@ type SkillWorkflowInput struct {
 	// same crossing ToolName/Server/Tool already make on ToolCallRef.
 	TurnID       string `json:"turn_id"`
 	SessionKey   string `json:"session_key"`
+	TenantSlug   string `json:"tenant_slug"` // see TurnInput's own doc comment
 	ConnectionID string `json:"connection_id,omitempty"`
 }
 
@@ -423,6 +432,11 @@ type UserInputRequestWorkflowInput struct {
 	// pending_input directly), no push needed.
 	SessionKey   string `json:"session_key,omitempty"`
 	ConnectionID string `json:"connection_id,omitempty"`
+	// TenantSlug — see TurnInput's own doc comment. UserInputRequestWorkflow
+	// is a separately-started child workflow (its own workflow.Context, not
+	// inherited from whatever started it), so this has to be threaded
+	// through explicitly at every call site, same as ConnectionID above.
+	TenantSlug string `json:"tenant_slug,omitempty"`
 }
 
 // ErrTypeContentTooLong — the Temporal ApplicationError type name Deliver
@@ -455,6 +469,11 @@ type UserInputRequestWorkflowOutput struct {
 type IntentionInput struct {
 	IntentionID string `json:"intention_id"`
 	SessionKey  string `json:"session_key"` // whose CoordinatorWorkflow the fire wakes
+	// TenantSlug — see TurnInput's own doc comment. Set by whoever starts
+	// this workflow (tools_intention.py's create_intention / a recurring
+	// Schedule tick) — carried through ContinueAsNew automatically since
+	// it's part of input, never re-derived.
+	TenantSlug string `json:"tenant_slug"`
 	Objective   string `json:"objective"`
 	Why         string `json:"why,omitempty"`
 	Kind        string `json:"kind"`

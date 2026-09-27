@@ -56,7 +56,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _INTENTION_WORKFLOW = "IntentionWorkflow"
-_TASK_QUEUE = os.environ.get("TEMPORAL_TASK_QUEUE", "agent-loop")
+# 2026-09-26: renamed from TEMPORAL_TASK_QUEUE — docs/components/
+# multi-tenancy.md's "Resolved: Shared Temporal Namespace, Per-Tenant Task
+# Queues". This is specifically the queue a NEW IntentionWorkflow execution
+# is STARTED on (the shared, tenant-agnostic workflow-task queue every
+# tenant's loop-worker pool polls identically) — distinct from
+# TEMPORAL_TASK_QUEUE, which now names this tenant's own tenant-worker
+# ACTIVITY queue instead (tenant_worker.py's own env var, unused here).
+_TASK_QUEUE = os.environ.get("TEMPORAL_WORKFLOW_TASK_QUEUE", "agent-loop")
+# This tenant's own slug — every tenant now shares one Temporal namespace, so
+# this is what routes IntentionWorkflow's own FireIntention activity calls to
+# THIS tenant's tenant-worker queue instead of leaking onto another tenant's
+# (workflow.TenantActivityQueue on the Go side).
+_TENANT_SLUG = os.environ.get("TENANT_SLUG", "")
 _KINDS = {"time", "deadline", "condition", "state", "event", "inactivity", "schedule"}
 
 # A recurring intention is a Temporal Schedule (id prefix "intn-sched:") whose
@@ -118,7 +130,7 @@ async def _create_recurring(arguments: dict, ctx: "ToolContext", scope: str, obj
         _INTENTION_WORKFLOW,
         # kind="time" with no fire_at ⇒ the workflow fires immediately on start,
         # i.e. once per schedule tick (see IntentionWorkflow's time case).
-        {"intention_id": wf_id, "session_key": scope, "objective": objective, "why": why, "kind": "time"},
+        {"intention_id": wf_id, "session_key": scope, "tenant_slug": _TENANT_SLUG, "objective": objective, "why": why, "kind": "time"},
         id=wf_id,
         task_queue=_TASK_QUEUE,
     )
@@ -149,6 +161,7 @@ async def create_intention(arguments: dict, ctx: "ToolContext") -> dict:
     wf_input: dict = {
         "intention_id": "",
         "session_key": scope,  # the canonical session a fire wakes (ids.user_scope_of)
+        "tenant_slug": _TENANT_SLUG,
         "objective": objective,
         "why": why,
         "kind": kind,
@@ -206,14 +219,36 @@ async def list_intentions(arguments: dict, ctx: "ToolContext") -> dict:
     client = _client(ctx)
     out: list[dict] = []
 
-    # Server-side scope filter on the IntentionUser Search Attribute — no
-    # client-side workflow-id matching. The per-workflow `status` query still
-    # gives the rich fields (objective, fire count) that aren't attributes.
-    # No fallback: if the query fails (attributes not registered on the
-    # namespace), that surfaces rather than silently returning a partial list.
+    # 2026-09-26: explicit TenantSlug filter added alongside the existing
+    # IntentionUser one — docs/components/multi-tenancy.md's "Resolved:
+    # Shared Temporal Namespace, Per-Tenant Task Queues". Before that
+    # migration this query ran against a per-tenant Temporal namespace, so
+    # IntentionUser alone was already tenant-safe by construction (the
+    # namespace boundary made cross-tenant results structurally
+    # impossible). Now every tenant shares one namespace, and IntentionUser
+    # (ids.user_scope_of — a Clerk user id or Discord snowflake) is *still*
+    # globally unique in practice, so this wasn't an active leak — but it
+    # was no longer a DESIGNED isolation boundary, just an incidental
+    # property of those ID spaces. This project's own stated preference is
+    # structural isolation over a check that happens to hold rather than
+    # one that's guaranteed to — same reasoning as every other per-tenant
+    # boundary in this codebase.
+    if not _TENANT_SLUG:
+        # Fail loud, not a silently-empty result indistinguishable from "you
+        # really have no intentions" — same "no fallback" discipline this
+        # query's own comment below already applies to a failed query.
+        raise ValueError("TENANT_SLUG is not configured — cannot safely list intentions")
+
+    # Server-side scope filter on the IntentionUser/TenantSlug Search
+    # Attributes — no client-side workflow-id matching. The per-workflow
+    # `status` query still gives the rich fields (objective, fire count)
+    # that aren't attributes. No fallback: if the query fails (attributes
+    # not registered on the namespace), that surfaces rather than silently
+    # returning a partial list.
     query = (
         "WorkflowType = 'IntentionWorkflow' "
         f"AND IntentionUser = {_q_lit(scope)} "
+        f"AND TenantSlug = {_q_lit(_TENANT_SLUG)} "
         "AND ExecutionStatus = 'Running'"
     )
     async for wf in client.list_workflows(query):

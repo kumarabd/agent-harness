@@ -14,14 +14,32 @@ package activities
 // org_id -> namespace/release row) is also gone: tenant identity is pure
 // convention now (workflows/internal/router/core/tenant.go), so there is
 // nothing left to register.
+//
+// 2026-09-26: RegisterTemporalNamespace and RegisterSharedPoolNamespace are
+// both gone too — docs/components/multi-tenancy.md's "Resolved: Shared
+// Temporal Namespace, Per-Tenant Task Queues". Every tenant now shares ONE
+// pre-existing Temporal namespace (TenantTemporalNamespace below) instead of
+// getting its own, so there is no namespace left to create per tenant, and
+// no shared-pool "temporal.namespaces" list left to append to — onboarding
+// a tenant now genuinely never touches the agent-harness-shared release at
+// all. SharedChartDir/SharedRelease (only ever used by
+// RegisterSharedPoolNamespace) are gone with it; SharedNamespace stays —
+// StageTenantSecrets/CleanupStagedSecret still stage the submitted secrets
+// in that namespace, an unrelated concern.
 type Activities struct {
-	TemporalAddress        string // dialed fresh per RegisterTemporalNamespace call — see that file's own comment on why a NamespaceClient isn't reused
-	NamespaceRetentionDays int
+	TemporalAddress string
+	// TenantTemporalNamespace — the one Temporal namespace every tenant's
+	// own tenant-worker/Gateway/agent-brain fleet AND the shared
+	// loop-worker pool share now ("agents" — named after the Kubernetes
+	// namespace every tenant lives in, a cosmetic consistency choice, NOT
+	// this automation worker's own separate "system" control-plane
+	// namespace, which this worker actually runs on). Written into every
+	// generated tenant's temporal.namespace and
+	// agent-brain.temporal.namespace.
+	TenantTemporalNamespace string
 
 	ChartDir        string // deploy/helm/agent-harness-tenant, baked into this image — see helm.go
-	SharedChartDir  string // deploy/helm/agent-harness-shared, baked into this image
-	SharedRelease   string // the shared chart's own release name (e.g. "harness")
-	SharedNamespace string // k8s namespace the shared release lives in
+	SharedNamespace string // k8s namespace StageTenantSecrets/CleanupStagedSecret stage the submitted secret in
 
 	ClerkIssuer string // the one shared Clerk issuer (Phase 1's single-project migration) — written into every generated tenant's gateway.web.clerkIssuer
 

@@ -52,7 +52,7 @@ func (a *Activities) readStagedSecret(ctx context.Context, requestID string) (ma
 // agent-brain.llm/.temporal one below can be caught by a unit test instead
 // of only by manually cross-referencing every field against a real tenant's
 // working values.yaml — which is how both were actually found.
-func buildTenantValues(ref PublicRef, clerkIssuer, temporalAddress string, secrets map[string]string) (map[string]any, error) {
+func buildTenantValues(ref PublicRef, clerkIssuer, temporalAddress, tenantTemporalNamespace string, secrets map[string]string) (map[string]any, error) {
 	var llmTiers map[string]LLMTier
 	if err := json.Unmarshal([]byte(secrets[keyLLMTiersJSON]), &llmTiers); err != nil {
 		return nil, fmt.Errorf("decode staged llm tiers: %w", err)
@@ -74,15 +74,30 @@ func buildTenantValues(ref PublicRef, clerkIssuer, temporalAddress string, secre
 
 	// agent-brain's own retain/reflect worker (charts/agent-brain/templates/
 	// _helpers.tpl's temporalWorkerEnv: LLM_BASE_URL/LLM_MODEL, TEMPORAL_
-	// ADDRESS/TEMPORAL_NAMESPACE) reads these from its own top-level
-	// llm.baseURL/model and temporal.address/namespace — NOT nested under a
-	// "mining" key (agent-harness-tenant/values.yaml's own default had a
-	// stale agentBrain.mining.llm.* path pointing at nothing the subchart
-	// actually consumes; fixed alongside this). Neither has a chart-side
-	// fail guard or safe default (both render as empty strings otherwise),
-	// so leaving them unset here silently broke retain/reflect for every
-	// self-serve onboarded tenant — found by comparing against
-	// deploy/helm/tenants/abishekk.yaml, which sets both by hand.
+	// ADDRESS/TEMPORAL_NAMESPACE/TEMPORAL_RETAIN_TASK_QUEUE) reads these from
+	// its own top-level llm.baseURL/model and temporal.address/namespace/
+	// retainTaskQueue — NOT nested under a "mining" key (agent-harness-tenant/
+	// values.yaml's own default had a stale agentBrain.mining.llm.* path
+	// pointing at nothing the subchart actually consumes; fixed alongside
+	// this). None of these have a chart-side fail guard or safe default
+	// (they render as empty strings otherwise), so leaving them unset here
+	// silently broke retain/reflect for every self-serve onboarded tenant —
+	// found by comparing against deploy/helm/tenants/abishekk.yaml, which
+	// sets them by hand.
+	//
+	// retainTaskQueue MUST be tenant-prefixed (2026-09-26, docs/components/
+	// multi-tenancy.md's "Resolved: Shared Temporal Namespace, Per-Tenant
+	// Task Queues") — every tenant's own agent-brain instance is a separate
+	// pod, but they all now share ONE Temporal namespace, so the subchart's
+	// own fixed default ("agent-brain-retain") would have every tenant's
+	// retain worker polling the SAME queue: any tenant's retain workflow
+	// could be picked up by another tenant's own agent-brain pod, which
+	// holds THAT tenant's own Postgres/API credentials. This can't be fixed
+	// chart-side (agent-brain's own template reads it from ITS OWN values
+	// namespace, populated before any template renders, so it can't be
+	// computed from .Release.Name the way this chart's OWN configmap.yaml
+	// computes the tenant-worker/Gateway queue names) — it has to be an
+	// explicit value here, same as namespace/address already are.
 	//
 	// "medium" mirrors abishekk.yaml's own convention ("mining[/retain] is
 	// treated as a medium-tier consumer") — falls back to whichever tier
@@ -101,7 +116,7 @@ func buildTenantValues(ref PublicRef, clerkIssuer, temporalAddress string, secre
 	}
 
 	return map[string]any{
-		"temporal": map[string]any{"namespace": ref.TenantSlug},
+		"temporal": map[string]any{"namespace": tenantTemporalNamespace},
 		"agentBrain": map[string]any{
 			"postgres":    map[string]any{"password": secrets[keyAgentBrainDBPassword]},
 			"apiKey":      secrets[keyAgentBrainAPIKey],
@@ -135,8 +150,9 @@ func buildTenantValues(ref PublicRef, clerkIssuer, temporalAddress string, secre
 				"model":   retainTier.Model,
 			},
 			"temporal": map[string]any{
-				"address":   temporalAddress,
-				"namespace": ref.TenantSlug,
+				"address":         temporalAddress,
+				"namespace":       tenantTemporalNamespace,
+				"retainTaskQueue": ref.TenantSlug + "-memory",
 			},
 		},
 		"mcp-hub": map[string]any{
@@ -164,7 +180,7 @@ func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error
 		return err
 	}
 
-	values, err := buildTenantValues(ref, a.ClerkIssuer, a.TemporalAddress, secrets)
+	values, err := buildTenantValues(ref, a.ClerkIssuer, a.TemporalAddress, a.TenantTemporalNamespace, secrets)
 	if err != nil {
 		return err
 	}
@@ -181,49 +197,3 @@ func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error
 	return nil
 }
 
-// RegisterSharedPoolNamespace appends this tenant's namespace to the shared
-// agent-harness-shared release's temporal.namespaces and re-runs `helm
-// upgrade` — the highest-blast-radius step in this whole workflow (that
-// chart's own values.yaml comment: "this rolls the whole shared pool").
-// Gated behind an explicit human-approval signal in workflow/onboarding.go
-// BEFORE this activity is ever scheduled — this function itself has no
-// approval logic, it trusts the workflow already waited.
-//
-// `helm get values` + append + `helm upgrade --reuse-values` avoids needing
-// this worker to know or reconstruct the shared release's own full values
-// file (which holds real Clerk/Postgres/LLM config for every OTHER tenant's
-// shared-pool wiring — nothing this activity should ever need to see, let
-// alone risk overwriting with a partial re-render).
-func (a *Activities) RegisterSharedPoolNamespace(ctx context.Context, ref PublicRef) error {
-	current, err := runCommand(ctx, "helm", "get", "values", a.SharedRelease, "-n", a.SharedNamespace, "-o", "json")
-	if err != nil {
-		return fmt.Errorf("read shared release values: %w", err)
-	}
-	var parsed struct {
-		Temporal struct {
-			Namespaces []string `json:"namespaces"`
-		} `json:"temporal"`
-	}
-	if err := json.Unmarshal([]byte(current), &parsed); err != nil {
-		return fmt.Errorf("parse shared release values: %w", err)
-	}
-	for _, ns := range parsed.Temporal.Namespaces {
-		if ns == ref.TenantSlug {
-			return nil // idempotent — a workflow retry landing here again is a no-op
-		}
-	}
-	namespaces := append(parsed.Temporal.Namespaces, ref.TenantSlug)
-
-	override, err := yaml.Marshal(map[string]any{
-		"temporal": map[string]any{"namespaces": namespaces},
-	})
-	if err != nil {
-		return fmt.Errorf("marshal namespace override: %w", err)
-	}
-	_, err = runCommandStdin(ctx, string(override), "helm", "upgrade", a.SharedRelease,
-		a.SharedChartDir, "-n", a.SharedNamespace, "--reuse-values", "-f", "-")
-	if err != nil {
-		return fmt.Errorf("helm upgrade shared release: %w", err)
-	}
-	return nil
-}

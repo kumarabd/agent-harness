@@ -91,6 +91,7 @@ func RunReasoningTurn(ctx workflow.Context, input types.SkillWorkflowInput, idSu
 	loopResult, err := wf.RunReasonActLoop(ctx, wf.RunReasonActLoopInput{
 		TurnID:             reasoningTurnID,
 		SessionKey:         input.SessionKey,
+		TenantSlug:         input.TenantSlug,
 		ConnectionID:       input.ConnectionID,
 		ParentType:         "skill",
 		OfferDeliveryTools: false,

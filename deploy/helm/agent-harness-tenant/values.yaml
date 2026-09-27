@@ -1,33 +1,41 @@
 # -- This chart is one release PER TENANT (docs/components/multi-tenancy.md):
-# install it once per tenant, each with its own values (at minimum a
-# different `temporal.namespace` and release name). It deploys the tenant's
-# worker fleet, its own self-hosted Postgres instance + PV, against
-# an EXISTING Temporal server/cluster (shared across tenants — namespaces are
-# the isolation boundary, not separate clusters). It does not deploy Temporal
-# itself.
+# install it once per tenant, each with its own release name (the tenant's
+# slug). It deploys the tenant's worker fleet, its own self-hosted Postgres
+# instance + PV, against an EXISTING Temporal server/cluster. It does not
+# deploy Temporal itself.
 #
-# The loop-worker pool (Session Coordinator + Turn Workflow) is NOT
-# deployed by this chart at all — per docs/components/multi-tenancy.md's
-# 2026-08-14 revision, the loop worker is tenant-agnostic and runs as a
+# The loop-worker pool (Session Coordinator + Turn Workflow) is NOT deployed
+# by this chart at all — the loop worker is tenant-agnostic and runs as a
 # separate shared pool, deployed ONCE for the whole cluster via the sibling
-# ../agent-harness-shared chart. This tenant's Temporal namespace (below)
-# must be added to that shared release's `temporal.namespaces` for turns in
-# this namespace to actually get scheduled.
-
+# ../agent-harness-shared chart.
+#
+# 2026-09-26 — Resolved: Shared Temporal Namespace, Per-Tenant Task Queues
+# (docs/components/multi-tenancy.md). Every tenant now shares ONE Temporal
+# namespace with the shared pool (temporal.namespace below is a fixed,
+# cluster-wide constant, not unique per tenant) — onboarding a new tenant no
+# longer means creating a namespace or touching the shared release's own
+# config at all. Isolation moved entirely to TASK QUEUE naming instead: this
+# tenant's own tenant-worker fleet and Gateway poll/dispatch to
+# "<release-name>-loop" (computed directly from .Release.Name in
+# templates/configmap.yaml — never set here, can't drift), while the shared
+# loop-worker pool itself still polls one fixed, non-tenant-specific queue
+# ("agent-loop") since its own workflow code is genuinely tenant-agnostic
+# orchestration that routes each activity dispatch to the RIGHT tenant's own
+# queue explicitly (workflow.TenantActivityQueue, Go side).
 temporal:
   # -- Temporal frontend address, host:port. REQUIRED — the chart will not
   # render a usable deployment without this set (see NOTES.txt).
   # Examples: "temporal-frontend.temporal.svc.cluster.local:7233",
   # "my-namespace.a1b2c.tmprl.cloud:7233"
   address: "temporal-frontend.core.svc.cluster.local:7233"
-  # -- Temporal namespace for THIS tenant. Must be unique per tenant/release —
-  # this is the actual isolation boundary inside the shared Temporal cluster
-  # (docs/components/multi-tenancy.md). Set explicitly per release; "default"
-  # is a local-dev-only value, not a real multi-tenant default.
-  namespace: "default"
-  # -- Task queue name. Must be identical for both workers below — they only
-  # coordinate by polling the same queue, nothing else ties them together.
-  taskQueue: "agent-loop"
+  # -- The ONE Temporal namespace shared by every tenant AND the shared
+  # loop-worker pool — NOT unique per tenant anymore (see this block's own
+  # comment above), and NOT the automation worker's own separate "system"
+  # control-plane namespace either. Named "agents" to match the Kubernetes
+  # namespace every tenant already lives in — a deliberate cosmetic
+  # consistency choice between two otherwise unrelated concepts. Must match
+  # ../agent-harness-shared's own temporal.namespace exactly.
+  namespace: "agents"
 
 tenantWorker:
   image:
@@ -495,13 +503,26 @@ agent-brain:
     litellmBaseURL: "http://litellm-service.core.svc:4000"
     model: "bge-m3"
     dim: 1024
-  # -- No Temporal namespace isolation of its own — reuses this tenant's own
-  # namespace (temporal.namespace above), since agent-brain's mining/EMU
-  # pipeline is already scoped to this tenant by virtue of this whole release
-  # being per-tenant.
+  # -- REQUIRED (2026-09-26: confirmed by reading the vendored subchart's own
+  # templates/_helpers.tpl — these render straight into TEMPORAL_ADDRESS/
+  # TEMPORAL_NAMESPACE/TEMPORAL_RETAIN_TASK_QUEUE with no fail guard and no
+  # safe default, so leaving any of them unset is a silent runtime break, not
+  # a graceful skip). address/namespace must match temporal.address/
+  # namespace above exactly — every tenant now shares one Temporal namespace
+  # with the shared pool (docs/components/multi-tenancy.md's "Resolved:
+  # Shared Temporal Namespace, Per-Tenant Task Queues"), so this is no longer
+  # a per-tenant value, just duplicated here because it's the SUBCHART's own
+  # separate values namespace (Helm can't compute a subchart value from
+  # .Release.Name in a template the way this chart's own configmap.yaml
+  # computes its OWN queue names — this has to be an explicit value).
+  # retainTaskQueue MUST be unique per tenant (unlike namespace/address) —
+  # it's the only thing keeping one tenant's agent-brain retain worker from
+  # picking up another tenant's own retain workflow now that the namespace
+  # is shared. Convention: "<release-name>-memory".
   temporal:
     address: ""
     namespace: ""
+    retainTaskQueue: ""
   cors:
     enabled: false
 

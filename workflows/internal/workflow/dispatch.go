@@ -23,7 +23,7 @@ const turnRunTimeout = 30 * time.Minute
 //
 // Returns the child-workflow future (always non-nil on success — the coordinator
 // awaits it for completion) and the turn id.
-func startTurn(ctx workflow.Context, sessionKey, connectionID string, turnSeq int, msg types.Message, initiatedBy string) (workflow.ChildWorkflowFuture, string, error) {
+func startTurn(ctx workflow.Context, tenantSlug, sessionKey, connectionID string, turnSeq int, msg types.Message, initiatedBy string) (workflow.ChildWorkflowFuture, string, error) {
 	logger := workflow.GetLogger(ctx)
 	turnID := ids.TurnID(sessionKey, turnSeq)
 	turnSeqCopy := turnSeq
@@ -44,6 +44,7 @@ func startTurn(ctx workflow.Context, sessionKey, connectionID string, turnSeq in
 	in := types.TurnInput{
 		SessionKey:     sessionKey,
 		TurnID:         turnID,
+		TenantSlug:     tenantSlug,
 		ParentType:     "session",
 		ParentID:       sessionKey,
 		TurnSeq:        &turnSeqCopy,

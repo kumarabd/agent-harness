@@ -7,16 +7,18 @@
 # components (activity workers, Postgres, tenant PV) — those come from
 # agent-harness-tenant, one release per tenant.
 #
-# Onboarding a new tenant means adding its Temporal namespace to
-# temporal.namespaces below and running `helm upgrade` — this rolls the whole
-# shared pool, which is safe: Temporal workflow executions survive worker
-# restarts via history replay, no in-flight turn is lost or corrupted. This
-# coupling (every tenant onboarding touches this one shared release) is a
-# deliberate, accepted trade — see multi-tenancy.md's "Mechanics" note on
-# static TEMPORAL_NAMESPACES config. A namespace that fails to start
-# (unreachable, not yet created) is retried with backoff by the worker
-# process itself and does NOT take down the other namespaces this pool is
-# already serving.
+# 2026-09-26 — Resolved: Shared Temporal Namespace, Per-Tenant Task Queues
+# (docs/components/multi-tenancy.md). Onboarding a new tenant no longer
+# touches this release at all: every tenant now shares temporal.namespace
+# below with this pool (previously each tenant needed its own namespace,
+# statically listed here, requiring a `helm upgrade` — and thus a rollout —
+# of this whole shared release on every onboarding). This works because the
+# workflow code itself (Session Coordinator, Turn Workflow) is genuinely
+# tenant-agnostic orchestration — it never holds a tenant's credentials, and
+# routes every activity dispatch to that activity's own tenant-specific
+# queue explicitly (workflow.TenantActivityQueue), not by which namespace
+# this pool happened to be polling. So this one pool, on one fixed queue,
+# safely runs any tenant's workflow instance.
 
 temporal:
   # -- Temporal frontend address, host:port. REQUIRED — the chart will not
@@ -24,15 +26,22 @@ temporal:
   # Examples: "temporal-frontend.temporal.svc.cluster.local:7233",
   # "my-namespace.a1b2c.tmprl.cloud:7233"
   address: "temporal-frontend.core.svc.cluster.local:7233"
-  # -- List of Temporal namespaces this pool serves — one Client+Worker pair
-  # per namespace, concurrently, in every replica. REQUIRED: at least one
-  # namespace. Every entry must already exist in Temporal (`temporal operator
-  # namespace create <name>`) before this chart is installed/upgraded with it
-  # listed here.
-  namespaces: ["abishekk"]
-  # -- Task queue name. Must match every tenant's agent-harness-tenant
-  # release (temporal.taskQueue there) for that tenant's namespace — this is
-  # the only thing tying the two charts together at runtime.
+  # -- The ONE Temporal namespace this pool serves — shared by every tenant
+  # now, not a list anymore. NOT the automation worker's own namespace
+  # (that stays "system", its own separate control-plane namespace,
+  # automation.temporalNamespace below) — "agents" here is named to match
+  # the Kubernetes namespace this release (and every tenant) already lives
+  # in, a deliberate cosmetic consistency choice between two otherwise
+  # unrelated concepts. Must already exist in Temporal (`temporal operator
+  # namespace create <name>`) before this chart is installed. Must match
+  # every tenant's own agent-harness-tenant release's temporal.namespace
+  # exactly.
+  namespace: "agents"
+  # -- The shared workflow-task queue every tenant's own Gateway starts
+  # CoordinatorWorkflow/TurnWorkflow on, and Python starts IntentionWorkflow
+  # on — fixed, never tenant-specific (that's a separate concern, each
+  # tenant's own TEMPORAL_TASK_QUEUE in agent-harness-tenant). Must match
+  # every tenant's own TEMPORAL_WORKFLOW_TASK_QUEUE exactly.
   taskQueue: "agent-loop"
 
 image:
@@ -153,20 +162,22 @@ automation:
   nodeSelector: {}
   tolerations: []
   affinity: {}
-  # -- This worker's own dedicated Temporal namespace/task queue — NOT one
-  # of temporal.namespaces above (that list is loop-worker's tenant
-  # namespaces).
+  # -- This worker's OWN dedicated Temporal namespace/task queue — where
+  # TenantOnboardingWorkflow itself actually runs. Deliberately separate
+  # from tenantTemporalNamespace below (this worker never dials that
+  # namespace itself, only writes its name into a new tenant's own
+  # generated values).
   temporalNamespace: "system"
   taskQueue: "system"
-  # -- Temporal namespace retention for every NEW tenant namespace this
-  # worker creates (RegisterTemporalNamespaceActivity) — not this worker's
-  # own namespace's retention, which is set once, out of band, when
-  # "system" itself is created.
-  namespaceRetentionDays: 30
+  # -- The shared namespace every tenant's own turn-processing uses (must
+  # match temporal.namespace above exactly) — written into every generated
+  # tenant's own temporal.namespace/agent-brain.temporal.namespace
+  # (docs/components/multi-tenancy.md's "Resolved: Shared Temporal
+  # Namespace, Per-Tenant Task Queues"). NOT this worker's own namespace.
+  tenantTemporalNamespace: "agents"
   # -- Baked into this worker's own image (deploy/docker/automation.Dockerfile)
   # — the actual chart sources `helm upgrade --install` runs against.
   tenantChartDir: "/charts/agent-harness-tenant"
-  sharedChartDir: "/charts/agent-harness-shared"
   # -- Must match agent-harness-tenant/values.yaml's own gateway.port /
   # agent-brain subchart defaults — written into that tenant's real Gateway/
   # agent-brain Services (HealthCheckActivity polls these ports directly;

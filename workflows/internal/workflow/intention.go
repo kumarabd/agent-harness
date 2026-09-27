@@ -54,6 +54,7 @@ var (
 )
 
 func IntentionWorkflow(ctx workflow.Context, input types.IntentionInput) error {
+	ctx = WithTenantTaskQueue(ctx, input.TenantSlug)
 	logger := workflow.GetLogger(ctx)
 	logger.Info("intention started", "intention_id", input.IntentionID, "kind", input.Kind)
 

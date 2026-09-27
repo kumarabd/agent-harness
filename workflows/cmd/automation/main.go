@@ -72,6 +72,13 @@ func newMetricsHandler(bindAddress string) client.MetricsHandler {
 
 func main() {
 	metricsHandler := newMetricsHandler(envOrDefault("METRICS_BIND_ADDRESS", "0.0.0.0:9090"))
+	// This worker's OWN Temporal namespace ("system") — where
+	// TenantOnboardingWorkflow itself actually runs — is deliberately
+	// separate from TENANT_TEMPORAL_NAMESPACE below ("agents", the shared
+	// namespace every tenant's turn-processing uses). This worker never
+	// dials the latter itself; it only writes that string into a new
+	// tenant's own generated values (docs/components/multi-tenancy.md's
+	// "Resolved: Shared Temporal Namespace, Per-Tenant Task Queues").
 	temporalClient, err := client.Dial(client.Options{
 		HostPort:       envOrDefault("TEMPORAL_ADDRESS", client.DefaultHostPort),
 		Namespace:      envOrDefault("TEMPORAL_NAMESPACE", "system"),
@@ -83,15 +90,19 @@ func main() {
 	defer temporalClient.Close()
 
 	a := &activities.Activities{
-		TemporalAddress:        envOrDefault("TEMPORAL_ADDRESS", client.DefaultHostPort),
-		NamespaceRetentionDays: envIntOrDefault("TENANT_NAMESPACE_RETENTION_DAYS", 30),
-		ChartDir:               envOrDefault("TENANT_CHART_DIR", "/charts/agent-harness-tenant"),
-		SharedChartDir:         envOrDefault("SHARED_CHART_DIR", "/charts/agent-harness-shared"),
-		SharedRelease:          envOrDefault("SHARED_RELEASE_NAME", "harness"),
-		SharedNamespace:        envOrDefault("SHARED_RELEASE_NAMESPACE", "agents"),
-		ClerkIssuer:            os.Getenv("CLERK_ISSUER"),
-		GatewayPort:            envIntOrDefault("TENANT_GATEWAY_PORT", 8090),
-		AgentBrainPort:         envIntOrDefault("TENANT_AGENT_BRAIN_PORT", 8080),
+		TemporalAddress: envOrDefault("TEMPORAL_ADDRESS", client.DefaultHostPort),
+		// 2026-09-26: named "agents" to match the Kubernetes namespace the
+		// shared release (and, by convention, every tenant) already lives
+		// in — a deliberate, purely cosmetic consistency choice, not a
+		// functional requirement (Temporal namespaces and Kubernetes
+		// namespaces are unrelated concepts that happen to share this one
+		// string now).
+		TenantTemporalNamespace: envOrDefault("TENANT_TEMPORAL_NAMESPACE", "agents"),
+		ChartDir:                envOrDefault("TENANT_CHART_DIR", "/charts/agent-harness-tenant"),
+		SharedNamespace:         envOrDefault("SHARED_RELEASE_NAMESPACE", "agents"),
+		ClerkIssuer:             os.Getenv("CLERK_ISSUER"),
+		GatewayPort:             envIntOrDefault("TENANT_GATEWAY_PORT", 8090),
+		AgentBrainPort:          envIntOrDefault("TENANT_AGENT_BRAIN_PORT", 8080),
 	}
 	if a.ClerkIssuer == "" {
 		log.Fatalf("CLERK_ISSUER is required — every generated tenant's gateway.web.clerkIssuer comes from this")

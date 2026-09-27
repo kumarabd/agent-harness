@@ -5,8 +5,11 @@ This is the SHARED, tenant-agnostic set of components
 unlike agent-harness-tenant which is one release per tenant. It deploys:
 
   - {{ include "agent-harness.fullname" . }}
-    (Go — Session Coordinator + Turn Workflow; serves every namespace listed
-    in temporal.namespaces from every replica)
+    (Go — Session Coordinator + Turn Workflow; one shared pool for every
+    tenant on temporal.namespace's one Temporal namespace, isolated by
+    per-tenant task queue routing rather than by namespace — 2026-09-26,
+    docs/components/multi-tenancy.md's "Resolved: Shared Temporal Namespace,
+    Per-Tenant Task Queues")
 {{- if .Values.router.enabled }}
   - {{ include "agent-harness.componentFullname" (dict "context" . "component" "router") }}
     (Go — the identity-routing front door for agent-web, docs/components/
@@ -38,35 +41,32 @@ onboarding progress lives in Temporal itself, queryable live.
 
 This release is currently configured to serve:
 
-  Temporal address:     {{ .Values.temporal.address }}
-  Temporal namespaces:  {{ join ", " .Values.temporal.namespaces }}
-  Task queue:           {{ .Values.temporal.taskQueue }}
+  Temporal address:    {{ .Values.temporal.address }}
+  Temporal namespace:  {{ .Values.temporal.namespace }}
+  Task queue:          {{ .Values.temporal.taskQueue }}
 
 Check the pool is actually connecting:
 
   kubectl logs -l app.kubernetes.io/instance={{ .Release.Name }}
 
-You should see one line per namespace above:
+You should see:
   "loop worker starting: temporal=... namespace=... task_queue=..."
 
-A namespace that fails to start (unreachable, or doesn't exist yet in
-Temporal — see `temporal operator namespace create <name>`) logs a retry
-line with growing backoff instead of crashing the pod; it does NOT affect
-the other namespaces this same release is already serving. If you just added
-a namespace and don't see its "starting" line, check for:
+If the namespace above is unreachable or doesn't exist yet in Temporal (see
+`temporal operator namespace create <name>`), this logs a retry line with
+growing backoff instead of crashing the pod.
 
-  kubectl logs -l app.kubernetes.io/instance={{ .Release.Name }} | grep "stopped with error"
-
-Onboarding a new tenant: add its Temporal namespace to temporal.namespaces
-and `helm upgrade` this release. This rolls every replica of this shared
-pool — safe (Temporal workflow executions survive worker restarts via
-history replay), but it does mean every tenant onboarding touches this one
-release, a deliberate trade — see multi-tenancy.md.
+Onboarding a new tenant no longer touches this release at all (2026-09-26) —
+every tenant shares the one namespace above already; only its own
+agent-harness-tenant release needs installing.
 
 Note: the ModelCall/ToolCall/Persist/Deliver/CompressContext activities that
 this pool's workflows dispatch to are implemented by each tenant's own
-agent-harness-tenant release (tenant-worker), not by anything in this
-chart.
+agent-harness-tenant release (tenant-worker), on that tenant's OWN task
+queue (Gateway/tenant-worker's TEMPORAL_TASK_QUEUE, "<release-name>-loop")
+— never this chart's own {{ .Values.temporal.taskQueue }}, which is only
+ever used to start a new CoordinatorWorkflow/TurnWorkflow execution, not to
+dispatch its activities.
 {{- if and .Values.router.enabled (not .Values.automation.enabled) }}
 
 A tenant is reachable through agent-web the moment its own namespace/
@@ -81,12 +81,11 @@ first place, via self-serve onboarding.
 Self-serve tenant onboarding is live: POST /onboard on the router
 (workflows/internal/router/core/onboarding.go) signal-starts
 TenantOnboardingWorkflow on {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}.
-One step needs a human: RegisterSharedPoolNamespace (the step that rolls
-THIS release's own temporal.namespaces, above) waits for an explicit
-approval signal before running —
-
-  temporal workflow signal --workflow-id tenant-onboard:<slug> \
-    --name approve-shared-pool-rollout --namespace {{ .Values.automation.temporalNamespace }}
+2026-09-26: no step in this workflow touches this release anymore (there is
+no more per-tenant Temporal namespace to register, and no shared-pool
+"temporal.namespaces" list to append to) — it runs straight through with no
+human approval gate, genuinely only ever installing/upgrading the new
+tenant's own agent-harness-tenant release.
 
 Watch a request's progress — a live Temporal Query against the workflow
 itself, not a database read:

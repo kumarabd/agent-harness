@@ -48,25 +48,27 @@ spec:
           env:
             - name: TEMPORAL_ADDRESS
               value: {{ .Values.temporal.address | quote }}
-            # This worker's OWN dedicated namespace — deliberately NOT one of
-            # temporal.namespaces above (that list is loop-worker's tenant
-            # namespaces; this is the control-plane namespace, separate task
-            # queue, see workflows/cmd/automation/main.go's own comment).
+            # This worker's OWN namespace/queue — where TenantOnboardingWorkflow
+            # itself runs. Deliberately separate from TENANT_TEMPORAL_NAMESPACE
+            # below; this worker never dials that namespace itself.
             - name: TEMPORAL_NAMESPACE
               value: {{ .Values.automation.temporalNamespace | quote }}
             - name: TEMPORAL_TASK_QUEUE
               value: {{ .Values.automation.taskQueue | quote }}
-            - name: TENANT_NAMESPACE_RETENTION_DAYS
-              value: {{ .Values.automation.namespaceRetentionDays | quote }}
+            # The shared namespace written into every generated tenant's own
+            # temporal.namespace/agent-brain.temporal.namespace — must match
+            # temporal.namespace above (the shared loop-worker pool's own),
+            # NOT this worker's own TEMPORAL_NAMESPACE above.
+            - name: TENANT_TEMPORAL_NAMESPACE
+              value: {{ .Values.automation.tenantTemporalNamespace | quote }}
             - name: TENANT_CHART_DIR
               value: {{ .Values.automation.tenantChartDir | quote }}
-            - name: SHARED_CHART_DIR
-              value: {{ .Values.automation.sharedChartDir | quote }}
-            # This chart's own release name/namespace — always knowable from
+            # This chart's own release namespace — always knowable from
             # .Release, never a value someone has to remember to set to
-            # match how this same chart was actually installed.
-            - name: SHARED_RELEASE_NAME
-              value: {{ .Release.Name | quote }}
+            # match how this same chart was actually installed. Still needed:
+            # StageTenantSecrets/CleanupStagedSecret stage the submitted
+            # tenant secret here (an unrelated concern from the removed
+            # shared-pool registration step).
             - name: SHARED_RELEASE_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: TENANT_GATEWAY_PORT

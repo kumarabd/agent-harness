@@ -35,6 +35,7 @@ import (
 // 05-architecture-domain-control-loops.md, "Skill Workflows Are Independent
 // of Subagents").
 func DraftNoteSkillWorkflow(ctx workflow.Context, input types.SkillWorkflowInput) (types.SkillWorkflowOutput, error) {
+	ctx = wf.WithTenantTaskQueue(ctx, input.TenantSlug)
 	logger := workflow.GetLogger(ctx)
 	out := types.SkillWorkflowOutput{ToolCallID: input.ToolCallID}
 
@@ -77,6 +78,7 @@ func DraftNoteSkillWorkflow(ctx workflow.Context, input types.SkillWorkflowInput
 		Request:      req,
 		SessionKey:   input.SessionKey,
 		ConnectionID: input.ConnectionID,
+		TenantSlug:   input.TenantSlug,
 	})
 
 	// A workflow-level error here is this skill's own ctx being cancelled

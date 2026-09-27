@@ -21,14 +21,22 @@ import (
 // Constructed once per gateway process; every platform adapter (web,
 // discord, discordvoice) holds a pointer to the same one.
 type Ingestor struct {
-	pool      *pgxpool.Pool
-	temporal  client.Client
-	taskQueue string
+	pool       *pgxpool.Pool
+	temporal   client.Client
+	taskQueue  string
+	tenantSlug string
 }
 
 // NewIngestor wires an Ingestor to its infrastructure dependencies.
-func NewIngestor(pool *pgxpool.Pool, temporal client.Client, taskQueue string) *Ingestor {
-	return &Ingestor{pool: pool, temporal: temporal, taskQueue: taskQueue}
+// tenantSlug — docs/components/multi-tenancy.md's "Resolved: Shared Temporal
+// Namespace, Per-Tenant Task Queues" (2026-09-26): this Gateway's own
+// tenant's identity (== its release name, == its Kubernetes namespace),
+// stamped onto every CoordinatorInput it starts/signals so the coordinator
+// and everything it dispatches route to this tenant's own tenant-worker
+// queue, never another tenant's — this Gateway is one of potentially many
+// sharing the same Temporal namespace now.
+func NewIngestor(pool *pgxpool.Pool, temporal client.Client, taskQueue, tenantSlug string) *Ingestor {
+	return &Ingestor{pool: pool, temporal: temporal, taskQueue: taskQueue, tenantSlug: tenantSlug}
 }
 
 // MessageEvent is the generic/agentic boundary docs/components/gateway.md's
@@ -196,7 +204,7 @@ func (i *Ingestor) Ingest(ctx context.Context, event MessageEvent) (string, erro
 	// always coincides with isGenesis anyway; gating on isGenesis explicitly
 	// rather than relying on that coincidence is what keeps this correct
 	// across this session's OWN later idle-timeout restarts too.
-	coordinatorInput := wf.CoordinatorInput{SessionKey: sessionKey, ConnectionID: event.ConnectionID}
+	coordinatorInput := wf.CoordinatorInput{SessionKey: sessionKey, ConnectionID: event.ConnectionID, TenantSlug: i.tenantSlug}
 	if isGenesis {
 		coordinatorInput.ParentSessionKey = event.ParentSessionKey
 	}
@@ -240,7 +248,7 @@ func (i *Ingestor) KeepAlive(ctx context.Context, sessionKey string) error {
 	}
 	_, err := i.temporal.SignalWithStartWorkflow(
 		ctx, sessionKey, wf.KeepAliveSignalName, nil, opts,
-		wf.CoordinatorWorkflow, wf.CoordinatorInput{SessionKey: sessionKey},
+		wf.CoordinatorWorkflow, wf.CoordinatorInput{SessionKey: sessionKey, TenantSlug: i.tenantSlug},
 	)
 	return err
 }

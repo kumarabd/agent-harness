@@ -103,7 +103,8 @@ const modelCallChunkSignalName = "ModelCallChunk"
 // Write-Path Construction") — an unbounded-retry transient failure would now
 // re-run real fact/entity extraction on the same merged text more than once,
 // not silently no-op.
-func WriteMemoryWorkflow(ctx workflow.Context, sessionKey string) error {
+func WriteMemoryWorkflow(ctx workflow.Context, sessionKey, tenantSlug string) error {
+	ctx = WithTenantTaskQueue(ctx, tenantSlug)
 	ao := workflow.ActivityOptions{
 		StartToCloseTimeout: activityTimeoutTierA,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
@@ -117,7 +118,8 @@ func WriteMemoryWorkflow(ctx workflow.Context, sessionKey string) error {
 // and Strategies" #3 — soft fires async, doesn't block the turn). Same
 // reasoning as WriteMemoryWorkflow's own doc comment for why this needs to
 // be a detached child workflow rather than a bare unawaited ExecuteActivity.
-func CompressContextWorkflow(ctx workflow.Context, turnID string) error {
+func CompressContextWorkflow(ctx workflow.Context, turnID, tenantSlug string) error {
+	ctx = WithTenantTaskQueue(ctx, tenantSlug)
 	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
 	actx := workflow.WithActivityOptions(ctx, ao)
 	return workflow.ExecuteActivity(actx, "CompressContext", turnID).Get(actx, nil)
@@ -810,6 +812,7 @@ func awaitModelCallWithStreaming(ctx workflow.Context, mcFuture workflow.Future,
 // and control-flow metadata (counters, tool names, usage numbers). Every
 // content read/write happens inside an activity, against Postgres.
 func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult, error) {
+	ctx = WithTenantTaskQueue(ctx, input.TenantSlug)
 	logger := workflow.GetLogger(ctx)
 	logger.Info("turn workflow started", "turn_id", input.TurnID, "parent_type", input.ParentType)
 
@@ -907,6 +910,7 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	loopResult, err := RunReasonActLoop(ctx, RunReasonActLoopInput{
 		TurnID:             input.TurnID,
 		SessionKey:         input.SessionKey,
+		TenantSlug:         input.TenantSlug,
 		ConnectionID:       input.ConnectionID,
 		ParentType:         input.ParentType,
 		OfferDeliveryTools: input.OfferDeliveryTools,
@@ -968,7 +972,15 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 // being constrained to types.TurnResult's own cross-workflow contract shape.
 type RunReasonActLoopInput struct {
 	TurnID, SessionKey, ConnectionID, ParentType string
-	OfferDeliveryTools                           bool
+	// TenantSlug — see types.TurnInput's own doc comment. ctx already carries
+	// the resolved tenant queue by the time this runs (TurnWorkflow/
+	// skills.RunReasoningTurn both call WithTenantTaskQueue before this),
+	// but every child workflow THIS loop itself starts (WriteMemoryWorkflow,
+	// CompressContextWorkflow, UserInputRequestWorkflow, a subagent
+	// TurnWorkflow, a skill workflow) is a separate execution that doesn't
+	// inherit ctx's values — each needs this passed explicitly.
+	TenantSlug         string
+	OfferDeliveryTools bool
 	// PendingMessages/CancelRequested — caller-owned. TurnWorkflow passes
 	// pointers fed by its own signal-listening goroutines; a skill's scoped
 	// reasoning turn passes pointers to values nothing ever mutates (no
@@ -1172,7 +1184,7 @@ loop:
 					ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
 				}
 				wcctx := workflow.WithChildOptions(ctx, wcwo)
-				wmFuture := workflow.ExecuteChildWorkflow(wcctx, WriteMemoryWorkflow, in.SessionKey)
+				wmFuture := workflow.ExecuteChildWorkflow(wcctx, WriteMemoryWorkflow, in.SessionKey, in.TenantSlug)
 				_ = wmFuture.GetChildWorkflowExecution().Get(wcctx, nil)
 			}
 		} else {
@@ -1185,7 +1197,7 @@ loop:
 				ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
 			}
 			cctx := workflow.WithChildOptions(ctx, cwo)
-			childFuture := workflow.ExecuteChildWorkflow(cctx, CompressContextWorkflow, in.TurnID)
+			childFuture := workflow.ExecuteChildWorkflow(cctx, CompressContextWorkflow, in.TurnID, in.TenantSlug)
 			_ = childFuture.GetChildWorkflowExecution().Get(cctx, nil)
 		}
 
@@ -1325,12 +1337,14 @@ loop:
 					ApprovalGatedCall: &types.ApprovalGatedCallSpec{ToolCallID: tc.ToolCallID, ToolName: tc.ToolName},
 					SessionKey:        in.SessionKey,
 					ConnectionID:      in.ConnectionID,
+					TenantSlug:        in.TenantSlug,
 				})
 				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isApprovalGated: true})
 			} else if tc.IsSubagent {
 				childInput := types.TurnInput{
 					SessionKey: in.SessionKey,
 					TurnID:     tc.ToolCallID, // subagent's turn_id IS its tool_call_id
+					TenantSlug: in.TenantSlug,
 					ParentType: "turn",
 					ParentID:   in.TurnID,
 				}
@@ -1373,6 +1387,7 @@ loop:
 					},
 					SessionKey:   in.SessionKey,
 					ConnectionID: in.ConnectionID,
+					TenantSlug:   in.TenantSlug,
 				})
 				calls = append(calls, pendingCall{toolCallID: tc.ToolCallID, future: fut, isAskUser: true})
 			} else if tc.UseSkill != "" {
@@ -1621,6 +1636,7 @@ func runSkill(cancelCtx workflow.Context, tc types.ToolCallRef, in RunReasonActL
 		TurnID:       in.TurnID,
 		SessionKey:   in.SessionKey,
 		ConnectionID: in.ConnectionID,
+		TenantSlug:   in.TenantSlug,
 	})
 }
 

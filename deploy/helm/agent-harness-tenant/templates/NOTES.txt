@@ -1,8 +1,8 @@
 agent-harness-tenant has been deployed.
 
 This is a PER-TENANT release (docs/components/multi-tenancy.md) — one
-`helm install` per tenant, each with its own release name and
-`temporal.namespace`. It deploys the whole tenant stack:
+`helm install` per tenant, each with its own release name (its slug). It
+deploys the whole tenant stack:
   - {{ include "agent-harness.fullname" . }}-postgresql
     (Postgres — Bitnami subchart, one dedicated instance for this tenant;
     hosts both agent-harness's own database and agent-brain's, see
@@ -26,15 +26,17 @@ This is a PER-TENANT release (docs/components/multi-tenancy.md) — one
 It does NOT deploy Temporal server itself, and does NOT deploy the
 loop-worker pool (Session Coordinator + Turn Workflow) — that's the
 tenant-agnostic shared pool, deployed ONCE for the whole cluster by the
-sibling ../agent-harness-shared chart. For turns in this tenant's namespace
-to actually get scheduled, this tenant's `temporal.namespace` (below) must
-be listed in that shared release's `temporal.namespaces`.
+sibling ../agent-harness-shared chart. 2026-09-26: this tenant shares that
+pool's own Temporal namespace directly (no per-tenant namespace, nothing to
+register with the shared release) — isolation is by task queue instead, this
+tenant's own {{ .Release.Name }}-loop, computed automatically from the
+release name.
 
 This release's tenant worker is configured to poll:
 
-  Temporal address:   {{ .Values.temporal.address }}
-  Temporal namespace: {{ .Values.temporal.namespace }}
-  Task queue:         {{ .Values.temporal.taskQueue }}
+  Temporal address:    {{ .Values.temporal.address }}
+  Temporal namespace:  {{ .Values.temporal.namespace }}
+  Task queue:          {{ .Release.Name }}-loop
 
 Check it's actually connecting:
 

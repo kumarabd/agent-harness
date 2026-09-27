@@ -134,8 +134,23 @@ func main() {
 		log.Fatalf("CLERK_JWKS_URL or CLERK_ISSUER is required")
 	}
 
-	taskQueue := envOrDefault("TEMPORAL_TASK_QUEUE", "agent-loop")
-	ingestor := core.NewIngestor(pool, temporalClient, taskQueue)
+	// 2026-09-26: renamed from TEMPORAL_TASK_QUEUE — this is specifically the
+	// queue new CoordinatorWorkflow/TurnWorkflow executions are STARTED on
+	// (the shared, tenant-agnostic workflow-task queue every tenant's
+	// Gateway uses identically), distinct from TEMPORAL_TASK_QUEUE, which
+	// now names THIS tenant's own activity queue instead (tenant-worker's
+	// own env var, unused by the Gateway).
+	taskQueue := envOrDefault("TEMPORAL_WORKFLOW_TASK_QUEUE", "agent-loop")
+	// docs/components/multi-tenancy.md's "Resolved: Shared Temporal
+	// Namespace, Per-Tenant Task Queues" — fail loud, not a silent empty
+	// prefix: every activity this Gateway's own turns dispatch is routed by
+	// this value (core.NewIngestor's own doc comment), so a missing one
+	// would misroute, not just misbehave.
+	tenantSlug := os.Getenv("TENANT_SLUG")
+	if tenantSlug == "" {
+		log.Fatalf("TENANT_SLUG is required")
+	}
+	ingestor := core.NewIngestor(pool, temporalClient, taskQueue, tenantSlug)
 	leaseMgr := lease.NewManager(pool)
 
 	mux := http.NewServeMux()

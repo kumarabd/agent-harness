@@ -4,6 +4,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"agent-harness/workflows/internal/types"
+	wf "agent-harness/workflows/internal/workflow"
 )
 
 // JournalingSkillWorkflow — docs/05-architecture-domain-control-loops.md.
@@ -31,6 +32,7 @@ import (
 // path, and calls ask_user itself when it needs to confirm or disambiguate
 // (already durably delivered to the user's real connection, no new plumbing).
 func JournalingSkillWorkflow(ctx workflow.Context, input types.SkillWorkflowInput) (types.SkillWorkflowOutput, error) {
+	ctx = wf.WithTenantTaskQueue(ctx, input.TenantSlug)
 	out := types.SkillWorkflowOutput{ToolCallID: input.ToolCallID}
 
 	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}

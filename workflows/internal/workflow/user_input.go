@@ -51,6 +51,7 @@ const UserInputRequestTimeout = 1 * time.Hour
 //     'pending' forever. Fixed by routing all three exits through the same
 //     CloseUserInput activity call.
 func UserInputRequestWorkflow(ctx workflow.Context, input types.UserInputRequestWorkflowInput) (types.UserInputRequestWorkflowOutput, error) {
+	ctx = WithTenantTaskQueue(ctx, input.TenantSlug)
 	logger := workflow.GetLogger(ctx)
 	workflowID := workflow.GetInfo(ctx).WorkflowExecution.ID
 	req := input.Request

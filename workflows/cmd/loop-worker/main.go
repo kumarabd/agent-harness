@@ -1,9 +1,24 @@
 // Command loop-worker registers the Session Coordinator and Turn Workflow on
 // the configured task queue and polls a Temporal server for work. Run
-// alongside each tenant's tenant-worker (activities/activities/tenant_worker.py),
-// which polls the same task queue for the ModelCall/ToolCall/InsertMessage/
-// Persist/Deliver/CompressContext activities referenced by name from the
-// workflows here.
+// alongside every tenant's tenant-worker (activities/activities/tenant_worker.py),
+// which polls that TENANT'S OWN task queue for the ModelCall/ToolCall/
+// InsertMessage/Persist/Deliver/CompressContext activities referenced by
+// name from the workflows here — this process itself never touches Postgres
+// or holds any tenant's credentials; it only orchestrates.
+//
+// 2026-09-26: simplified from one Client+Worker pair per tenant Temporal
+// namespace (a static TEMPORAL_NAMESPACES list, requiring a `helm upgrade`
+// of this whole shared release every time a tenant was onboarded) down to a
+// single Client+Worker pair on one shared namespace — docs/components/
+// multi-tenancy.md's "Resolved: Shared Temporal Namespace, Per-Tenant Task
+// Queues". This works because the workflow code itself (turn.go,
+// coordinator.go, ...) is genuinely tenant-agnostic orchestration: it never
+// holds a tenant's credentials, and every activity dispatch is routed to
+// that ACTIVITY's own tenant-specific queue explicitly (workflow.
+// TenantActivityQueue, via each workflow input's TenantSlug field) rather
+// than by which namespace this process happened to be polling. So this one
+// process, on one fixed queue, can safely run any tenant's workflow
+// instance — onboarding a new tenant never touches this chart again.
 //
 // Configured via env vars (not hardcoded) so this binary is deployable —
 // see deploy/docker/loop-worker.Dockerfile and
@@ -12,21 +27,13 @@
 // per docs/components/multi-tenancy.md):
 //
 //	TEMPORAL_ADDRESS    Temporal frontend host:port. Default: localhost:7233.
-//	TEMPORAL_NAMESPACE  Single Temporal namespace. Default: default. Used only
-//	                    if TEMPORAL_NAMESPACES is unset — backward-compat with
-//	                    single-tenant local-dev usage.
-//	TEMPORAL_NAMESPACES Comma-separated list of Temporal namespaces this
-//	                    process serves — one Client+Worker pair per namespace,
-//	                    run concurrently in this single process
-//	                    (docs/components/multi-tenancy.md, "Resolved: Compute
-//	                    Isolation" — the shared, tenant-agnostic loop-worker
-//	                    pool). Static config, chosen deliberately over dynamic
-//	                    registration, mirroring the gateway's static-shard-config
-//	                    pattern (components/gateway.md). Takes precedence over
-//	                    TEMPORAL_NAMESPACE if both are set.
-//	TEMPORAL_TASK_QUEUE Task queue name, shared across every namespace this
-//	                    process serves. Default: agent-loop. Must match each
-//	                    tenant's own tenant-worker fleet's TEMPORAL_TASK_QUEUE.
+//	TEMPORAL_NAMESPACE  The one shared Temporal namespace every tenant's own
+//	                    workers and this pool all use. Default: default.
+//	TEMPORAL_TASK_QUEUE The shared workflow-task queue every tenant's own
+//	                    Gateway starts CoordinatorWorkflow/TurnWorkflow on.
+//	                    Default: agent-loop. Fixed — never tenant-specific
+//	                    (that's TenantActivityQueue's job, applied inside the
+//	                    workflow code itself, not this process's own config).
 //	METRICS_BIND_ADDRESS Host:port the Prometheus exposition endpoint listens
 //	                    on. Default: 0.0.0.0:9090. See
 //	                    docs/components/budget-guardrails.md, "Resolved:
@@ -39,8 +46,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -61,33 +66,12 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-// namespaces returns the list of tenant namespaces this process should serve,
-// per the TEMPORAL_NAMESPACES/TEMPORAL_NAMESPACE resolution described above.
-// Always returns at least one entry.
-func namespaces() []string {
-	if raw := os.Getenv("TEMPORAL_NAMESPACES"); raw != "" {
-		var out []string
-		for _, ns := range strings.Split(raw, ",") {
-			ns = strings.TrimSpace(ns)
-			if ns != "" {
-				out = append(out, ns)
-			}
-		}
-		if len(out) > 0 {
-			return out
-		}
-	}
-	return []string{envOrDefault("TEMPORAL_NAMESPACE", client.DefaultNamespace)}
-}
-
 // newMetricsHandler builds a Prometheus-backed client.MetricsHandler and
-// starts the HTTP listener serving /metrics — created once per process, not
-// once per namespace, since every namespace's Client+Worker pair shares one
-// exposition endpoint (docs/components/budget-guardrails.md, "Resolved:
-// Metrics Export"). Per-namespace attribution happens via a "namespace" tag
-// applied where workflow code actually calls workflow.GetMetricsHandler(ctx)
-// (workflows/internal/workflow/turn.go), not here — this handler itself is
-// namespace-agnostic.
+// starts the HTTP listener serving /metrics (docs/components/
+// budget-guardrails.md, "Resolved: Metrics Export"). Per-tenant attribution
+// happens via tags applied where workflow code actually calls
+// workflow.GetMetricsHandler(ctx) (workflows/internal/workflow/turn.go), not
+// here — this handler itself is tenant-agnostic.
 func newMetricsHandler(bindAddress string) client.MetricsHandler {
 	reporter := tallyprom.NewReporter(tallyprom.Options{})
 	scope, _ := tally.NewRootScope(tally.ScopeOptions{
@@ -109,10 +93,10 @@ func newMetricsHandler(bindAddress string) client.MetricsHandler {
 	return contribtally.NewMetricsHandler(scope)
 }
 
-// runForNamespace starts one Client+Worker pair for a single tenant namespace
-// and blocks until it stops — cleanly, once ctx is cancelled (returns nil),
-// or with an error (dial failure, or Run() itself failing).
-func runForNamespace(ctx context.Context, address, namespace, taskQueue string, metricsHandler client.MetricsHandler) error {
+// run starts the single shared Client+Worker pair and blocks until it stops
+// — cleanly, once ctx is cancelled (returns nil), or with an error (dial
+// failure, or Run() itself failing).
+func run(ctx context.Context, address, namespace, taskQueue string, metricsHandler client.MetricsHandler) error {
 	c, err := client.Dial(client.Options{HostPort: address, Namespace: namespace, MetricsHandler: metricsHandler})
 	if err != nil {
 		return err
@@ -121,11 +105,11 @@ func runForNamespace(ctx context.Context, address, namespace, taskQueue string, 
 
 	// LocalActivityWorkerOnly: this process registers no activities — every
 	// activity (ModelCall, ToolCall, InsertMessage, Persist, Deliver,
-	// CompressContext) is implemented by that tenant's tenant-worker
-	// (activities/activities/tenant_worker.py). Without this flag, this
-	// worker would also poll for regular activity tasks on the same queue
-	// and occasionally win that race, failing the task since it has no
-	// implementation registered.
+	// CompressContext) is implemented by each tenant's own tenant-worker
+	// (activities/activities/tenant_worker.py), on that tenant's own queue.
+	// Without this flag, this worker would also poll for regular activity
+	// tasks on ITS OWN queue and occasionally win that race, failing the
+	// task since it has no implementation registered.
 	w := worker.New(c, taskQueue, worker.Options{LocalActivityWorkerOnly: true})
 	w.RegisterWorkflow(wf.CoordinatorWorkflow)
 	w.RegisterWorkflow(wf.TurnWorkflow)
@@ -147,12 +131,7 @@ func runForNamespace(ctx context.Context, address, namespace, taskQueue string, 
 	log.Printf("loop worker starting: temporal=%q namespace=%q task_queue=%q", address, namespace, taskQueue)
 
 	// worker.Run wants a <-chan interface{}; adapt ctx's cancellation into
-	// that shape. Using one shared ctx (via signal.NotifyContext, registered
-	// once in main) rather than each goroutine calling worker.InterruptCh()
-	// independently: ctx.Done() is a broadcast, safely observed by however
-	// many concurrent selects are waiting on it, whereas sharing one raw
-	// signal.Notify channel across goroutines would only wake ONE waiter per
-	// signal delivery — wrong for N concurrently-running namespace pairs.
+	// that shape.
 	stopCh := make(chan interface{})
 	go func() {
 		<-ctx.Done()
@@ -161,28 +140,22 @@ func runForNamespace(ctx context.Context, address, namespace, taskQueue string, 
 	return w.Run(stopCh)
 }
 
-// retryForNamespace keeps one tenant namespace's Client+Worker pair alive for
-// the life of the process: a failure to start or run it (that namespace not
-// existing yet at pod startup, a transient network blip, ...) is logged and
-// retried with exponential backoff, rather than treated as fatal — either to
-// just this namespace or, as it was before this change, to the entire shared
-// pool. One tenant's broken/not-yet-onboarded namespace must never take
-// every other currently-served tenant down with it — this is what actually
-// makes "shared pool" safe operationally, not just content-isolation-safe
-// (see docs/components/multi-tenancy.md's reference-passing contract for the
-// latter).
-func retryForNamespace(ctx context.Context, address, namespace, taskQueue string, metricsHandler client.MetricsHandler) {
+// retryRun keeps the Client+Worker pair alive for the life of the process: a
+// failure to start or run it (the namespace not existing yet, a transient
+// network blip, ...) is logged and retried with exponential backoff rather
+// than treated as fatal.
+func retryRun(ctx context.Context, address, namespace, taskQueue string, metricsHandler client.MetricsHandler) {
 	const (
 		initialBackoff = time.Second
 		maxBackoff     = 30 * time.Second
 	)
 	backoff := initialBackoff
 	for ctx.Err() == nil {
-		err := runForNamespace(ctx, address, namespace, taskQueue, metricsHandler)
+		err := run(ctx, address, namespace, taskQueue, metricsHandler)
 		if err == nil {
 			return // ctx was cancelled — clean shutdown, nothing to retry
 		}
-		log.Printf("loop worker for namespace %q stopped with error, retrying in %s: %v", namespace, backoff, err)
+		log.Printf("loop worker stopped with error, retrying in %s: %v", backoff, err)
 		select {
 		case <-time.After(backoff):
 		case <-ctx.Done():
@@ -196,22 +169,13 @@ func retryForNamespace(ctx context.Context, address, namespace, taskQueue string
 
 func main() {
 	address := envOrDefault("TEMPORAL_ADDRESS", client.DefaultHostPort)
+	namespace := envOrDefault("TEMPORAL_NAMESPACE", client.DefaultNamespace)
 	taskQueue := envOrDefault("TEMPORAL_TASK_QUEUE", "agent-loop")
-	nss := namespaces()
 	metricsHandler := newMetricsHandler(envOrDefault("METRICS_BIND_ADDRESS", "0.0.0.0:9090"))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var wg sync.WaitGroup
-	for _, ns := range nss {
-		wg.Add(1)
-		go func(namespace string) {
-			defer wg.Done()
-			retryForNamespace(ctx, address, namespace, taskQueue, metricsHandler)
-		}(ns)
-	}
-
-	wg.Wait()
-	log.Printf("all loop workers stopped, exiting")
+	retryRun(ctx, address, namespace, taskQueue, metricsHandler)
+	log.Printf("loop worker stopped, exiting")
 }

@@ -40,6 +40,13 @@ type CoordinatorInput struct {
 	// start-args on whichever call actually starts a fresh execution,
 	// whatever the reason).
 	ConnectionID string `json:"connection_id,omitempty"`
+	// TenantSlug — docs/components/multi-tenancy.md's "Resolved: Shared
+	// Temporal Namespace, Per-Tenant Task Queues" (2026-09-26). Set on every
+	// SignalWithStart call (like ConnectionID, not gated to genesis) —
+	// routes this workflow's own activity dispatches (SeedChildSessionContext,
+	// GetMaxTurnSeq) and every TurnWorkflow/WriteMemoryWorkflow it starts to
+	// this tenant's own tenant-worker queue, never another tenant's.
+	TenantSlug string `json:"tenant_slug,omitempty"`
 }
 
 // CoordinatorWorkflow is the long-lived, nearly-stateless control-plane
@@ -47,6 +54,7 @@ type CoordinatorInput struct {
 // currently-running Turn Workflow (if any) and a turn-sequence counter — no
 // conversation content (components/session-coordinator.md).
 func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
+	ctx = WithTenantTaskQueue(ctx, input.TenantSlug)
 	logger := workflow.GetLogger(ctx)
 	logger.Info("coordinator started", "session_key", input.SessionKey)
 
@@ -218,7 +226,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 				ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
 			}
 			wcctx := workflow.WithChildOptions(ctx, wcwo)
-			wmFuture := workflow.ExecuteChildWorkflow(wcctx, WriteMemoryWorkflow, input.SessionKey)
+			wmFuture := workflow.ExecuteChildWorkflow(wcctx, WriteMemoryWorkflow, input.SessionKey, input.TenantSlug)
 			_ = wmFuture.GetChildWorkflowExecution().Get(wcctx, nil)
 
 			return nil
@@ -265,7 +273,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			}
 
 			turnSeq++
-			h, id, err := startTurn(ctx, input.SessionKey, input.ConnectionID, turnSeq, payload.Message, "user")
+			h, id, err := startTurn(ctx, input.TenantSlug, input.SessionKey, input.ConnectionID, turnSeq, payload.Message, "user")
 			if err != nil {
 				logger.Error("startTurn failed", "session_key", input.SessionKey, "error", err)
 				continue
@@ -293,7 +301,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			}
 
 			turnSeq++
-			h, id, err := startTurn(ctx, input.SessionKey, input.ConnectionID, turnSeq,
+			h, id, err := startTurn(ctx, input.TenantSlug, input.SessionKey, input.ConnectionID, turnSeq,
 				types.Message{Role: "user", Content: proactiveSeedText(wake)}, "intn:"+wake.IntentionID)
 			if err != nil {
 				logger.Error("startTurn (proactive) failed", "intention_id", wake.IntentionID, "error", err)

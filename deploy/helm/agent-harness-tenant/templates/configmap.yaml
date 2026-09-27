@@ -8,10 +8,27 @@ metadata:
   labels:
     {{- include "agent-harness.labels" . | nindent 4 }}
 data:
-  # Both workers read the same values here — they only coordinate by polling
-  # the same Temporal task queue, nothing else ties loop-worker and
-  # tenant-worker together.
   TEMPORAL_ADDRESS: {{ .Values.temporal.address | quote }}
-  TEMPORAL_TASK_QUEUE: {{ .Values.temporal.taskQueue | quote }}
+  # 2026-09-26 — this tenant's OWN activity queue (tenant-worker's
+  # ModelCall/ToolCall/InsertMessage/Persist/Deliver/CompressContext, and the
+  # Gateway's own StatusPing dispatch) — computed directly from the release
+  # name, never a settable value, so it can't drift or collide with another
+  # tenant's now that everyone shares one Temporal namespace (docs/components/
+  # multi-tenancy.md's "Resolved: Shared Temporal Namespace, Per-Tenant Task
+  # Queues"). Must match workflow.TenantActivityQueue's own computation
+  # (Go side) exactly.
+  TEMPORAL_TASK_QUEUE: {{ printf "%s-loop" .Release.Name | quote }}
+  # The shared, fixed, NEVER-tenant-specific queue the Gateway starts
+  # CoordinatorWorkflow/TurnWorkflow on, and Python starts IntentionWorkflow
+  # on (tools_intention.py) — every tenant's Gateway uses this exact same
+  # value; it names WHICH QUEUE A WORKFLOW gets started on, not this
+  # tenant's own activity queue above. Must match
+  # ../agent-harness-shared's own temporal.taskQueue exactly.
+  TEMPORAL_WORKFLOW_TASK_QUEUE: "agent-loop"
   TEMPORAL_NAMESPACE: {{ .Values.temporal.namespace | quote }}
+  # This tenant's own identity — == release name == Kubernetes namespace by
+  # this project's own convention. Stamped onto every CoordinatorInput/
+  # IntentionInput the Gateway/tools_intention.py start so activity dispatch
+  # routes to TEMPORAL_TASK_QUEUE above and never another tenant's.
+  TENANT_SLUG: {{ .Release.Name | quote }}
   METRICS_BIND_ADDRESS: {{ printf "0.0.0.0:%d" (int .Values.tenantWorker.metrics.port) | quote }}

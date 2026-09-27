@@ -37,15 +37,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /tmp/linux-${TARGETARCH} \
     && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
-# The actual chart sources HelmInstallTenant/RegisterSharedPoolNamespace run
-# `helm upgrade --install`/`helm upgrade` against (workflows/internal/
-# automation/activities/helm.go, TENANT_CHART_DIR/SHARED_CHART_DIR env vars)
-# — includes each chart's own vendored charts/*.tgz dependencies
+# The actual chart source HelmInstallTenant runs `helm upgrade --install`
+# against (workflows/internal/automation/activities/helm.go, TENANT_CHART_DIR
+# env var) — includes the chart's own vendored charts/*.tgz dependencies
 # (postgresql, agent-brain, mcp-hub), so no network access to any OCI
 # registry is needed at runtime, only to the cluster's own Temporal/
-# Kubernetes API.
+# Kubernetes API. 2026-09-26: agent-harness-shared is no longer baked in —
+# RegisterSharedPoolNamespace (the only thing that ever ran `helm upgrade`
+# against it) is gone; every tenant now shares that release's own Temporal
+# namespace directly, nothing left to register with it.
 COPY deploy/helm/agent-harness-tenant /charts/agent-harness-tenant
-COPY deploy/helm/agent-harness-shared /charts/agent-harness-shared
 
 RUN useradd --system --no-create-home --uid 65532 automation
 COPY --from=build /out/automation /automation

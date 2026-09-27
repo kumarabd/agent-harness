@@ -46,7 +46,7 @@ func TestBuildTenantValuesSetsAgentBrainLLMFromMediumTier(t *testing.T) {
 		"medium": {Provider: "openai", Model: "medium-model", BaseURL: "https://medium.example"},
 	})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestBuildTenantValuesFallsBackWhenNoMediumTier(t *testing.T) {
 		"expert": {Provider: "openai", Model: "expert-model", BaseURL: "https://expert.example"},
 	})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -75,11 +75,11 @@ func TestBuildTenantValuesFallsBackWhenNoMediumTier(t *testing.T) {
 	}
 }
 
-func TestBuildTenantValuesSetsAgentBrainTemporalToTenantNamespace(t *testing.T) {
+func TestBuildTenantValuesSetsAgentBrainTemporalToSharedNamespace(t *testing.T) {
 	ref := PublicRef{TenantSlug: "acme"}
 	secrets := stagedSecretsFor(t, map[string]LLMTier{"medium": {Model: "m", BaseURL: "https://x"}})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "temporal-frontend.core.svc.cluster.local:7233", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "temporal-frontend.core.svc.cluster.local:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -87,13 +87,23 @@ func TestBuildTenantValuesSetsAgentBrainTemporalToTenantNamespace(t *testing.T) 
 	if got := atPath(t, values, "agent-brain", "temporal", "address"); got != "temporal-frontend.core.svc.cluster.local:7233" {
 		t.Errorf("agent-brain.temporal.address = %v, want the shared Temporal address", got)
 	}
-	if got := atPath(t, values, "agent-brain", "temporal", "namespace"); got != "acme" {
-		t.Errorf("agent-brain.temporal.namespace = %v, want the tenant's own slug", got)
+	// 2026-09-26: every tenant now shares ONE Temporal namespace
+	// (docs/components/multi-tenancy.md's "Resolved: Shared Temporal
+	// Namespace, Per-Tenant Task Queues") — no more one namespace per
+	// tenant. Must match the top-level temporal.namespace this tenant's own
+	// worker uses too.
+	if got := atPath(t, values, "agent-brain", "temporal", "namespace"); got != "agents" {
+		t.Errorf("agent-brain.temporal.namespace = %v, want the shared namespace", got)
 	}
-	// Must match the top-level temporal.namespace this tenant's own worker
-	// uses — agent-brain's retain worker has no isolation of its own.
-	if got := atPath(t, values, "temporal", "namespace"); got != "acme" {
-		t.Errorf("temporal.namespace = %v, want %q", got, "acme")
+	if got := atPath(t, values, "temporal", "namespace"); got != "agents" {
+		t.Errorf("temporal.namespace = %v, want %q", got, "agents")
+	}
+	// retainTaskQueue MUST be tenant-prefixed even though the namespace is
+	// shared — this is now the ONLY thing keeping one tenant's agent-brain
+	// retain worker from picking up another tenant's own retain workflow
+	// (see buildTenantValues' own doc comment on why).
+	if got := atPath(t, values, "agent-brain", "temporal", "retainTaskQueue"); got != "acme-memory" {
+		t.Errorf("agent-brain.temporal.retainTaskQueue = %v, want %q", got, "acme-memory")
 	}
 }
 
@@ -101,7 +111,7 @@ func TestBuildTenantValuesPassesThroughClerkIssuer(t *testing.T) {
 	ref := PublicRef{TenantSlug: "acme"}
 	secrets := stagedSecretsFor(t, map[string]LLMTier{"medium": {Model: "m", BaseURL: "https://x"}})
 
-	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", secrets)
+	values, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", "agents", secrets)
 	if err != nil {
 		t.Fatalf("buildTenantValues: %v", err)
 	}
@@ -116,7 +126,7 @@ func TestBuildTenantValuesRejectsMalformedStagedTiers(t *testing.T) {
 	secrets := stagedSecretsFor(t, nil)
 	secrets[keyLLMTiersJSON] = "not json"
 
-	if _, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", secrets); err == nil {
+	if _, err := buildTenantValues(ref, "https://issuer.example", "temporal:7233", "agents", secrets); err == nil {
 		t.Fatal("expected an error decoding malformed staged llm tiers, got nil")
 	}
 }

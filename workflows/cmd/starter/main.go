@@ -193,8 +193,11 @@ func signalAndReport(ctx context.Context, sessionKey string, msg types.Message, 
 	// uncommon case is a crash — both need the next SignalWithStart to
 	// succeed (02-architecture-temporal-execution.md §2, "Reuse and crash behavior").
 	opts := client.StartWorkflowOptions{
-		ID:                    sessionKey,
-		TaskQueue:             envOrDefault("TEMPORAL_TASK_QUEUE", "agent-loop"),
+		ID: sessionKey,
+		// 2026-09-26: renamed from TEMPORAL_TASK_QUEUE — see cmd/gateway/
+		// main.go's identical rename for the reasoning (the shared
+		// workflow-start queue, not this tenant's own activity queue).
+		TaskQueue:             envOrDefault("TEMPORAL_WORKFLOW_TASK_QUEUE", "agent-loop"),
 		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
 	}
 
@@ -205,7 +208,7 @@ func signalAndReport(ctx context.Context, sessionKey string, msg types.Message, 
 		types.SignalPayload{Message: msg},
 		opts,
 		wf.CoordinatorWorkflow,
-		wf.CoordinatorInput{SessionKey: sessionKey},
+		wf.CoordinatorInput{SessionKey: sessionKey, TenantSlug: envOrDefault("TENANT_SLUG", "dev")},
 	)
 	if err != nil {
 		log.Fatalf("SignalWithStart failed: %v", err)

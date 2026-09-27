@@ -23,10 +23,17 @@ metadata:
   labels:
     {{- include "agent-harness.componentLabels" (dict "context" . "component" "automation") | nindent 4 }}
 rules:
-  # Namespace creation itself — CreateK8sNamespaceActivity.
+  # Namespace creation itself — CreateK8sNamespaceActivity. "patch" is
+  # required, not just "create": the activity applies via `kubectl create
+  # namespace --dry-run=client -o yaml | kubectl apply -f -`, deliberately
+  # idempotent so a retried onboarding attempt (this namespace may already
+  # exist from an earlier partial run) doesn't fail on "already exists" —
+  # but `kubectl apply` against an EXISTING resource issues a patch, not a
+  # create, which "create"-only RBAC 403s on. Missed when this list was
+  # first written; surfaced on the first real retried onboarding attempt.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "create"]
+    verbs: ["get", "list", "create", "patch"]
   # Everything `helm upgrade --install` needs to manage every resource kind
   # agent-harness-tenant (and its postgresql/agent-brain/mcp-hub
   # dependencies) actually renders — Deployments/StatefulSets, their
