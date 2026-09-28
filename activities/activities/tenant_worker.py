@@ -86,7 +86,7 @@ from temporalio.client import Client
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
-from . import agent_brain, llm, llm_client, shell_hub, skills
+from . import agent_brain, llm, llm_client, shell_hub, skill_catalog
 from .metrics import LATENCY_BUCKETS_SECONDS, SECONDS_LATENCY_METRICS
 from .compress_context import CompressContextActivity
 from .db import create_pool
@@ -125,7 +125,7 @@ async def main() -> None:
     # llm.ENABLED_MODES and switch_mode's own schema, before the Temporal
     # worker below starts polling — so no ModelCall ever runs against a
     # stale/empty set.
-    skill_entries = await skills.init(pool)
+    skill_entries = await skill_catalog.init(pool)
     llm.load_skills(skill_entries)
 
     # docs/components/memory-slot.md, "Resolved: Persona/Directive Content via Mental

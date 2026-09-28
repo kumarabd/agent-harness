@@ -25,8 +25,10 @@ type listSkillsResponse struct {
 // in the response only because the column itself still exists on the row.
 //
 // Same Postgres this tenant's own tenant-worker already reads via
-// skills.init(pool) (activities/activities/skills.py) — no new cross-service
-// plumbing.
+// skill_catalog.init(pool) (activities/activities/skill_catalog.py — named
+// distinctly from the activities/activities/skills/ package, which holds
+// each domain's own prompt content, not per-tenant enablement data) — no
+// new cross-service plumbing.
 func (h *Handler) handleListSkills(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rows, err := h.pool.Query(ctx,

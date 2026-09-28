@@ -1,18 +1,26 @@
-"""skills.py — docs/05-architecture-domain-control-loops.md. The per-tenant
-registry of authored domain workflows ("skills") this tenant has enabled —
-sourced from this tenant's own `skills` table (migration 040_skills.sql), not
-a hardcoded list.
+"""skill_catalog.py — docs/05-architecture-domain-control-loops.md. The
+per-tenant registry of authored domain workflows ("skills") this tenant has
+enabled — sourced from this tenant's own `skills` table (migration
+040_skills.sql), not a hardcoded list.
+
+Named skill_catalog.py, not skills.py — 2026-09-28, renamed to make room for
+the actual `skills` package (activities/activities/skills/), which holds
+each domain's own system prompt and switch_mode description (skills/
+journaling.py, skills/service_monitoring.py), self-registered into
+skills/base.py's generic registry. This module is a different, narrower
+concern: per-TENANT enablement data (which of those registered domains this
+tenant has turned on), not domain content itself.
 
 2026-09-27: a "skill" is entirely a mode now — journaling and
 service_monitoring both migrated onto the session-mode mechanism
 (tools.switch_mode), and the one-shot skill dispatch shape they used before
 (a nested child workflow, dispatched by name at ModelCall mint time) was
 deleted outright rather than kept as a second, redundant mechanism. This
-table's own role narrowed to match: a row's `name` must be a key in
-activities/activities/llm.py's MODE_TURNS (the fixed, deployment-wide fact of
-which names are real turn-shaped Go dispatch targets — workflows/internal/
-workflow/mode_journaling.go, mode_service_monitoring.go), and `enabled` is
-purely this tenant's own opt-in/opt-out gate on top of that
+table's own role narrowed to match: a row's `name` must be a key in the
+`skills` package's own registry (skills.names() — the fixed, deployment-wide
+fact of which names are real turn-shaped Go dispatch targets —
+workflows/internal/workflow/mode_journaling.go, mode_service_monitoring.go),
+and `enabled` is purely this tenant's own opt-in/opt-out gate on top of that
 (llm.load_skills intersects the two into llm.ENABLED_MODES, which
 tools.switch_mode reads). Gateway's own GET /skills queries this same table
 directly (workflows/internal/gateway/web/skills.go).

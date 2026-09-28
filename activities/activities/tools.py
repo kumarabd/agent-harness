@@ -560,8 +560,8 @@ async def switch_mode(arguments: dict, ctx: ToolContext) -> dict:
     if mode != "chat" and mode not in llm.ENABLED_MODES:
         # No silent fallback to "chat" here — a model naming a mode that
         # isn't actually a registered turn-shaped handler, OR one this
-        # tenant hasn't enabled (llm.ENABLED_MODES — llm.MODE_TURNS's own
-        # doc comment has the two-gate rationale), is a real error to
+        # tenant hasn't enabled (llm.ENABLED_MODES — llm.py's own doc
+        # comment above it has the two-gate rationale), is a real error to
         # surface, not something to paper over.
         raise ValueError(f"switch_mode: {mode!r} is not an enabled mode for this tenant (valid: {sorted(llm.ENABLED_MODES)})")
     await ctx.pool.execute("UPDATE sessions SET mode = $2 WHERE session_key = $1", ctx.session_key, mode)

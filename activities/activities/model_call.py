@@ -28,7 +28,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from . import capabilities as _cap
-from . import ids, llm, llm_client, model_registry, permissions
+from . import ids, llm, llm_client, model_registry, permissions, skills
 from .types import ModelCallInput, ModelCallOutput, NextStep, ToolCallRef, Usage
 
 logger = logging.getLogger(__name__)
@@ -175,11 +175,15 @@ class ModelCallActivity:
                 # above: which ACTIVITY this whole turn is takes priority
                 # over which MESSAGE mode the triggering input happened to
                 # carry. Empty (the ordinary case) leaves system_prompt
-                # exactly as already resolved.
-                if input.mode == "journaling":
-                    system_prompt = llm.JOURNALING_SYSTEM_PROMPT
-                elif input.mode == "service_monitoring":
-                    system_prompt = llm.SERVICE_MONITORING_SYSTEM_PROMPT
+                # exactly as already resolved. Generic lookup, never a
+                # domain name here — each domain's own prompt lives in its
+                # own module under activities/activities/skills/, self-
+                # registered into skills.prompt_for's registry; this file
+                # never names "journaling"/"service_monitoring" itself.
+                if input.mode:
+                    mode_prompt = skills.prompt_for(input.mode)
+                    if mode_prompt:
+                        system_prompt = mode_prompt
                 # prompt_assemble_latency_seconds — step 9 (docs/components/
                 # request-pipeline/09-prompt-assembly.md). Only the real path
                 # assembles; the fixture path above returns a scripted response
