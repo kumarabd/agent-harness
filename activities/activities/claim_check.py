@@ -5,6 +5,24 @@ and delivers on docs/components/temporal-workflow.md's reference-passing
 contract for the specific case of tool outputs too big to inline into a
 tool_calls.result row.
 
+2026-09-28: enforcement lives in exactly one place —
+store_result_if_large, called once, centrally, by tool_call.py's own
+ToolCall activity around ANY handler's whole result, regardless of which
+tool ran. Found debugging a real production incident: discover_tools'
+own result (a verbose MCP server's full {server, tool, description,
+input_schema} per resolved tool) had no size discipline at all and got
+replayed verbatim into conversation history on every subsequent step of a
+turn — not because discover_tools itself needed special-casing, but
+because no tool's result had this discipline except shell_exec's own
+stdout/stderr, which handled it itself, per-stream, inside its own
+handler. That was a second, competing enforcement point: a combined
+result that already carried one claim-check reference could itself
+exceed the same threshold and get wrapped a second time, sending the
+model to fetch a claim-check file only to find another claim-check
+reference inside it instead of real content. shell_exec no longer does
+its own claim-checking (tools.py) — every tool's result, including its
+own, goes through this one path uniformly.
+
 Mechanism: when a tool's output exceeds SMALL_OUTPUT_BYTES, the full bytes
 are written to the tool's own session working directory (under a
 `.claim-check/` subdirectory keyed by tool_call_id), and the result the
@@ -54,6 +72,7 @@ to change the storage layer.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -174,6 +193,39 @@ async def store_if_large(
             f"for unstructured text."
         ),
     }
+
+
+async def store_result_if_large(
+    session_dir: str,
+    tool_call_id: str,
+    result: object,
+    summary_provider=None,
+    summary_model: str = "",
+) -> object:
+    """The one enforcement point (called from tool_call.py's ToolCall
+    activity, after any handler returns) for whether a tool's whole result
+    is too big to hand back directly. A result under SMALL_OUTPUT_BYTES
+    when JSON-serialized is returned completely UNCHANGED — no wrapping,
+    native shape preserved — so nothing that parses a specific tool's own
+    result shape (e.g. search_tools' own {"results": [...]}) needs to
+    change for the overwhelming common case. Only a genuinely oversized
+    result gets replaced entirely by the same claim-check reference shape
+    store_if_large returns for a raw byte stream — the model-facing
+    contract ("you got a claim_check_path back, go read it via shell_exec")
+    is identical regardless of which tool produced the oversized output.
+
+    This runs AFTER a handler has already done its own thing with the real
+    result (e.g. discover_tools' _persist_discovered already staged the
+    full, untruncated {server, tool, input_schema} rows into
+    turn_retrieval for real schema-binding on the turn's next step) — this
+    function only ever affects the copy that lands in tool_calls.result
+    and therefore in conversation history, never the model's actual
+    ability to call a tool it just discovered.
+    """
+    encoded = json.dumps(result).encode("utf-8")
+    if len(encoded) <= SMALL_OUTPUT_BYTES:
+        return result
+    return await store_if_large(session_dir, tool_call_id, "result", encoded, summary_provider, summary_model)
 
 
 def is_claim_check_dir(name: str) -> bool:

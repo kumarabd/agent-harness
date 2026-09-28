@@ -69,14 +69,15 @@ _SESSION_ROOT_ENV = "SESSION_ROOT"
 # the session filesystem tree at /sessions).
 _DEFAULT_SESSION_ROOT = "/tmp/agent-harness-sessions"
 
-# Per-stream (stdout/stderr independently) large-output policy — the
-# threshold and behavior both live in claim_check.py now
-# (docs/components/session-filesystem.md, "Resolved: This PV Serves as
-# the Claim-Check Store for Large Content"): outputs above the threshold
-# get written to the PV under the tool's own session directory and
-# returned as a reference the model can `cat`/`head`/`tail`/`grep` via
-# ordinary shell_exec, instead of being flat-truncated and silently
-# dropped as the pre-claim-check code did.
+# Large-output policy — the threshold and behavior both live in
+# claim_check.py (docs/components/session-filesystem.md, "Resolved: This PV
+# Serves as the Claim-Check Store for Large Content"), enforced once,
+# centrally, by tool_call.py's ToolCall activity around ANY tool's whole
+# result — not per-handler here. A result above the threshold gets written
+# to the PV under the tool's own session directory and returned as a
+# reference the model can `cat`/`head`/`tail`/`grep` via ordinary
+# shell_exec, instead of being flat-truncated and silently dropped as the
+# pre-claim-check code did.
 
 
 def resolve_session_dir(fs_path: str) -> str:
@@ -222,25 +223,19 @@ async def shell_exec(arguments: dict, ctx: ToolContext) -> dict:
     finally:
         await leases.release(ctx.pool, ctx.session_key, ctx.fs_path, ctx.holder_id)
 
-    # Each stream is independently either inlined or routed through the
-    # claim-check store — big stdout with tiny stderr (or vice versa)
-    # shouldn't drag the small stream through the PV too. The returned
-    # value under each key is either {"inline": text} (small) or a
-    # reference dict with head/tail/exploration_summary/claim_check_path
-    # (large); the model sees the same key regardless. See claim_check.py
-    # and exploration_summary.py.
-    stdout_result = await claim_check.store_if_large(
-        ctx.session_dir, ctx.tool_call_id, "stdout", stdout_bytes,
-        summary_provider=ctx.summary_provider, summary_model=ctx.summary_model,
-    )
-    stderr_result = await claim_check.store_if_large(
-        ctx.session_dir, ctx.tool_call_id, "stderr", stderr_bytes,
-        summary_provider=ctx.summary_provider, summary_model=ctx.summary_model,
-    )
+    # Raw, unbounded — output-size discipline is enforced once, centrally,
+    # by tool_call.py's own claim-check wrap around ANY tool's whole
+    # result (claim_check.store_result_if_large), not by this handler.
+    # 2026-09-28: this used to claim-check stdout/stderr independently
+    # here, which meant a combined result already carrying a claim-check
+    # reference could itself exceed the same threshold and get wrapped a
+    # second time by the generic layer — the model would fetch a
+    # claim-check file and find another claim-check reference inside it
+    # instead of real content. One enforcement point, not two.
     return {
         "exit_code": proc.returncode,
-        "stdout": stdout_result,
-        "stderr": stderr_result,
+        "stdout": stdout_bytes.decode("utf-8", errors="replace"),
+        "stderr": stderr_bytes.decode("utf-8", errors="replace"),
     }
 
 

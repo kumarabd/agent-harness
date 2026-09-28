@@ -49,7 +49,7 @@ import time
 from temporalio import activity
 from temporalio.exceptions import CancelledError
 
-from . import ids, llm_client, model_registry
+from . import claim_check, ids, llm_client, model_registry
 from .tools import TOOL_REGISTRY, ToolContext, call_tool, resolve_session_dir
 from .types import ToolCallInput, ToolCallOutput
 
@@ -182,6 +182,15 @@ class ToolCallActivity:
 
         logger.info("ToolCall done: %s -> %r", tool_name, result)
         record("ok")
+        # The one enforcement point (claim_check.py's own module docstring
+        # has the full rationale) for whether ANY tool's whole result is too
+        # big to hand back directly — not this handler's own concern, and
+        # not specific to which tool ran. Unchanged, in its own native
+        # shape, for the overwhelming common case where the result is
+        # already small.
+        result = await claim_check.store_result_if_large(
+            ctx.session_dir, input.tool_call_id, result, summary_provider, summary_config.model
+        )
         await self._pool.execute(
             "UPDATE tool_calls SET status = 'ok', result = $2, completed_at = now() WHERE tool_call_id = $1",
             input.tool_call_id,
