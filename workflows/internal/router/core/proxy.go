@@ -56,6 +56,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	temporalclient "go.temporal.io/sdk/client"
 
 	"agent-harness/workflows/internal/gateway/clerkauth"
@@ -244,6 +245,20 @@ func (s *Server) handleProxy(prefix string, target func(Tenant) string) http.Han
 		}
 
 		proxy := httputil.NewSingleHostReverseProxy(targetURL)
+		// A WebSocket is one bidirectional stream after its upgrade.  Stamp a
+		// server-owned correlation ID before proxying so the router and tenant
+		// gateway can prove the lifecycle of the same stream without recording
+		// a session token or message body.
+		traceID := ""
+		if isWebSocketUpgrade(r) {
+			traceID = uuid.NewString()
+			r.Header.Set("X-Nighthawk-Connection-Trace", traceID)
+			log.Printf("router websocket opening trace=%s tenant=%s path=%s", traceID, tenant.Slug, r.URL.Path)
+			proxy.ModifyResponse = func(res *http.Response) error {
+				log.Printf("router websocket upstream trace=%s status=%d", traceID, res.StatusCode)
+				return nil
+			}
+		}
 		originalDirector := proxy.Director
 		proxy.Director = func(req *http.Request) {
 			req.URL.Path = strings.TrimPrefix(req.URL.Path, prefix)
@@ -267,7 +282,11 @@ func (s *Server) handleProxy(prefix string, target func(Tenant) string) http.Han
 				writeJSONError(w, http.StatusNotFound, "no_tenant")
 				return
 			}
-			log.Printf("proxy error for tenant %s (%s): %v", tenant.Slug, prefix, err)
+			if traceID != "" {
+				log.Printf("router websocket failed trace=%s tenant=%s error=%v", traceID, tenant.Slug, err)
+			} else {
+				log.Printf("proxy error for tenant %s (%s): %v", tenant.Slug, prefix, err)
+			}
 			writeJSONError(w, http.StatusBadGateway, "upstream unavailable")
 		}
 		proxy.ServeHTTP(w, r)

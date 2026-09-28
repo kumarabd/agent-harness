@@ -92,6 +92,7 @@ func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
 	c := &conn{
 		h:           h,
 		ws:          ws,
+		traceID:     r.Header.Get("X-Nighthawk-Connection-Trace"),
 		wakeCh:      make(chan struct{}, 1),
 		resumeCh:    make(chan int),
 		deadCh:      make(chan struct{}),

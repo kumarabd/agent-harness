@@ -57,6 +57,9 @@ func (h *hub) wake(sessionKey string) {
 		conns = append(conns, c)
 	}
 	h.mu.Unlock()
+	if len(conns) > 0 {
+		log.Printf("mobile hub notification session=%s local_connections=%d", sessionKey, len(conns))
+	}
 	for _, c := range conns {
 		c.notify()
 	}

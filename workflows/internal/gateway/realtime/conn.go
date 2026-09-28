@@ -49,6 +49,9 @@ type conn struct {
 	discriminator    string
 	parentSessionKey string
 	emitTools        bool
+	// traceID is set by the shared router for proxied sockets. It is only an
+	// opaque correlation ID, never an auth credential or user message.
+	traceID string
 
 	wakeCh chan struct{}
 	// resumeCh carries "resume" frames from the reader goroutine to serve's
@@ -116,6 +119,7 @@ func (c *conn) serve(ctx context.Context) {
 	c.discriminator = scope.Discriminator
 	c.parentSessionKey = scope.ParentSessionKey
 	c.sessionKey = core.SessionKeyFor(c.platform, c.userID, c.discriminator)
+	log.Printf("mobile websocket authenticated trace=%s session=%s platform=%s", c.traceID, c.sessionKey, c.platform)
 	for _, capability := range first.Capabilities {
 		if capability == "tool_calls" {
 			c.emitTools = true
@@ -179,7 +183,9 @@ func (c *conn) serve(ctx context.Context) {
 
 	// initial replay
 	c.catchup(ctx)
-	c.send(resumedFrame{Type: "resumed", ThroughTurnSeq: c.sentThrough})
+	if c.send(resumedFrame{Type: "resumed", ThroughTurnSeq: c.sentThrough}) == nil {
+		log.Printf("mobile websocket synchronized trace=%s session=%s through_turn=%d", c.traceID, c.sessionKey, c.sentThrough)
+	}
 
 	ping := time.NewTicker(pingEvery)
 	defer ping.Stop()
@@ -197,6 +203,7 @@ func (c *conn) serve(ctx context.Context) {
 		case <-c.deadCh:
 			return
 		case <-c.wakeCh:
+			log.Printf("mobile websocket wake trace=%s session=%s", c.traceID, c.sessionKey)
 			c.catchup(ctx)
 		case seq := <-c.resumeCh:
 			c.sentThrough = seq
@@ -243,6 +250,7 @@ func (c *conn) send(v any) error {
 	err = c.ws.WriteMessage(websocket.TextMessage, b)
 	c.writeMu.Unlock()
 	if err != nil {
+		log.Printf("mobile websocket write failed trace=%s session=%s error=%v", c.traceID, c.sessionKey, err)
 		c.deadOnce.Do(func() { close(c.deadCh) })
 	}
 	return err
@@ -278,6 +286,9 @@ func (c *conn) handleInbound(ctx context.Context, f inboundFrame) {
 		})
 		if err != nil {
 			c.send(errorFrame{Type: "error", Message: "failed to submit message"})
+			log.Printf("mobile websocket ingest failed trace=%s session=%s error=%v", c.traceID, c.sessionKey, err)
+		} else {
+			log.Printf("mobile websocket message accepted trace=%s session=%s", c.traceID, c.sessionKey)
 		}
 	case "answer":
 		c.answerUserInput(ctx, f)
@@ -360,6 +371,7 @@ func (c *conn) catchupPage(ctx context.Context) (n int, hitRunning bool) {
 		c.sessionKey, c.sentThrough, catchupPageSize,
 	)
 	if err != nil {
+		log.Printf("mobile websocket catchup turns query failed trace=%s session=%s error=%v", c.traceID, c.sessionKey, err)
 		return 0, false
 	}
 	type turnRow struct {
@@ -427,10 +439,16 @@ func (c *conn) emitMessages(ctx context.Context, turnSeq int, turnID string) {
 		if rows.Scan(&seq, &role, &content, &speaker, &cmid, &devID) != nil {
 			return
 		}
-		c.send(messageFrame{
+		frame := messageFrame{
 			Type: "message", TurnSeq: turnSeq, Seq: seq, Role: role,
 			Content: content, SpeakerID: speaker, DeviceID: devID, ClientMsgID: cmid,
-		})
+		}
+		if c.send(frame) != nil {
+			return
+		}
+		if role == "assistant" {
+			log.Printf("mobile websocket assistant message written trace=%s session=%s turn=%d seq=%d", c.traceID, c.sessionKey, turnSeq, seq)
+		}
 		c.sentMsgSeq = seq
 	}
 }
@@ -447,6 +465,7 @@ func (c *conn) emitToolCalls(ctx context.Context, turnSeq int, turnID string) {
 		turnID,
 	)
 	if err != nil {
+		log.Printf("mobile websocket tool-calls query failed trace=%s session=%s turn=%d error=%v", c.traceID, c.sessionKey, turnSeq, err)
 		return
 	}
 	defer rows.Close()
@@ -482,6 +501,7 @@ func (c *conn) emitDeltas(ctx context.Context, turnSeq int, turnID string) {
 		turnID, c.sentDelSeq,
 	)
 	if err != nil {
+		log.Printf("mobile websocket deliveries query failed trace=%s session=%s turn=%d error=%v", c.traceID, c.sessionKey, turnSeq, err)
 		return
 	}
 	defer rows.Close()
@@ -492,7 +512,9 @@ func (c *conn) emitDeltas(ctx context.Context, turnSeq int, turnID string) {
 			return
 		}
 		text, replace := deltaFor(c.lastCum, cum)
-		c.send(deltaFrame{Type: "delta", TurnSeq: turnSeq, Seq: seq, Text: text, Replace: replace})
+		if c.send(deltaFrame{Type: "delta", TurnSeq: turnSeq, Seq: seq, Text: text, Replace: replace}) != nil {
+			return
+		}
 		c.lastCum = cum
 		c.sentDelSeq = seq
 	}
