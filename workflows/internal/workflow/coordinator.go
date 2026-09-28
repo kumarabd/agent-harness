@@ -94,6 +94,15 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 	var workID string
 	workActive := false
 
+	// docs/05-architecture-domain-control-loops.md — this session's own
+	// active mode, set/cleared exclusively by tools.switch_mode's own SetMode
+	// signal (never inferred from a turn's ordinary completion). Read only
+	// at the two places below that decide what to START for a brand-new
+	// message — never consulted while workActive (an already-running turn
+	// or mode-turn just gets the message forwarded into it, same as always,
+	// regardless of what mode currently says).
+	mode := chatMode
+
 	signalChan := workflow.GetSignalChannel(ctx, NewMessageSignalName)
 	var pendingSignal *types.SignalPayload
 	haveSignal := false
@@ -119,6 +128,13 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 	// tracking of who sent it.
 	keepAliveChan := workflow.GetSignalChannel(ctx, KeepAliveSignalName)
 	haveKeepAlive := false
+
+	// SetModeSignalName's own doc comment (turn.go) has the full reasoning.
+	// Updated directly in the receive callback below, not staged like
+	// pendingSignal/pendingWake — there's no forwarding decision to make
+	// afterward, just a variable to update before the next dispatch choice.
+	setModeChan := workflow.GetSignalChannel(ctx, SetModeSignalName)
+	haveSetMode := false
 
 	for {
 		// Were we actually idle-waiting on entry to this iteration? Only then
@@ -153,6 +169,15 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			var ignored struct{}
 			c.Receive(ctx, &ignored)
 			haveKeepAlive = true
+		})
+		sel.AddReceive(setModeChan, func(c workflow.ReceiveChannel, more bool) {
+			var newMode string
+			c.Receive(ctx, &newMode)
+			if newMode == "" {
+				newMode = chatMode
+			}
+			mode = newMode
+			haveSetMode = true
 		})
 		if workActive {
 			sel.AddFuture(workHandle, func(f workflow.Future) {
@@ -197,7 +222,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 		sel.Select(ctx)
 		cancelIdleTimer()
 
-		if wasIdle && !workActive && !haveSignal && !haveWake && !haveCancel && !haveKeepAlive {
+		if wasIdle && !workActive && !haveSignal && !haveWake && !haveCancel && !haveKeepAlive && !haveSetMode {
 			// The idle timer fired while we were genuinely idle (no turn just
 			// completed into this branch, and nothing has sent a KeepAlive
 			// recently either — first-party-plan.md's cross-replica
@@ -232,11 +257,19 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			return nil
 		}
 
-		if !haveSignal && !haveWake && !haveCancel && !haveKeepAlive {
+		if !haveSignal && !haveWake && !haveCancel && !haveKeepAlive && !haveSetMode {
 			// Turn completion path looped back around with nothing new yet;
 			// go wait again.
 			continue
 		}
+
+		// SetMode has already done its one job (updating `mode` above,
+		// synchronously in its own receive callback) — nothing further to
+		// act on this tick beyond that, and definitely not a reason to start
+		// or forward anything on its own. Cleared here, same as
+		// haveKeepAlive at the bottom, so it doesn't linger and get
+		// mis-read as "still pending" next iteration.
+		haveSetMode = false
 
 		// A cancel takes priority over everything else landing the same tick
 		// — an explicit stop shouldn't be starved behind processing one more
@@ -273,7 +306,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			}
 
 			turnSeq++
-			h, id, err := startTurn(ctx, input.TenantSlug, input.SessionKey, input.ConnectionID, turnSeq, payload.Message, "user")
+			h, id, err := startTurn(ctx, input.TenantSlug, input.SessionKey, input.ConnectionID, turnSeq, payload.Message, "user", turnWorkflowTypeName(mode))
 			if err != nil {
 				logger.Error("startTurn failed", "session_key", input.SessionKey, "error", err)
 				continue
@@ -302,7 +335,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 
 			turnSeq++
 			h, id, err := startTurn(ctx, input.TenantSlug, input.SessionKey, input.ConnectionID, turnSeq,
-				types.Message{Role: "user", Content: proactiveSeedText(wake)}, "intn:"+wake.IntentionID)
+				types.Message{Role: "user", Content: proactiveSeedText(wake)}, "intn:"+wake.IntentionID, turnWorkflowTypeName(mode))
 			if err != nil {
 				logger.Error("startTurn (proactive) failed", "intention_id", wake.IntentionID, "error", err)
 				continue

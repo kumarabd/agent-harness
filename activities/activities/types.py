@@ -63,6 +63,17 @@ class ModelCallInput:
     # Delivery-in-the-loop — offers deliver_reply/deliver_attachment for this
     # one call: turn.go's bounded post-Deliver-failure recovery round.
     offer_delivery_tools: bool = False
+    # docs/05-architecture-domain-control-loops.md — which curated system
+    # prompt this call should use, set by the Go workflow itself (it already
+    # knows its own identity at compile time — workflow/mode_journaling.go's
+    # runTurn(..., mode) call passes "journaling"; TurnWorkflow's own default
+    # entry point passes ""). Empty ⇒ the session's stored prompt or
+    # DEFAULT_SYSTEM_PROMPT, exactly as before this field existed. Distinct
+    # from messages.mode ("voice"/"" — is this ONE message speech-to-text)
+    # and from sessions.mode (the coordinator's own dispatch-routing state,
+    # tools.switch_mode) — this one only ever affects which prompt string
+    # model_call.py picks for this specific call.
+    mode: str = ""
 
 
 @dataclass
@@ -88,16 +99,6 @@ class ToolCallRef:
     # when requires_approval is True.
     server: str = ""
     tool: str = ""
-    # docs/05-architecture-domain-control-loops.md, docs/components/
-    # turn-pipeline.md ("Skills") — the model called a skill directly by its
-    # own registered name (skills are static, always-on capabilities, no
-    # discovery step required). turn.go dispatches a child workflow of
-    # use_skill instead of the generic ToolCall activity or a subagent
-    # TurnWorkflow. "" if this call isn't a skill. One field, not a
-    # bool+string pair — mirrors server/tool's own precedent of not needing a
-    # companion "is_resolved_tool" flag. Never set alongside is_subagent —
-    # independent primitives, never the same call.
-    use_skill: str = ""
 
 
 @dataclass
@@ -160,17 +161,6 @@ class ToolCallOutput:
 
     tool_call_id: str = ""
     status: str = "ok"  # "ok" | "error" | "cancelled"
-
-
-@dataclass
-class ReasoningTurnOutcome:
-    """skills.RunReasoningTurn's result — what SummarizeReasoningTurn distills
-    a skill's own scoped reasoning turn down to once the shared reason-act
-    loop stops. Short and structured, never raw message content — the same
-    class of crossing CloseSkillCall's own `result` param already makes."""
-
-    status: str = "ok"  # "ok" | "error" | "cancelled"
-    summary: str = ""
 
 
 @dataclass

@@ -57,7 +57,6 @@ import (
 	temporalworkflow "go.temporal.io/sdk/workflow"
 
 	wf "agent-harness/workflows/internal/workflow"
-	skillswf "agent-harness/workflows/internal/workflow/skills"
 )
 
 func envOrDefault(key, fallback string) string {
@@ -118,25 +117,25 @@ func run(ctx context.Context, address, namespace, taskQueue string, metricsHandl
 	w.RegisterWorkflow(wf.CompressContextWorkflow)
 	w.RegisterWorkflow(wf.UserInputRequestWorkflow)
 	w.RegisterWorkflow(wf.IntentionWorkflow)
-	// docs/05-architecture-domain-control-loops.md — every "skill" lives in
-	// its own package (workflows/internal/workflow/skills/) and is
-	// registered under its own snake_case name here, matching this tenant's
-	// own `skills` table `name` column exactly (migration 040_skills.sql) —
-	// that name IS the Temporal workflow type (turn.go dispatches
-	// dynamically by that name string, types.ToolCallRef.ResolvedWorkflowType,
-	// not by a Go-side switch, and never imports this package itself). This
-	// is the only Go-side registration a new skill needs beyond its own file
-	// and its row in that table — 2026-09-27, the gateway's own GET /skills
-	// (workflows/internal/gateway/web/skills.go) now queries that same
-	// table directly instead of a hand-synced registry.go mirror (deleted).
-	w.RegisterWorkflowWithOptions(skillswf.JournalingSkill, temporalworkflow.RegisterOptions{Name: "journaling"})
-	w.RegisterWorkflowWithOptions(skillswf.ServiceMonitoringSkill, temporalworkflow.RegisterOptions{Name: "service_monitoring"})
-	// Keep every former type name registered during rollout so an
-	// already-open execution under one of them can continue replaying. New
-	// calls use the snake_case names above, matching skills.py directly.
-	w.RegisterWorkflowWithOptions(skillswf.JournalingSkill, temporalworkflow.RegisterOptions{Name: "JournalingSkill"})
-	w.RegisterWorkflowWithOptions(skillswf.JournalingSkill, temporalworkflow.RegisterOptions{Name: "JournalingSkillWorkflow"})
-	w.RegisterWorkflowWithOptions(skillswf.ServiceMonitoringSkill, temporalworkflow.RegisterOptions{Name: "ServiceMonitoringSkill"})
+	// docs/05-architecture-domain-control-loops.md — a mode-based turn
+	// (session-persistent, dispatched directly by CoordinatorWorkflow via
+	// tools.switch_mode, never by the model calling a tool) is a real
+	// turn-shaped entry point (types.TurnInput/TurnResult, runTurn), so it's
+	// registered here directly, under the exact string switch_mode's own
+	// `mode` argument names — which must also be a key in
+	// activities/activities/llm.py's MODE_TURNS. 2026-09-27: this is now the
+	// ONLY skill-dispatch shape — the earlier one-shot skill mechanism
+	// (types.SkillWorkflowInput, turn.go's runSkill, its own
+	// workflows/internal/workflow/skills/ package) is deleted outright, not
+	// kept alongside this as a second option: a skill whose own activity is
+	// naturally single-round (service_monitoring) is still just a mode whose
+	// curated prompt calls switch_mode() back to chat as soon as that one
+	// round concludes, not a structurally different dispatch shape. Each
+	// mode's own `skills` table row (migration 040_skills.sql) is kept, now
+	// serving only as the per-tenant enable/disable gate (llm.ENABLED_MODES),
+	// not a dispatch target.
+	w.RegisterWorkflowWithOptions(wf.JournalingModeTurn, temporalworkflow.RegisterOptions{Name: "journaling"})
+	w.RegisterWorkflowWithOptions(wf.ServiceMonitoringModeTurn, temporalworkflow.RegisterOptions{Name: "service_monitoring"})
 
 	log.Printf("loop worker starting: temporal=%q namespace=%q task_queue=%q", address, namespace, taskQueue)
 

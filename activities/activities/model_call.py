@@ -93,29 +93,6 @@ class ModelCallActivity:
             caller_is_subagent = bool(head and head["parent_type"] == "turn")
             fixture = head if (head and head["content"] is not None) else None
 
-            # A skill's own scoped reasoning turn (RunReasoningTurn/support.go,
-            # parent_type "skill") must never be able to call ITSELF again —
-            # found 2026-09-27 debugging a real stuck production turn: the
-            # journaling skill's own reasoning turn called `journaling` on
-            # itself recursively, since nothing excluded it from that turn's
-            # own schema. Only the currently-running skill is excluded, not
-            # every registered skill — a skill legitimately composing a
-            # DIFFERENT skill is a real future case this shouldn't foreclose;
-            # self-recursion has no legitimate case to weigh against (a
-            # skill's own workflow already owns its retries/approval
-            # gate/finish condition — calling itself again while still
-            # running can't accomplish anything that isn't already its own
-            # job). `turns.parent_id` for a parent_type="skill" row IS the
-            # tool_call_id of the skill invocation that spawned it
-            # (support.go's InsertMessageInput.ParentID) — one extra lookup,
-            # only on this rare path, to name it.
-            caller_skill_name: str | None = None
-            if head and head["parent_type"] == "skill":
-                skill_row = await conn.fetchrow(
-                    "SELECT tool_name FROM tool_calls WHERE tool_call_id = $1", head["parent_id"]
-                )
-                caller_skill_name = skill_row["tool_name"] if skill_row else None
-
             if fixture is not None:
                 content: str = fixture["content"]
                 raw_tool_calls: list[dict] = json.loads(fixture["tool_calls"])
@@ -190,6 +167,19 @@ class ModelCallActivity:
                 )
                 if mode_row and mode_row["mode"] == "voice":
                     system_prompt = llm.VOICE_SYSTEM_PROMPT
+                # docs/05-architecture-domain-control-loops.md — this turn's
+                # own workflow identity (set by the Go workflow itself, which
+                # already knows it at compile time — workflow/
+                # mode_journaling.go's runTurn(..., mode) call) overrides
+                # both the session's stored prompt and the voice check
+                # above: which ACTIVITY this whole turn is takes priority
+                # over which MESSAGE mode the triggering input happened to
+                # carry. Empty (the ordinary case) leaves system_prompt
+                # exactly as already resolved.
+                if input.mode == "journaling":
+                    system_prompt = llm.JOURNALING_SYSTEM_PROMPT
+                elif input.mode == "service_monitoring":
+                    system_prompt = llm.SERVICE_MONITORING_SYSTEM_PROMPT
                 # prompt_assemble_latency_seconds — step 9 (docs/components/
                 # request-pipeline/09-prompt-assembly.md). Only the real path
                 # assembles; the fixture path above returns a scripted response
@@ -209,7 +199,6 @@ class ModelCallActivity:
                     caller_is_subagent,
                     resolved=resolved,
                     offer_delivery_tools=input.offer_delivery_tools,
-                    exclude_skill_name=caller_skill_name,
                 )
 
                 # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
@@ -386,35 +375,13 @@ class ModelCallActivity:
                     # call_tool's own explicit arguments). Gating reuses the same
                     # identity when it's known; falls back to _resolve_gating's
                     # shell_exec/call_tool cases otherwise.
-                    #
-                    # A skill (docs/05-architecture-domain-control-loops.md) is
-                    # the same per-task-resolved shape, mutually exclusive with
-                    # the tool case — but a STATIC capability
-                    # (capabilities.CAPABILITIES has one entry per registered
-                    # skill, always present, never per-turn-discovered), so the
-                    # lookup also checks the static table, not only the
-                    # per-turn `resolved_by_name` discover_tools already
-                    # populates. use_skill (migration 037/039) carries the Go
-                    # workflow type turn.go dispatches as a child workflow
-                    # instead. Never approval-gated by this outer mechanism — a
-                    # skill that needs a human gate requests it itself,
-                    # internally, via its own child UserInputRequestWorkflow.
                     resolved_cap = None if (is_subagent or is_ask_user) else (
                         resolved_by_name.get(tool_name) or _cap.BY_NAME.get(tool_name)
-                    )
-                    use_skill = (
-                        resolved_cap.resolved_workflow_type
-                        if (resolved_cap is not None and resolved_cap.resolved_workflow_type)
-                        else ""
                     )
                     if resolved_cap is not None and resolved_cap.resolved_target is not None:
                         resolved_server, resolved_tool = resolved_cap.resolved_target
                         gate_server, gate_tool = resolved_server, resolved_tool
                         approval_needed = permissions.requires_approval(gate_server, gate_tool)
-                    elif use_skill:
-                        resolved_server = resolved_tool = None
-                        gate_server, gate_tool = "", ""
-                        approval_needed = False
                     else:
                         resolved_server = resolved_tool = None
                         approval_needed, gate_server, gate_tool = (
@@ -422,14 +389,14 @@ class ModelCallActivity:
                         )
 
                     # status left at its 'pending' default — ToolCall (or the
-                    # subagent/skill child workflow's own completion) is what
-                    # transitions it to ok/error/cancelled. See the schema
-                    # migration's note on why 'pending' exists.
+                    # subagent's own completion) is what transitions it to
+                    # ok/error/cancelled. See the schema migration's note on why
+                    # 'pending' exists.
                     await conn.execute(
                         "INSERT INTO tool_calls "
                         "(tool_call_id, parent_id, message_id, tool_name, arguments, is_subagent, "
-                        "resolved_server, resolved_tool, resolved_workflow_type) "
-                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                        "resolved_server, resolved_tool) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                         tool_call_id,
                         input.turn_id,
                         message_id,
@@ -438,7 +405,6 @@ class ModelCallActivity:
                         is_subagent,
                         resolved_server,
                         resolved_tool,
-                        use_skill or None,
                     )
                     refs.append(
                         ToolCallRef(
@@ -449,7 +415,6 @@ class ModelCallActivity:
                             requires_approval=approval_needed,
                             server=gate_server,
                             tool=gate_tool,
-                            use_skill=use_skill,
                         )
                     )
 

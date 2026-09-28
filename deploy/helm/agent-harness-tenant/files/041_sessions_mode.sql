@@ -1,0 +1,14 @@
+-- docs/05-architecture-domain-control-loops.md — a session's active mode:
+-- "chat" (the default — this session's own CoordinatorWorkflow dispatches
+-- ordinary TurnWorkflow for the next incoming message) or a registered
+-- skill's own name (that skill's own turn-shaped handler is dispatched
+-- instead, across however many messages it takes, until it switches back).
+--
+-- Set by tools.switch_mode (activities/activities/tools.py) — a Postgres
+-- write plus a signal to the SAME session's own CoordinatorWorkflow in one
+-- call. This column is purely the external/client-visible mirror of that
+-- decision (same role turns.status already plays for turn state) — the
+-- coordinator's own in-memory state, updated by that same signal, is the
+-- actual operational source of truth for dispatch; nothing reads this
+-- column back to make a routing decision.
+ALTER TABLE sessions ADD COLUMN mode text NOT NULL DEFAULT 'chat';

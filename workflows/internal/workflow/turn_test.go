@@ -13,24 +13,6 @@ import (
 	"agent-harness/workflows/internal/types"
 )
 
-// testSkillWorkflowOK/testSkillWorkflowCancel are stub domain workflows
-// registered only for these tests. They prove turn.go's isSkill dispatch
-// branch (docs/05-architecture-domain-control-loops.md, docs/components/
-// turn-pipeline.md "Skills") actually starts a child workflow of the
-// type-name STRING ModelCall resolved at mint time, awaits it, and reads its
-// thin SkillWorkflowOutput via drainResult — no Go-side name-to-function
-// registry involved.
-func testSkillWorkflowOK(_ workflow.Context, input types.SkillWorkflowInput) (types.SkillWorkflowOutput, error) {
-	return types.SkillWorkflowOutput{ToolCallID: input.ToolCallID, Status: "ok"}, nil
-}
-
-func testSkillWorkflowBlocksUntilCancelled(ctx workflow.Context, input types.SkillWorkflowInput) (types.SkillWorkflowOutput, error) {
-	// Never resolves on its own — the test drives cancellation, exercising
-	// the exact path a real skill's own ctx.Done() branch would take.
-	ctx.Done().Receive(ctx, nil)
-	return types.SkillWorkflowOutput{ToolCallID: input.ToolCallID, Status: "cancelled"}, ctx.Err()
-}
-
 // mockTurnInfra registers the detached-child-workflow machinery every
 // TurnWorkflow run touches regardless of what the test is actually about
 // (compaction/memory write-back checks, docs/components/turn-pipeline.md
@@ -76,69 +58,6 @@ func mockModelCallScript(env *testsuite.TestWorkflowEnvironment, responses []typ
 	return &calls
 }
 
-func TestTurnWorkflow_SkillDispatch(t *testing.T) {
-	var ts testsuite.WorkflowTestSuite
-	env := ts.NewTestWorkflowEnvironment()
-	env.RegisterWorkflowWithOptions(testSkillWorkflowOK, workflow.RegisterOptions{Name: "TestSkillWorkflow"})
-	mockTurnInfra(env)
-
-	calls := mockModelCallScript(env, []types.ModelCallOutput{
-		{
-			Status: "working",
-			ToolCalls: []types.ToolCallRef{
-				{ToolCallID: "t1:act:1", ToolName: "service_monitoring", UseSkill: "TestSkillWorkflow"},
-			},
-		},
-		{Status: "done", HasContent: true},
-	})
-
-	env.ExecuteWorkflow(TurnWorkflow, types.TurnInput{
-		SessionKey:  "u:web",
-		TurnID:      "t1",
-		ParentType:  "turn",
-		PreInserted: true,
-	})
-
-	require.True(t, env.IsWorkflowCompleted())
-	require.NoError(t, env.GetWorkflowError())
-	require.Equal(t, 1, *calls)
-}
-
-func TestTurnWorkflow_SkillDispatch_CancelledOnInterrupt(t *testing.T) {
-	var ts testsuite.WorkflowTestSuite
-	env := ts.NewTestWorkflowEnvironment()
-	env.RegisterWorkflowWithOptions(testSkillWorkflowBlocksUntilCancelled, workflow.RegisterOptions{Name: "TestSkillWorkflow"})
-	mockTurnInfra(env)
-
-	mockModelCallScript(env, []types.ModelCallOutput{
-		{
-			Status: "working",
-			ToolCalls: []types.ToolCallRef{
-				{ToolCallID: "t1:act:1", ToolName: "service_monitoring", UseSkill: "TestSkillWorkflow"},
-			},
-		},
-		{Status: "done", HasContent: true},
-	})
-
-	// A follow-up message mid-flight — turn.go's own interrupt path (docs/
-	// components/turn-pipeline.md's interrupt table, "Skill workflow (child)"
-	// row): cancels the in-flight skill child, drains it as "cancelled", then
-	// folds the follow-up in and keeps looping.
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(NewMessageSignalName, types.SignalPayload{Message: types.Message{Role: "user", Content: "never mind"}})
-	}, 0)
-
-	env.ExecuteWorkflow(TurnWorkflow, types.TurnInput{
-		SessionKey:  "u:web",
-		TurnID:      "t1",
-		ParentType:  "turn",
-		PreInserted: true,
-	})
-
-	require.True(t, env.IsWorkflowCompleted())
-	require.NoError(t, env.GetWorkflowError())
-}
-
 // testReasoningTurnWorkflow runs RunReasonActLoop directly, standing in for
 // skills.RunReasoningTurn (support.go) exactly: PendingMessages/
 // CancelRequested are never fed — a scoped reasoning turn is only meant to
@@ -149,13 +68,13 @@ func TestTurnWorkflow_SkillDispatch_CancelledOnInterrupt(t *testing.T) {
 // would let the OUTER turn's own (already-correct) cancellation handling
 // mask a bug here entirely, since the outer turn stops cleanly on its own
 // cancelChan regardless of what happens to an inner child.
-func testReasoningTurnWorkflow(ctx workflow.Context, _ struct{}) (RunReasonActLoopResult, error) {
+func testReasoningTurnWorkflow(ctx workflow.Context, parentType string) (RunReasonActLoopResult, error) {
 	pendingMessages := []types.SignalPayload{}
 	cancelRequested := false
 	return RunReasonActLoop(ctx, RunReasonActLoopInput{
 		TurnID:          "t1:act:1:reason",
 		SessionKey:      "u:web",
-		ParentType:      "skill",
+		ParentType:      parentType,
 		PendingMessages: &pendingMessages,
 		CancelRequested: &cancelRequested,
 		ProgressGen:     new(int),
@@ -164,13 +83,16 @@ func testReasoningTurnWorkflow(ctx workflow.Context, _ struct{}) (RunReasonActLo
 
 // TestRunReasonActLoop_ScopedReasoningTurn_CtxCancelDoesNotPanic reproduces
 // (and regression-tests) a real stuck production turn found 2026-09-27:
-// hitting Cancel from the web UI while wedged inside a skill's own scoped
-// reasoning turn silently did nothing — the workflow task panicked instead
-// of stopping cleanly (indexing PendingMessages[0] on a permanently empty
-// slice, since neither flag this loop's own workflow.Await races against
-// ever becomes true from ctx cancellation alone), and Temporal retries a
-// panicking workflow task forever, so the workflow looked completely
-// unresponsive to any further signal, including a second cancel attempt.
+// hitting Cancel from the web UI while wedged inside a nested reasoning turn
+// that never gets its own CancelRequested/PendingMessages fed silently did
+// nothing — the workflow task panicked instead of stopping cleanly (indexing
+// PendingMessages[0] on a permanently empty slice, since neither flag this
+// loop's own workflow.Await races against ever becomes true from ctx
+// cancellation alone), and Temporal retries a panicking workflow task
+// forever, so the workflow looked completely unresponsive to any further
+// signal, including a second cancel attempt. "skill" here is just an
+// arbitrary ParentType value exercising this generic path, not a reference
+// to the since-deleted skill-reasoning-turn mechanism.
 func TestRunReasonActLoop_ScopedReasoningTurn_CtxCancelDoesNotPanic(t *testing.T) {
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()
@@ -212,11 +134,99 @@ func TestRunReasonActLoop_ScopedReasoningTurn_CtxCancelDoesNotPanic(t *testing.T
 		},
 	})
 
-	env.ExecuteWorkflow(testReasoningTurnWorkflow, struct{}{})
+	env.ExecuteWorkflow(testReasoningTurnWorkflow, "skill")
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
 	var result RunReasonActLoopResult
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, "cancelled_by_user", result.StopReason)
+}
+
+// TestRunReasonActLoop_TopLevelTurn_NeverCallsATool_StaysNoToolCalls proves
+// an ordinary turn that answers with zero tool calls — a question needing no
+// lookup — is completely normal and stays "no_tool_calls", regardless of
+// ParentType. (2026-09-27's "no_action_taken" ParentType=="skill" special
+// case — the scoped-reasoning bridge's own patch for a since-deleted
+// mechanism, RunReasoningTurn/support.go — is gone entirely now that both
+// prior skills are mode-turns instead: every ParentType maps the same way.)
+func TestRunReasonActLoop_TopLevelTurn_NeverCallsATool_StaysNoToolCalls(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	env.RegisterWorkflow(testReasoningTurnWorkflow)
+	mockTurnInfra(env)
+
+	mockModelCallScript(env, []types.ModelCallOutput{
+		{Status: "done", HasContent: true},
+	})
+
+	env.ExecuteWorkflow(testReasoningTurnWorkflow, "session")
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	var result RunReasonActLoopResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "no_tool_calls", result.StopReason)
+}
+
+// TestJournalingModeTurn_PassesModeToModelCall / TestTurnWorkflow_PassesEmptyModeToModelCall
+// prove runTurn's own mode parameter (turn.go) actually reaches
+// ModelCallInput.Mode — the one thing model_call.py reads to pick
+// llm.JOURNALING_SYSTEM_PROMPT over the session's own stored prompt
+// (docs/05-architecture-domain-control-loops.md). JournalingModeTurn and
+// TurnWorkflow share runTurn's entire body; this is the one observable
+// difference between them under test.
+func TestJournalingModeTurn_PassesModeToModelCall(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	mockTurnInfra(env)
+
+	var gotMode string
+	env.RegisterActivityWithOptions(
+		func(_ context.Context, in types.ModelCallInput) (types.ModelCallOutput, error) {
+			gotMode = in.Mode
+			return types.ModelCallOutput{Status: "done", HasContent: true}, nil
+		},
+		activity.RegisterOptions{Name: "ModelCall"},
+	)
+
+	env.ExecuteWorkflow(JournalingModeTurn, types.TurnInput{
+		SessionKey:  "u:web",
+		TurnID:      "t1",
+		ParentType:  "session",
+		PreInserted: true,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Equal(t, "journaling", gotMode)
+}
+
+func TestTurnWorkflow_PassesEmptyModeToModelCall(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	mockTurnInfra(env)
+
+	var gotMode string
+	sawCall := false
+	env.RegisterActivityWithOptions(
+		func(_ context.Context, in types.ModelCallInput) (types.ModelCallOutput, error) {
+			gotMode = in.Mode
+			sawCall = true
+			return types.ModelCallOutput{Status: "done", HasContent: true}, nil
+		},
+		activity.RegisterOptions{Name: "ModelCall"},
+	)
+
+	env.ExecuteWorkflow(TurnWorkflow, types.TurnInput{
+		SessionKey:  "u:web",
+		TurnID:      "t1",
+		ParentType:  "session",
+		PreInserted: true,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.True(t, sawCall)
+	require.Equal(t, "", gotMode)
 }

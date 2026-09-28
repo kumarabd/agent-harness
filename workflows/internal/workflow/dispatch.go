@@ -15,15 +15,20 @@ import (
 // wedged-turn backstop, deliberately generous (placeholder, tune with data).
 const turnRunTimeout = 30 * time.Minute
 
-// startTurn is the session's front door: write the inbound message (creating the
-// turns row), then start a TurnWorkflow for it. The turn does its own
-// classification, retrieval, and reason-act loop internally — the coordinator
-// only decides "is a turn already active" (forward the message into it) vs "start
-// a new one" (call this).
+// startTurn is the session's front door: write the inbound message (creating
+// the turns row), then start a turn-shaped workflow for it — TurnWorkflow by
+// default, or whichever workflow type name the caller passes (its own mode's
+// turnWorkflowTypeName) when this session is currently in some mode. Every
+// turn-shaped workflow this can start shares TurnWorkflow's own
+// types.TurnInput/types.TurnResult contract — that's what makes dispatching
+// by a bare type-name string safe here. The turn does its own classification,
+// retrieval, and reason-act loop internally — the coordinator only decides
+// "is a turn already active" (forward the message into it) vs "start a new
+// one" (call this).
 //
 // Returns the child-workflow future (always non-nil on success — the coordinator
 // awaits it for completion) and the turn id.
-func startTurn(ctx workflow.Context, tenantSlug, sessionKey, connectionID string, turnSeq int, msg types.Message, initiatedBy string) (workflow.ChildWorkflowFuture, string, error) {
+func startTurn(ctx workflow.Context, tenantSlug, sessionKey, connectionID string, turnSeq int, msg types.Message, initiatedBy string, workflowType string) (workflow.ChildWorkflowFuture, string, error) {
 	logger := workflow.GetLogger(ctx)
 	turnID := ids.TurnID(sessionKey, turnSeq)
 	turnSeqCopy := turnSeq
@@ -64,7 +69,7 @@ func startTurn(ctx workflow.Context, tenantSlug, sessionKey, connectionID string
 		// future) delivers the fallback notice.
 		WorkflowRunTimeout: turnRunTimeout,
 	}
-	h := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(ctx, cwo), TurnWorkflow, in)
+	h := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(ctx, cwo), workflowType, in)
 	var we workflow.Execution
 	if err := h.GetChildWorkflowExecution().Get(ctx, &we); err != nil {
 		if temporal.IsWorkflowExecutionAlreadyStartedError(err) {

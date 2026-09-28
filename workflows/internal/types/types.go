@@ -183,6 +183,13 @@ type ModelCallInput struct {
 	// see there. Also set directly (without a TurnInput) by turn.go's local
 	// post-Deliver-failure recovery round.
 	OfferDeliveryTools bool `json:"offer_delivery_tools,omitempty"`
+	// Mode — docs/05-architecture-domain-control-loops.md. Which curated
+	// system prompt model_call.py should use for this call, mirroring
+	// RunReasonActLoopInput's own field of the same name straight through —
+	// set once per workflow (runTurn's own mode parameter), not per call.
+	// Empty ⇒ the session's stored prompt or DEFAULT_SYSTEM_PROMPT, exactly
+	// as before this field existed.
+	Mode string `json:"mode,omitempty"`
 }
 
 // ToolCallRef is one tool call minted by ModelCall — name/ID/dispatch-kind
@@ -216,21 +223,6 @@ type ToolCallRef struct {
 	// workflow-visible by design, not an accepted leak").
 	Server string `json:"server,omitempty"`
 	Tool   string `json:"tool,omitempty"`
-	// UseSkill — docs/05-architecture-domain-control-loops.md, docs/components/
-	// turn-pipeline.md ("Skills"). The model called a skill directly by its
-	// own registered name (skills are static, always-on capabilities — no
-	// discovery step required); this carries the resolved Go workflow type
-	// to dispatch via workflow.ExecuteChildWorkflow's string-name form ("" if
-	// this call isn't a skill). No Go-side name-to-function registry needed:
-	// Temporal resolves the string against whatever was registered with
-	// RegisterWorkflow in cmd/loop-worker. One field, not a bool+string pair
-	// — mirrors Server/Tool's own precedent of not needing a companion
-	// "is_resolved_tool" boolean; a skill only ever needs one identity value,
-	// unlike {server, tool}'s genuine compound key. Never set alongside
-	// IsSubagent — a skill and a subagent are independent primitives (docs/
-	// 05-architecture-domain-control-loops.md, "Skill Workflows Are
-	// Independent of Subagents"), never the same call.
-	UseSkill string `json:"use_skill,omitempty"`
 }
 
 // ModelCallOutput is ModelCall's only output — refs and control metadata, never
@@ -291,47 +283,6 @@ type ToolCallInput struct {
 type ToolCallOutput struct {
 	ToolCallID string `json:"tool_call_id"`
 	Status     string `json:"status"` // "ok" | "error" | "cancelled"
-}
-
-// SkillWorkflowInput is a skill child workflow's only input — IDs and
-// dispatch plumbing, deliberately never a context clone or brief
-// (docs/05-architecture-domain-control-loops.md, "Skill Workflows Are
-// Independent of Subagents"). A skill reads its own real arguments via the
-// ReadSkillCallArguments activity, keyed by ToolCallID — the same
-// reference-passing discipline ToolCallInput already uses.
-type SkillWorkflowInput struct {
-	ToolCallID string `json:"tool_call_id"`
-	// TurnID — the parent turn's id, needed whenever a skill composes a
-	// primitive with its own FK-backed Postgres row referencing turns(turn_id)
-	// (e.g. user_input_requests.turn_id, NOT NULL) — an ID, not content, the
-	// same crossing ToolName/Server/Tool already make on ToolCallRef.
-	TurnID       string `json:"turn_id"`
-	SessionKey   string `json:"session_key"`
-	TenantSlug   string `json:"tenant_slug"` // see TurnInput's own doc comment
-	ConnectionID string `json:"connection_id,omitempty"`
-}
-
-// SkillWorkflowOutput is every skill workflow's return value — status only,
-// mirroring ToolCallOutput exactly under the same reference-passing contract:
-// result/reason/side_effect stay in Postgres, written by the skill workflow
-// itself via the CloseSkillCall activity before it returns (same convention
-// UserInputRequestWorkflow already follows for CloseUserInput/DenyToolCall —
-// user_input.go), never carried as workflow-visible data. turn.go's
-// drainResult only needs Status for retry bookkeeping.
-type SkillWorkflowOutput struct {
-	ToolCallID string `json:"tool_call_id"`
-	Status     string `json:"status"` // "ok" | "error" | "cancelled"
-}
-
-// ReasoningTurnOutcome is skills.RunReasoningTurn's result — what
-// SummarizeReasoningTurn (Python, content-reading allowed there under the
-// reference-passing contract) distills a skill's own scoped reasoning turn
-// down to once RunReasonActLoop stops. Short and structured, never raw
-// message content — the same class of crossing CloseSkillCall's own `result`
-// param already makes.
-type ReasoningTurnOutcome struct {
-	Status  string `json:"status"` // "ok" | "error" | "cancelled"
-	Summary string `json:"summary,omitempty"`
 }
 
 // InsertMessageInput is the input for the message-insert activity — the one

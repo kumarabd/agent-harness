@@ -81,12 +81,6 @@ class Capability:
     # {server, tool} for a resolved mcp-hub tool — carried onto types.ToolCall
     # so turn.go dispatches it through the generic mcp-hub-tier proxy
     resolved_target: tuple[str, str] | None = field(default=None, compare=False)
-    # docs/05-architecture-domain-control-loops.md — the Go workflow type name
-    # for a resolved skill, mutually exclusive with resolved_target: turn.go
-    # dispatches this one as a child workflow (workflow.ExecuteChildWorkflow
-    # by type-name string), never through the call_tool/TOOL_REGISTRY path a
-    # resolved_target capability uses.
-    resolved_workflow_type: str | None = field(default=None, compare=False)
 
 
 # Both turn kinds see every capability by default; SUBAGENT additionally sees
@@ -102,13 +96,6 @@ _STATIC_CAPABILITIES: list[Capability] = [
     Capability("recall", Layer.COGNITION, _MAIN, handler_ref="recall", meta=True),
     Capability("reflect", Layer.COGNITION, _MAIN, handler_ref="reflect"),
     Capability("discover_tools", Layer.INTERFACE, _MAIN, handler_ref="discover_tools", meta=True),
-    # docs/05-architecture-domain-control-loops.md — every registered skill is
-    # already directly callable by its own name (see the skill entries
-    # appended below CAPABILITIES's literal list) — nothing here needs
-    # minting. This is an optional detail/search step: exact input_schema, or
-    # semantic search once there are more skills than comfortably fit as
-    # individually-listed tools.
-    Capability("discover_skills", Layer.INTERFACE, _MAIN, handler_ref="discover_skills", meta=True),
     # call_tool is internal-only since the 2026-09-04 per-task-resolution
     # revision (tool-registry.md, "Resolved: Three-Layer Tool Taxonomy") —
     # turn_kinds=() means schema_for never offers it to the model. It keeps a
@@ -125,6 +112,15 @@ _STATIC_CAPABILITIES: list[Capability] = [
     # 5 CRUD ops -> 1 dispatcher (list/inspect/revise/snooze/cancel) —
     # tool-registry.md, "Resolved: Three-Layer Tool Taxonomy".
     Capability("manage_intention", Layer.CONTROL, _MAIN, handler_ref="manage_intention"),
+    # docs/05-architecture-domain-control-loops.md — an ordinary, activity-
+    # backed tool (tools.switch_mode: a Postgres write + a Temporal signal to
+    # this session's own CoordinatorWorkflow), deliberately NOT peeled like
+    # report_status. report_status fires every step regardless — mode must
+    # never move just because a round finished; only an explicit switch_mode
+    # call may change it, in either direction (chat -> a skill's own mode, or
+    # back). The tool_calls row this call mints is the mode change's own
+    # durable, Temporal-native record — no separate state field needed.
+    Capability("switch_mode", Layer.CONTROL, _MAIN, handler_ref="switch_mode"),
     Capability("lcm_grep", Layer.COGNITION, _MAIN, handler_ref="lcm_grep", timing=LOCAL),
     Capability("lcm_describe", Layer.COGNITION, _MAIN, handler_ref="lcm_describe", timing=LOCAL),
     Capability("lcm_expand", Layer.COGNITION, frozenset({TurnKind.SUBAGENT}), handler_ref="lcm_expand", timing=LOCAL),
@@ -142,46 +138,16 @@ _STATIC_CAPABILITIES: list[Capability] = [
     Capability("deliver_attachment", Layer.CONTROL, frozenset()),
 ]
 
-# CAPABILITIES/BY_NAME/HANDLER_REFS all include this tenant's own enabled
-# skills (docs/05-architecture-domain-control-loops.md — a skill is a static,
-# always-on capability, exactly like ask_user/spawn_subagent above, not a
-# per-turn-resolved one: there are few of them, hand-authored, so there's no
-# reason to gate them behind discovery), rebuilt by load_skills below rather
-# than baked in at import time — 2026-09-27, skills moved from a hardcoded
-# process-wide list (skills.py) to this tenant's own Postgres `skills` table,
-# so they aren't known until tenant_worker.py's own startup query resolves.
-# Empty (base capabilities only) until load_skills runs, same "just isn't
-# offered yet" shape shell_hub/skill_hub already have before their own init().
-CAPABILITIES: list[Capability] = []
-BY_NAME: dict[str, Capability] = {}
-HANDLER_REFS: dict[str, str] = {}
-
-
-def load_skills(entries: list[dict]) -> None:
-    """Rebuilds CAPABILITIES/BY_NAME/HANDLER_REFS from this tenant's freshly
-    loaded skills (skills.init's return value) — tenant_worker.py calls this
-    once at startup, after skills.init(pool) and before the Temporal worker
-    starts polling, so every real ModelCall sees the tenant's actual enabled
-    set. Idempotent (safe to call again if skills are ever reloaded without a
-    process restart, though nothing does that today).
-
-    No handler_ref — turn.go dispatches a child workflow of
-    resolved_workflow_type, same as ask_user has no handler_ref. The raw
-    schema itself is rebuilt into llm.TOOLS_SCHEMA by llm.load_skills (called
-    alongside this, same entries), so schema_for's existing
-    _SCHEMA_BY_NAME[c.name] lookup finds it with no changes needed there.
-    """
-    skill_capabilities = [
-        Capability(e["name"], Layer.CONTROL, _MAIN, resolved_workflow_type=e["name"]) for e in entries
-    ]
-    CAPABILITIES[:] = _STATIC_CAPABILITIES + skill_capabilities
-    BY_NAME.clear()
-    BY_NAME.update({c.name: c for c in CAPABILITIES})
-    HANDLER_REFS.clear()
-    HANDLER_REFS.update({c.name: c.handler_ref for c in CAPABILITIES if c.handler_ref})
-
-
-load_skills([])
+# A "skill" is entirely a mode now (docs/05-architecture-domain-control-loops.md
+# — 2026-09-27, after journaling and service_monitoring both migrated onto
+# the session-mode mechanism): entered via switch_mode, never called
+# directly by its own name, so there is no per-tenant Capability to rebuild
+# here any more — CAPABILITIES is a fixed, static list, identical for every
+# tenant. Per-tenant enablement of a mode name is a separate concern,
+# handled entirely by llm.ENABLED_MODES/llm.load_skills.
+CAPABILITIES: list[Capability] = list(_STATIC_CAPABILITIES)
+BY_NAME: dict[str, Capability] = {c.name: c for c in CAPABILITIES}
+HANDLER_REFS: dict[str, str] = {c.name: c.handler_ref for c in CAPABILITIES if c.handler_ref}
 
 
 def turn_kind_of(is_subagent: bool) -> TurnKind:
@@ -192,7 +158,6 @@ def schema_for(
     kind: TurnKind,
     resolved: "list[Capability] | tuple[Capability, ...]" = (),
     also: frozenset[str] = frozenset(),
-    exclude_skill_name: "str | None" = None,
 ) -> list[dict]:
     """The model-facing tool schema for a turn: the static capabilities whose
     `turn_kinds` include `kind`, then any per-turn resolved tools appended.
@@ -202,28 +167,11 @@ def schema_for(
     for capabilities like `deliver_reply`/`deliver_attachment` that are never
     part of any turn kind's default set, only offered situationally by the
     caller (turn.go's delivery-recovery round, the plan-presentation turn).
-
-    `exclude_skill_name` — model_call.py passes the currently-running
-    skill's own name when the CALLING turn's own `parent_type` is "skill" (a
-    skill's own scoped reasoning turn, RunReasoningTurn/support.go), so that
-    one skill is omitted from that turn's own schema. Found 2026-09-27
-    debugging a real stuck production turn: skills default to
-    `turn_kinds=_MAIN` like any other always-on capability, so a skill's own
-    internal reasoning turn — which reuses this exact function — otherwise
-    offers that same skill (itself) as a callable tool, with nothing
-    stopping the model from invoking it recursively on itself; that
-    recursion has no legitimate case to weigh against (a skill's own
-    workflow already owns its retries/approval gate/finish condition).
-    Deliberately narrow — only the one skill currently running is excluded,
-    not every registered skill: a skill legitimately composing a
-    DIFFERENT skill from its own reasoning turn is a real, intentionally
-    unforeclosed case, unlike calling itself again mid-flight."""
+    """
     from .llm import _SCHEMA_BY_NAME, _SPAWN_SUBAGENT_NESTED_SCHEMA  # lazy — avoids an import cycle
 
     out: list[dict] = []
     for c in CAPABILITIES:
-        if exclude_skill_name is not None and c.name == exclude_skill_name:
-            continue
         if kind not in c.turn_kinds and c.name not in also:
             continue
         if kind is TurnKind.SUBAGENT and c.has_subagent_variant:

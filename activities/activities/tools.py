@@ -59,7 +59,7 @@ import asyncpg
 from temporalio import activity
 from temporalio.exceptions import CancelledError
 
-from . import agent_brain, claim_check, ids, lcm, leases, mcp_hub, shell_hub, skill_hub
+from . import agent_brain, claim_check, ids, lcm, leases, llm, mcp_hub, shell_hub
 
 logger = logging.getLogger(__name__)
 
@@ -527,35 +527,51 @@ async def _persist_discovered(ctx: ToolContext, results: list[dict]) -> None:
         logger.warning("discover_tools: failed to persist discovered rows for mid-turn binding", exc_info=True)
 
 
-async def discover_skills(query: str, top_k: int = 5) -> list[dict]:
-    """docs/05-architecture-domain-control-loops.md — the skill analog of
-    discover_tools. Local-only, deliberately: skill-hub is not mcp-hub-mediated
-    (a skill is a Go workflow type registered in this deployment, not a
-    shared multi-tenant external-API capability), so there's no fan-out here,
-    just skill_hub.search directly."""
-    try:
-        return await skill_hub.search(query, top_k)
-    except Exception:  # noqa: BLE001 - never let a bad query take discovery down
-        logger.warning("discover_skills: skill-hub search failed", exc_info=True)
-        return []
-
-
-async def search_skills(arguments: dict, ctx: ToolContext) -> dict:
-    """The model-facing wrapper around discover_skills. Unlike search_tools,
-    nothing needs persisting here: every registered skill is already a
-    static, always-on capability (capabilities.py, llm.TOOLS_SCHEMA) —
-    directly callable by its own real name on this same turn, no per-turn
-    minting required. This is a search/detail convenience only."""
-    results = await discover_skills(arguments.get("query", ""), arguments.get("top_k", 5))
-    return {"results": results}
-
-
 async def call_tool(arguments: dict, ctx: ToolContext) -> dict:
     """Straight proxy to mcp-hub's own call_tool — only mcp-hub-sourced
     search_tools results are invoked this way; a shell-hub-sourced result is
     invoked via shell_exec directly instead (see shell_hub.py's module
     docstring)."""
     return await mcp_hub.call_tool("call_tool", arguments)
+
+
+async def switch_mode(arguments: dict, ctx: ToolContext) -> dict:
+    """docs/05-architecture-domain-control-loops.md — switches (or reverts)
+    this session's own active mode. An ordinary, activity-backed tool exactly
+    like create_intention/manage_intention above (thin wrapper over the
+    Temporal client, same ctx.temporal_client precedent tools_intention.py
+    already set) — deliberately NOT a new peeled meta-tool or a bespoke Go-
+    side mechanism: the model decides when to call this, same as any other
+    tool, and the tool_calls row it mints is this decision's own durable
+    record.
+
+    Two effects, both needed: (1) signal this session's own
+    CoordinatorWorkflow (workflow ID == session_key, same addressing
+    CancelSignalName/NewMessageSignalName already use) so its own in-memory
+    routing state updates for the NEXT incoming message — the operational
+    source of truth, read only by the coordinator itself, never round-
+    tripped through Postgres; (2) mirror the new mode into `sessions.mode`
+    in the same call, purely for external/client visibility (same role
+    turns.status already plays for turn state) — never read back by the
+    coordinator for its own dispatch decisions.
+
+    `mode` defaults to "chat" when omitted — a skill reverting control
+    doesn't need to name the default explicitly, only the forward direction
+    (chat -> some skill's own name) does.
+    """
+    if getattr(ctx, "temporal_client", None) is None:
+        raise RuntimeError("switch_mode requires a Temporal client (not wired into this ToolCallActivity)")
+    mode = str(arguments.get("mode") or "chat").strip().lower()
+    if mode != "chat" and mode not in llm.ENABLED_MODES:
+        # No silent fallback to "chat" here — a model naming a mode that
+        # isn't actually a registered turn-shaped handler, OR one this
+        # tenant hasn't enabled (llm.ENABLED_MODES — llm.MODE_TURNS's own
+        # doc comment has the two-gate rationale), is a real error to
+        # surface, not something to paper over.
+        raise ValueError(f"switch_mode: {mode!r} is not an enabled mode for this tenant (valid: {sorted(llm.ENABLED_MODES)})")
+    await ctx.pool.execute("UPDATE sessions SET mode = $2 WHERE session_key = $1", ctx.session_key, mode)
+    await ctx.temporal_client.get_workflow_handle(ctx.session_key).signal("SetMode", mode)
+    return {"mode": mode}
 
 
 async def lcm_grep(arguments: dict, ctx: ToolContext) -> dict:
@@ -650,13 +666,13 @@ _HANDLERS: dict[str, Any] = {
     "recall": recall,
     "reflect": reflect,
     "discover_tools": search_tools,
-    "discover_skills": search_skills,
     "call_tool": call_tool,
     "lcm_grep": lcm_grep,
     "lcm_describe": lcm_describe,
     "lcm_expand": lcm_expand,
     "create_intention": _ti.create_intention,
     "manage_intention": _ti.manage_intention,
+    "switch_mode": switch_mode,
 }
 
 # Every capability with a real activity handler, built from the single
