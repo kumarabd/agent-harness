@@ -731,8 +731,8 @@ _ASK_USER_SCHEMA = {
 # rebuilt this into); the nested spawn_subagent variant is passed separately.
 _SCHEMA_BY_NAME: dict[str, dict] = {}
 
-# Enabled skill descriptions are loaded at worker startup. Selection and execution
-# additionally check the live tenant catalog, so disabling a skill takes effect.
+# Enabled skill descriptions are primed at startup and refreshed before real
+# model calls. Selection and execution also check the live tenant catalog.
 ENABLED_MODES: set[str] = set()
 
 _SKILL_COMMAND_SCHEMA = {

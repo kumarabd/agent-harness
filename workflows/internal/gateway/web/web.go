@@ -25,28 +25,29 @@ import (
 
 // Handler serves the Web gateway's HTTP routes.
 type Handler struct {
-	ingestor *core.Ingestor
-	pool     *pgxpool.Pool
-	temporal client.Client
-	clerk    clerkauth.Config
-	realtime *realtime.Handler
-	platform string
+	ingestor   *core.Ingestor
+	pool       *pgxpool.Pool
+	temporal   client.Client
+	clerk      clerkauth.Config
+	realtime   *realtime.Handler
+	platform   string
+	tenantSlug string
 }
 
 // New wires a Web Handler to its dependencies.
-func New(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config) *Handler {
-	return newHandler(ctx, ingestor, pool, temporal, clerk, "web", webSocketOriginAllowed)
+func New(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config, tenantSlug string) *Handler {
+	return newHandler(ctx, ingestor, pool, temporal, clerk, tenantSlug, "web", webSocketOriginAllowed)
 }
 
 // NewMacOS wires the native desktop adapter. It intentionally uses the same
 // operations and wire protocol as Web while selecting a different platform
 // namespace, so desktop and browser histories remain independent.
-func NewMacOS(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config) *Handler {
-	return newHandler(ctx, ingestor, pool, temporal, clerk, "macos", nativeSocketOriginAllowed)
+func NewMacOS(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config, tenantSlug string) *Handler {
+	return newHandler(ctx, ingestor, pool, temporal, clerk, tenantSlug, "macos", nativeSocketOriginAllowed)
 }
 
-func newHandler(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config, platform string, checkOrigin func(*http.Request) bool) *Handler {
-	h := &Handler{ingestor: ingestor, pool: pool, temporal: temporal, clerk: clerk, platform: platform}
+func newHandler(ctx context.Context, ingestor *core.Ingestor, pool *pgxpool.Pool, temporal client.Client, clerk clerkauth.Config, tenantSlug, platform string, checkOrigin func(*http.Request) bool) *Handler {
+	h := &Handler{ingestor: ingestor, pool: pool, temporal: temporal, clerk: clerk, tenantSlug: tenantSlug, platform: platform}
 	h.realtime = realtime.New(ctx, ingestor, pool, temporal, clerk, realtime.Config{
 		CheckOrigin: checkOrigin,
 		ResolveScope: func(userID, sessionID, parentSessionID string) (realtime.Scope, error) {
@@ -73,6 +74,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("POST /cancel", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleCancel)))
 	mux.Handle("GET /sessions", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleListSessions)))
 	mux.Handle("GET /skills", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleListSkills)))
+	mux.Handle("PATCH /skills/{name}", requireClerkAuth(h.clerk, http.HandlerFunc(h.handleSetSkillEnabled)))
 	// Browser authentication happens in the first WebSocket frame so this
 	// shares the native realtime protocol. Origin verification is handled by
 	// the upgrader rather than HTTP middleware.

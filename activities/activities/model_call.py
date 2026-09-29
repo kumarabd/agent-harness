@@ -28,7 +28,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from . import capabilities as _cap
-from . import ids, llm, llm_client, model_registry, permissions
+from . import ids, llm, llm_client, model_registry, permissions, skill_catalog
 from .types import ModelCallInput, ModelCallOutput, NextStep, ToolCallRef, Usage
 
 logger = logging.getLogger(__name__)
@@ -186,6 +186,10 @@ class ModelCallActivity:
                     "prompt_assemble_latency_seconds", unit="s"
                 ).record(time.monotonic() - assemble_started)
 
+                # Enable/disable changes are stored in this tenant's DB. Refresh
+                # immediately before offering skills to the model so a gateway
+                # toggle takes effect without restarting the worker.
+                llm.load_skills(await skill_catalog.refresh(conn))
                 tools_schema = llm.tools_schema_for(
                     caller_is_subagent,
                     resolved=resolved,
