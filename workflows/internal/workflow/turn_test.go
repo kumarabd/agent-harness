@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -183,4 +184,28 @@ func TestTurnWorkflow_UsesOrdinaryModelCall(t *testing.T) {
 	env.ExecuteWorkflow(TurnWorkflow, types.TurnInput{SessionKey: "u:web", TurnID: "t1", ParentType: "session", PreInserted: true})
 	require.NoError(t, env.GetWorkflowError())
 	require.Equal(t, 1, calls)
+}
+
+func TestTurnWorkflow_ReturnsUnprocessedSignalsAfterModelFailure(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	mockTurnInfra(env)
+	signaled := false
+	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
+		if info.ActivityType.Name != "ModelCall" || signaled {
+			return
+		}
+		signaled = true
+		env.SignalWorkflow(NewMessageSignalName, types.SignalPayload{Message: types.Message{Role: "user", Content: "first", ClientMsgID: "m1"}})
+		env.SignalWorkflow(NewMessageSignalName, types.SignalPayload{Message: types.Message{Role: "user", Content: "second", ClientMsgID: "m2"}})
+	})
+	env.RegisterActivityWithOptions(func(context.Context, types.ModelCallInput) (types.ModelCallOutput, error) {
+		return types.ModelCallOutput{}, errors.New("provider unavailable")
+	}, activity.RegisterOptions{Name: "ModelCall"})
+
+	env.ExecuteWorkflow(TurnWorkflow, types.TurnInput{SessionKey: "u:web", TurnID: "t1", ParentType: "session", PreInserted: true})
+	require.NoError(t, env.GetWorkflowError())
+	var result types.TurnResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, []string{"m1", "m2"}, []string{result.UnprocessedMessages[0].Message.ClientMsgID, result.UnprocessedMessages[1].Message.ClientMsgID})
 }

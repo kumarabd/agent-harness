@@ -247,7 +247,11 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 					deliverWedgedFallback(ctx, input.SessionKey, input.ConnectionID, chatID)
 				}
 				chat, chatID = nil, ""
-				if result.InterruptedDuringDelivery != nil {
+				if len(result.UnprocessedMessages) > 0 {
+					for _, message := range result.UnprocessedMessages {
+						pending = append(pending, queuedChatMessage{payload: message, initiatedBy: "user"})
+					}
+				} else if result.InterruptedDuringDelivery != nil {
 					pending = append(pending, queuedChatMessage{payload: *result.InterruptedDuringDelivery, initiatedBy: "user"})
 				}
 			})

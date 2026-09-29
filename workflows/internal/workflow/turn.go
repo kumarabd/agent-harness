@@ -926,7 +926,14 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 		// nothing left for this wrapper to do beyond forwarding exactly what
 		// it returned, same as the pre-extraction code's own
 		// `return failTurn(...)` did at each of these call sites.
-		return types.TurnResult{TurnID: input.TurnID, InterruptedDuringDelivery: loopResult.InterruptedDuringDelivery}, err
+		result := types.TurnResult{TurnID: input.TurnID, InterruptedDuringDelivery: loopResult.InterruptedDuringDelivery, UnprocessedMessages: append([]types.SignalPayload(nil), pendingMessages...)}
+		if len(result.UnprocessedMessages) > 0 {
+			// Temporal discards a failed child workflow's result. The turn is
+			// already marked failed in Postgres, so return successfully here to
+			// hand unprocessed user input back to the coordinator.
+			return result, nil
+		}
+		return result, err
 	}
 
 	// --- Egress: every turn (top-level or subagent) persists its own
@@ -951,7 +958,7 @@ func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult
 	}
 
 	logger.Info("turn workflow complete", "turn_id", input.TurnID, "stop_reason", loopResult.StopReason, "iterations", loopResult.Iterations, "interrupted_during_delivery", interruptedPayload != nil)
-	return types.TurnResult{TurnID: input.TurnID, StopReason: loopResult.StopReason, Iterations: loopResult.Iterations, InterruptedDuringDelivery: interruptedPayload}, nil
+	return types.TurnResult{TurnID: input.TurnID, StopReason: loopResult.StopReason, Iterations: loopResult.Iterations, InterruptedDuringDelivery: interruptedPayload, UnprocessedMessages: append([]types.SignalPayload(nil), pendingMessages...)}, nil
 }
 
 // RunReasonActLoopInput/RunReasonActLoopResult — docs/05-architecture-domain-control-loops.md.

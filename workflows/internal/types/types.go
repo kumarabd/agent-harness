@@ -122,16 +122,16 @@ type TurnInput struct {
 	OfferDeliveryTools bool `json:"offer_delivery_tools,omitempty"`
 }
 
-// TurnResult is a Turn Workflow's return value. Deliberately holds no content
-// — not even the final response text (components/temporal-workflow.md,
-// "Resolved: Reference/ID Schema": "even the *result* handed back to a
-// parent/coordinator shouldn't carry content"). A parent turn wanting a
-// subagent's actual output reads it from Postgres via TurnID, same as
-// everything else.
+// TurnResult is a Turn Workflow's return value. The final response stays in
+// Postgres; only inbound signals that this turn could not process are returned
+// to the coordinator so they can start another turn.
 type TurnResult struct {
 	TurnID     string `json:"turn_id"`
 	StopReason string `json:"stop_reason"` // "no_tool_calls" | "max_iterations" | "max_retries" | "budget_exhausted"
 	Iterations int    `json:"iterations"`
+	// Signals accepted by this turn but not folded into its persisted messages
+	// must go back to the coordinator when the turn ends, including on failure.
+	UnprocessedMessages []SignalPayload `json:"unprocessed_messages,omitempty"`
 	// InterruptedDuringDelivery — docs/components/gateway/discord-voice.md's
 	// "Resolved: Overlapping Speech / Interrupts" gap, closed 2026-08-25: a
 	// signal arriving while this turn's connection-based delivery

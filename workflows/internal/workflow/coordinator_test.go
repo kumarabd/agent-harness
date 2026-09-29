@@ -310,6 +310,27 @@ func TestCoordinator_ContinuedTurnSequenceSkipsDatabaseRead(t *testing.T) {
 	require.Zero(t, records.turnSeqReads)
 }
 
+func TestCoordinator_RequeuesEveryUnprocessedTurnMessage(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	mockCoordinatorInfra(env)
+	var messages []string
+	env.RegisterWorkflowWithOptions(func(_ workflow.Context, in types.TurnInput) (types.TurnResult, error) {
+		messages = append(messages, in.InitialMessage.Content)
+		if len(messages) == 1 {
+			return types.TurnResult{UnprocessedMessages: []types.SignalPayload{
+				{Message: types.Message{Role: "user", Content: "second"}},
+				{Message: types.Message{Role: "user", Content: "third"}},
+			}}, nil
+		}
+		return types.TurnResult{}, nil
+	}, workflow.RegisterOptions{Name: "TurnWorkflow"})
+	env.RegisterDelayedCallback(func() { sendUser(env, "first") }, time.Second)
+	env.ExecuteWorkflow(CoordinatorWorkflow, CoordinatorInput{SessionKey: "u:web"})
+	require.NoError(t, env.GetWorkflowError())
+	require.Equal(t, []string{"first", "second", "third"}, messages)
+}
+
 func TestCoordinator_WakeFoldsIntoActiveChat(t *testing.T) {
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()
