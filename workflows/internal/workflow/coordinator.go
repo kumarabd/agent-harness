@@ -65,6 +65,8 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 	var pending []queuedChatMessage
 	var notices []queuedChatMessage
 	if err := workflow.SetUpdateHandler(ctx, skillCommandUpdate, func(uctx workflow.Context, toolCallID string) (types.ConversationState, error) {
+		// Update handlers receive a fresh context without ctx's tenant routing.
+		uctx = workflow.WithTaskQueue(uctx, TenantActivityQueue(input.TenantSlug))
 		defer func() {
 			notify := workflow.NewSelector(ctx)
 			notify.AddSend(changed, true, func() {})

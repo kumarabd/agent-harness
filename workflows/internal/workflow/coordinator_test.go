@@ -8,6 +8,7 @@ import (
 	"agent-harness/workflows/internal/types"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 )
@@ -51,6 +52,29 @@ func TestCoordinator_SelectedSkillAlwaysDispatchesChat(t *testing.T) {
 	env.ExecuteWorkflow(CoordinatorWorkflow, CoordinatorInput{SessionKey: "u:web"})
 	require.NoError(t, env.GetWorkflowError())
 	require.Equal(t, []string{"How is my journal?"}, messages)
+}
+
+func TestCoordinator_SkillCommandActivitiesUseTenantQueue(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	env.SetStartWorkflowOptions(client.StartWorkflowOptions{TaskQueue: "agent-loop"})
+	mockCoordinatorInfra(env)
+	queues := make(map[string]string)
+	env.RegisterActivityWithOptions(func(ctx context.Context, _ types.SkillCommandInput) (types.SkillCommand, error) {
+		queues["PrepareSkillCommand"] = activity.GetInfo(ctx).TaskQueue
+		return types.SkillCommand{Action: "cancel"}, nil
+	}, activity.RegisterOptions{Name: "PrepareSkillCommand"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, _ string, _ types.ConversationState) error {
+		queues["RecordSkillCommand"] = activity.GetInfo(ctx).TaskQueue
+		return nil
+	}, activity.RegisterOptions{Name: "RecordSkillCommand"})
+	env.RegisterDelayedCallback(func() { updateSkill(t, env, "cancel") }, time.Second)
+	env.ExecuteWorkflow(CoordinatorWorkflow, CoordinatorInput{SessionKey: "u:web", TenantSlug: "tenant-a"})
+	require.NoError(t, env.GetWorkflowError())
+	require.Equal(t, map[string]string{
+		"PrepareSkillCommand": "tenant-a-loop",
+		"RecordSkillCommand":  "tenant-a-loop",
+	}, queues)
 }
 
 func TestCoordinator_ChatDuringSkillDoesNotInterruptChild(t *testing.T) {
