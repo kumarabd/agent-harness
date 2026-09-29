@@ -193,6 +193,7 @@ async def main() -> None:
             skill_activities.select,
             skill_activities.prepare,
             skill_activities.record,
+            skill_activities.record_outcome,
             skill_activities.reason,
             skill_activities.execute,
             ModelCallActivity(pool, client).__call__,

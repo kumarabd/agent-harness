@@ -32,6 +32,12 @@ class SelectionTests(unittest.TestCase):
         ]:
             self.assertIsNone(runtime.selection_command(text))
 
+    def test_cancel_requires_a_direct_command(self):
+        for text in ("cancel", "Please stop this step.", "abort the running skill task"):
+            self.assertTrue(runtime.explicit_cancel(text), text)
+        for text in ("Don't stop, keep journaling", "I can't stop thinking about this", "never cancel this"):
+            self.assertFalse(runtime.explicit_cancel(text), text)
+
 
 class CommandTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -150,6 +156,25 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.activities.prepare(self.input)).already_applied)
         self.pool.execute.assert_not_awaited()
 
+    async def test_confirmed_step_outcome_replaces_running_snapshot(self):
+        self.pool.execute.return_value = "UPDATE 1"
+        self.state.skill.step_id = "call"
+        for phase, status, side_effect in [
+            ("completed", "ok", None),
+            ("failed", "error", None),
+            ("cancelled", "cancelled", "unknown"),
+        ]:
+            self.state.skill.phase = phase
+            await self.activities.record_outcome("call", self.state, "step stopped")
+            args = self.pool.execute.call_args.args
+            self.assertEqual(args[1], "call")
+            self.assertEqual(args[2], status)
+            self.assertEqual(args[4], "step stopped")
+            self.assertEqual(args[5], side_effect)
+            result = json.loads(args[3])
+            self.assertTrue(result["skill_step_terminal"])
+            self.assertEqual(result["state"]["skill"]["phase"], phase)
+
     async def test_amendment_is_immutable_new_content(self):
         self.args.update(action="amend", content="exact new text")
         self.rows()
@@ -235,8 +260,10 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
             return_value=asdict(self.state)
         )
         self.pool.fetchrow.return_value = None
-        await runtime.conversation_context(self.pool, client, "session:turn:1")
+        control, reference = await runtime.conversation_context(self.pool, client, "session:turn:1")
         self.assertEqual(self.pool.fetchrow.call_args.args[1:], ("current-step",))
+        self.assertNotIn("entry", control)
+        self.assertIn("entry", reference)
 
 
 PAGE = "12345678-1234-1234-1234-123456789abc"
@@ -353,14 +380,36 @@ class DomainPolicyTests(unittest.TestCase):
                 "create_intention", args, "watch service", history
             )
 
-    def test_existing_intention_is_not_reported_as_newly_armed(self):
+    def test_existing_intention_dedup_is_reported_as_complete(self):
         current = {
             "request": {"tool": "create_intention"},
-            "response": {"intention_id": "id"},
+            "response": {
+                "intention_id": "id",
+                "note": "an intention with a matching objective is already armed — revise or cancel it instead",
+            },
+        }
+        self.assertTrue(service_monitoring.complete("", current, []))
+
+    def test_freshly_armed_intention_is_reported_as_complete(self):
+        current = {
+            "request": {"tool": "create_intention"},
+            "response": {"intention_id": "id", "armed": True},
+        }
+        self.assertTrue(service_monitoring.complete("", current, []))
+
+    def test_missing_intention_id_is_not_reported_as_complete(self):
+        current = {
+            "request": {"tool": "create_intention"},
+            "response": {"note": "something went sideways"},
         }
         self.assertFalse(service_monitoring.complete("", current, []))
-        current["response"]["armed"] = True
-        self.assertTrue(service_monitoring.complete("", current, []))
+
+    def test_errored_create_intention_is_not_reported_as_complete(self):
+        current = {
+            "request": {"tool": "create_intention"},
+            "response": {"intention_id": "id", "error": "boom"},
+        }
+        self.assertFalse(service_monitoring.complete("", current, []))
 
 
 class ExecutionTests(unittest.IsolatedAsyncioTestCase):

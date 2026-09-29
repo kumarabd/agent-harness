@@ -17,8 +17,9 @@ type CoordinatorInput struct {
 	ParentSessionKey string `json:"parent_session_key,omitempty"`
 	ConnectionID     string `json:"connection_id,omitempty"`
 	TenantSlug       string `json:"tenant_slug,omitempty"`
-	// Continue-as-new carries live skill state. An unfinished skill never idles out.
-	State *types.ConversationState `json:"state,omitempty"`
+	// Continue-as-new carries live skill state. A pending proposal never idles out.
+	State   *types.ConversationState `json:"state,omitempty"`
+	TurnSeq *int                     `json:"turn_seq,omitempty"`
 }
 
 type queuedChatMessage struct {
@@ -48,9 +49,13 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			return err
 		}
 	}
-	var turnSeq int
-	if err := workflow.ExecuteActivity(actx, "GetMaxTurnSeq", input.SessionKey).Get(ctx, &turnSeq); err != nil {
-		return err
+	turnSeq := 0
+	if input.State != nil && input.TurnSeq != nil {
+		turnSeq = *input.TurnSeq
+	} else {
+		if err := workflow.ExecuteActivity(actx, "GetMaxTurnSeq", input.SessionKey).Get(ctx, &turnSeq); err != nil {
+			return err
+		}
 	}
 	if err := workflow.SetQueryHandler(ctx, conversationStateQuery, func() (types.ConversationState, error) { return state, nil }); err != nil {
 		return err
@@ -64,6 +69,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 	changed := workflow.NewBufferedChannel(ctx, 1)
 	var pending []queuedChatMessage
 	var notices []queuedChatMessage
+	var outcomeWriteErr error
 	if err := workflow.SetUpdateHandler(ctx, skillCommandUpdate, func(uctx workflow.Context, toolCallID string) (types.ConversationState, error) {
 		// Update handlers receive a fresh context without ctx's tenant routing.
 		uctx = workflow.WithTaskQueue(uctx, TenantActivityQueue(input.TenantSlug))
@@ -113,6 +119,11 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 				if err := step.GetChildWorkflowExecution().Get(uctx, nil); err != nil {
 					step, stepCancel = nil, nil
 					state.Skill.Phase = "failed"
+					bg, cancelBg := workflow.NewDisconnectedContext(uctx)
+					defer cancelBg()
+					if closeErr := workflow.ExecuteActivity(workflow.WithActivityOptions(bg, ao), "RecordSkillOutcome", toolCallID, state, err.Error()).Get(bg, nil); closeErr != nil {
+						return state, closeErr
+					}
 					return state, err
 				}
 			default:
@@ -160,6 +171,10 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 					}
 				} else if err != nil {
 					logger.Error("user selection failed", "error", err)
+					pending = append([]queuedChatMessage{{
+						payload:     types.SignalPayload{Message: types.Message{Role: "user", Content: "[System notice: the user's mode or skill selection could not be confirmed. The coordinator is still using its previous mode. Tell the user the command may not have taken effect and do not claim it succeeded.]"}},
+						initiatedBy: "system",
+					}}, pending...)
 				}
 				commands.Unlock()
 			}
@@ -186,6 +201,7 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 			newMessage.Len() == 0 && wake.Len() == 0 && cancelSignal.Len() == 0 && keepAlive.Len() == 0 && changed.Len() == 0
 		if quiescent && workflow.GetInfo(ctx).GetContinueAsNewSuggested() {
 			input.State = &state
+			input.TurnSeq = &turnSeq
 			return workflow.NewContinueAsNewError(ctx, CoordinatorWorkflow, input)
 		}
 		tctx, cancelTimer := workflow.WithCancel(ctx)
@@ -200,6 +216,14 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 		sel.AddReceive(wake, func(c workflow.ReceiveChannel, _ bool) {
 			var p types.WakePayload
 			c.Receive(ctx, &p)
+			if chat != nil {
+				fold := types.SignalPayload{Message: types.Message{Role: "user", Content: proactiveFoldText(p)}}
+				if err := workflow.SignalExternalWorkflow(ctx, chatID, "", NewMessageSignalName, fold).Get(ctx, nil); err == nil {
+					return
+				} else {
+					logger.Error("failed to fold wake into active turn", "turn_id", chatID, "intention_id", p.IntentionID, "error", err)
+				}
+			}
 			pending = append(pending, queuedChatMessage{payload: types.SignalPayload{Message: types.Message{Role: "user", Content: proactiveSeedText(p)}}, initiatedBy: "intn:" + p.IntentionID})
 		})
 		sel.AddReceive(keepAlive, func(c workflow.ReceiveChannel, _ bool) { var v struct{}; c.Receive(ctx, &v) })
@@ -211,7 +235,9 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 				state.Skill.Phase = "cancelling"
 			}
 			if chat != nil {
-				_ = workflow.SignalExternalWorkflow(ctx, chatID, "", CancelSignalName, v).Get(ctx, nil)
+				if err := workflow.SignalExternalWorkflow(ctx, chatID, "", CancelSignalName, v).Get(ctx, nil); err != nil {
+					logger.Error("failed to forward cancel to active turn", "turn_id", chatID, "error", err)
+				}
 			}
 		})
 		if chat != nil {
@@ -237,20 +263,34 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 				if temporal.IsCanceledError(err) {
 					state.Skill.Phase = "cancelled"
 				}
+				finished := state
 				step, stepCancel = nil, nil
-				notice := fmt.Sprintf("[Skill step finished: kind=%s content_id=%s step_id=%s phase=%s. Report this outcome without conflating it with a newer proposal. Failed/cancelled work may have unverified external effects; do not claim success or automatic rollback. This is a system notification, not user input or authorization.]", state.Skill.Kind, state.Skill.ContentID, state.Skill.StepID, state.Skill.Phase)
+				reason := ""
+				if err != nil {
+					reason = err.Error()
+				}
+				bg, cancelBg := workflow.NewDisconnectedContext(ctx)
+				defer cancelBg()
+				outcomeWriteErr = workflow.ExecuteActivity(workflow.WithActivityOptions(bg, ao), "RecordSkillOutcome", finished.Skill.StepID, finished, reason).Get(bg, nil)
+				if outcomeWriteErr != nil {
+					return
+				}
+				notice := fmt.Sprintf("[Skill step finished: kind=%s content_id=%s step_id=%s phase=%s. Report this outcome without conflating it with a newer proposal. Failed/cancelled work may have unverified external effects; do not claim success or automatic rollback. This is a system notification, not user input or authorization.]", finished.Skill.Kind, finished.Skill.ContentID, finished.Skill.StepID, finished.Skill.Phase)
 				notices = append(notices, queuedChatMessage{payload: types.SignalPayload{Message: types.Message{Role: "user", Content: notice}}, initiatedBy: "system"})
 			})
 		}
-		// Keep the latest proposal/outcome in durable workflow state until the
-		// user clears it by selecting another mode. Continue-as-new bounds history.
-		if quiescent && state.Skill.ContentID == "" {
+		// A proposal awaiting approval stays live. Terminal outcomes retain
+		// their content reference for queries, but may idle out after notice delivery.
+		if quiescent && state.Skill.Phase != "awaiting_confirmation" {
 			sel.AddFuture(workflow.NewTimer(tctx, IdleTTL), func(workflow.Future) { idle = true })
 		}
 		sel.Select(ctx)
 		cancelTimer()
-		if idle && len(pending) == 0 && len(notices) == 0 && workflow.AllHandlersFinished(ctx) && step == nil && state.Skill.ContentID == "" &&
-			newMessage.Len() == 0 && wake.Len() == 0 && changed.Len() == 0 {
+		if outcomeWriteErr != nil {
+			return outcomeWriteErr
+		}
+		if idle && len(pending) == 0 && len(notices) == 0 && workflow.AllHandlersFinished(ctx) && step == nil && state.Skill.Phase != "awaiting_confirmation" &&
+			newMessage.Len() == 0 && wake.Len() == 0 && cancelSignal.Len() == 0 && keepAlive.Len() == 0 && changed.Len() == 0 {
 			cctx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: input.SessionKey + ":write-memory:" + workflow.GetInfo(ctx).WorkflowExecution.RunID, ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON})
 			_ = workflow.ExecuteChildWorkflow(cctx, WriteMemoryWorkflow, input.SessionKey, input.TenantSlug).GetChildWorkflowExecution().Get(ctx, nil)
 			return nil
@@ -259,5 +299,17 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 }
 
 func proactiveSeedText(w types.WakePayload) string {
-	return "[Proactive check — the user did not send this message]\n" + w.Objective + "\n" + w.Why + "\nDecide whether anything is worth reporting."
+	s := "[Proactive check — the user did not send this message]\n\n" + w.Objective
+	if w.Why != "" {
+		s += "\n\n" + w.Why
+	}
+	return s + "\n\nDecide whether and how to surface this to the user now. Check what you need to first. If nothing is worth saying right now, end the turn without responding."
+}
+
+func proactiveFoldText(w types.WakePayload) string {
+	s := "[Proactive note — surface this to the user if and when it fits the conversation]\n\n" + w.Objective
+	if w.Why != "" {
+		s += "\n\n" + w.Why
+	}
+	return s
 }

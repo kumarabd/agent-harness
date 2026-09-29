@@ -144,7 +144,7 @@ class ModelCallActivity:
                 context_window = model_config.context_window
 
                 session_row = await conn.fetchrow(
-                    "SELECT system_prompt, platform FROM sessions WHERE session_key = $1",
+                    "SELECT system_prompt, platform, mode FROM sessions WHERE session_key = $1",
                     ids.session_key_of(input.turn_id),
                 )
                 system_prompt = (session_row["system_prompt"] if session_row else None) or llm.DEFAULT_SYSTEM_PROMPT
@@ -177,10 +177,24 @@ class ModelCallActivity:
                 conversation, context_tokens, resolved = await llm.build_conversation(
                     conn, input.turn_id, system_prompt,
                 )
-                from .skill_runtime import conversation_context
-                snapshot = await conversation_context(conn, self._temporal_client, input.turn_id)
-                conversation.insert(1, {"role": "system", "content": snapshot})
-                context_tokens += len(snapshot) // 4
+                if head and head["parent_type"] == "session":
+                    try:
+                        from .skill_runtime import conversation_context
+                        control, reference = await conversation_context(conn, self._temporal_client, input.turn_id)
+                    except Exception:
+                        logger.warning("ModelCall[%s]: skill state unavailable", input.turn_id, exc_info=True)
+                        mode = (session_row["mode"] if session_row else None) or "chat"
+                        fallback = (
+                            "Selected mode: " + str(mode) + ". Skill state is temporarily unavailable. "
+                            "Do not submit, confirm, amend, or cancel skill work until its state can be verified. "
+                            "Tell the user if a skill status or command cannot be verified."
+                        )
+                        conversation.insert(1, {"role": "system", "content": fallback})
+                        context_tokens += len(fallback) // 4
+                    else:
+                        conversation.insert(1, {"role": "system", "content": control})
+                        conversation.insert(2, {"role": "user", "content": reference})
+                        context_tokens += (len(control) + len(reference)) // 4
                 resolved_by_name = {c.name: c for c in resolved}
                 activity.metric_meter().create_histogram_float(
                     "prompt_assemble_latency_seconds", unit="s"

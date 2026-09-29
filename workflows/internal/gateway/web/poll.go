@@ -75,7 +75,43 @@ func toolCallsByTurn(ctx context.Context, pool *pgxpool.Pool, turnIDs []string) 
 		}
 		byTurn[turnID] = append(byTurn[turnID], tc)
 	}
-	return byTurn, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Each skill_io row is a real tool attempt under the confirmed command.
+	// Project it into the existing tool card shape for browser history rebuilds.
+	skillRows, err := pool.Query(ctx,
+		"SELECT tc.parent_id, s.step_id || ':skill:' || s.iteration, m.seq, "+
+			"s.request->>'tool', COALESCE(s.request->'arguments', '{}'::jsonb), "+
+			"CASE WHEN s.response IS NOT NULL THEN 'ok' "+
+			"WHEN tc.result->>'skill_step_terminal' = 'true' THEN tc.status ELSE 'pending' END, "+
+			"s.response, COALESCE(CASE WHEN s.response IS NULL AND tc.result->>'skill_step_terminal' = 'true' THEN tc.reason END, ''), "+
+			"s.created_at, COALESCE(s.completed_at, CASE WHEN tc.result->>'skill_step_terminal' = 'true' THEN tc.completed_at END) "+
+			"FROM skill_io s JOIN tool_calls tc ON tc.tool_call_id = s.step_id "+
+			"JOIN messages m ON m.message_id = tc.message_id "+
+			"WHERE tc.parent_id = ANY($1) AND s.request ? 'tool' "+
+			"ORDER BY tc.parent_id, m.seq, s.iteration",
+		turnIDs,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer skillRows.Close()
+	for skillRows.Next() {
+		var turnID string
+		var tc polledToolCall
+		var arguments, result []byte
+		if err := skillRows.Scan(&turnID, &tc.ToolCallID, &tc.MessageSeq, &tc.ToolName,
+			&arguments, &tc.Status, &result, &tc.Reason, &tc.StartedAt, &tc.CompletedAt); err != nil {
+			return nil, err
+		}
+		tc.Arguments = json.RawMessage(arguments)
+		if len(result) > 0 {
+			tc.Result = json.RawMessage(result)
+		}
+		byTurn[turnID] = append(byTurn[turnID], tc)
+	}
+	return byTurn, skillRows.Err()
 }
 
 type pendingInput struct {
@@ -131,7 +167,11 @@ func (h *Handler) handlePoll(w http.ResponseWriter, r *http.Request) {
 			"  SELECT content FROM messages WHERE parent_id = t.turn_id AND role = 'assistant' "+
 			"  ORDER BY seq DESC LIMIT 1"+
 			") a ON true "+
-			"WHERE t.parent_id = $1 AND t.parent_type = 'session' AND t.turn_seq > $2 "+
+			"WHERE t.parent_id = $1 AND t.parent_type = 'session' AND (t.turn_seq > $2 OR EXISTS ("+
+			"SELECT 1 FROM tool_calls tc JOIN skill_io s ON s.step_id = tc.tool_call_id "+
+			"WHERE tc.parent_id = t.turn_id AND s.request ? 'tool' AND ("+
+			"(tc.result->>'skill_step_terminal' IS DISTINCT FROM 'true' AND tc.started_at > now() - interval '15 minutes') OR "+
+			"tc.completed_at > now() - interval '5 minutes'))) "+
 			"AND t.status != 'running' ORDER BY t.turn_seq",
 		sessionKey, sinceTurnSeq,
 	)

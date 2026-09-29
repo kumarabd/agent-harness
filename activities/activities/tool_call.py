@@ -55,6 +55,13 @@ from .types import ToolCallInput, ToolCallOutput
 
 logger = logging.getLogger(__name__)
 
+# The coordinator can finish a confirmed skill before this wrapper resumes.
+# Its durable terminal outcome wins over this activity's earlier command snapshot.
+_NO_FINISHED_SKILL = (
+    " AND NOT (tool_name='skill_command' AND "
+    "COALESCE(result->>'skill_step_terminal','false')='true')"
+)
+
 
 class ToolCallActivity:
     def __init__(self, pool, temporal_client=None):
@@ -170,7 +177,7 @@ class ToolCallActivity:
             record("cancelled")
             await self._pool.execute(
                 "UPDATE tool_calls SET status = 'cancelled', reason = $2, side_effect = 'unknown', "
-                "completed_at = now() WHERE tool_call_id = $1",
+                "completed_at = now() WHERE tool_call_id = $1" + _NO_FINISHED_SKILL,
                 input.tool_call_id,
                 "interrupted_by_new_message",
             )
@@ -192,7 +199,8 @@ class ToolCallActivity:
             ctx.session_dir, input.tool_call_id, result, summary_provider, summary_config.model
         )
         await self._pool.execute(
-            "UPDATE tool_calls SET status = 'ok', result = $2, completed_at = now() WHERE tool_call_id = $1",
+            "UPDATE tool_calls SET status = 'ok', result = $2, completed_at = now() "
+            "WHERE tool_call_id = $1" + _NO_FINISHED_SKILL,
             input.tool_call_id,
             json.dumps(result),
         )
@@ -200,7 +208,8 @@ class ToolCallActivity:
 
     async def _finish_error(self, tool_call_id: str, message: str) -> ToolCallOutput:
         await self._pool.execute(
-            "UPDATE tool_calls SET status = 'error', result = $2, completed_at = now() WHERE tool_call_id = $1",
+            "UPDATE tool_calls SET status = 'error', result = $2, completed_at = now() "
+            "WHERE tool_call_id = $1" + _NO_FINISHED_SKILL,
             tool_call_id,
             json.dumps({"error": message}),
         )

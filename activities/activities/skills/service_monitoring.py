@@ -59,10 +59,14 @@ def validate(tool: str, args: dict, content: str, history: list[dict]) -> None:
 
 
 def complete(content: str, current: dict, history: list[dict]) -> bool:
+    # create_intention has two non-error success shapes: a fresh arm
+    # ({"intention_id", "armed": True}) and a dedup hit against an existing
+    # intention with a matching objective ({"intention_id", "note": ...}, no
+    # "armed" key). Both mean the desired external state already holds —
+    # only a missing intention_id or an explicit error means it doesn't.
     result = current.get("response") or {}
     return (
         current["request"].get("tool") == "create_intention"
-        and result.get("armed") is True
         and bool(result.get("intention_id"))
         and not result.get("error")
     )

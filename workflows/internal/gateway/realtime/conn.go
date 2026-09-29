@@ -74,15 +74,16 @@ type conn struct {
 
 	// Resume cursor — advanced as frames are emitted, never persisted server
 	// side (the client sends its own on reconnect).
-	sentThrough int               // highest turn_seq fully emitted (turn_end sent)
-	curTurnSeq  int               // the turn currently being tailed (-1 = none)
-	curStarted  bool              // turn_start emitted for curTurnSeq
-	sentMsgSeq  int               // highest messages.seq emitted for curTurnSeq
-	sentDelSeq  int               // highest turn_deliveries.seq emitted for curTurnSeq
-	sentStSeq   int               // highest turn_status_pings.seq emitted for curTurnSeq
-	lastCum     string            // last cumulative streamed content for curTurnSeq
-	askSent     string            // request_id of the ask_user already surfaced for curTurnSeq
-	sentTools   map[string]string // last serialized snapshot per tool call for curTurnSeq
+	sentThrough    int               // highest turn_seq fully emitted (turn_end sent)
+	curTurnSeq     int               // the turn currently being tailed (-1 = none)
+	curStarted     bool              // turn_start emitted for curTurnSeq
+	sentMsgSeq     int               // highest messages.seq emitted for curTurnSeq
+	sentDelSeq     int               // highest turn_deliveries.seq emitted for curTurnSeq
+	sentStSeq      int               // highest turn_status_pings.seq emitted for curTurnSeq
+	lastCum        string            // last cumulative streamed content for curTurnSeq
+	askSent        string            // request_id of the ask_user already surfaced for curTurnSeq
+	sentTools      map[string]string // last serialized snapshot per tool call for curTurnSeq
+	sentSkillTools map[string]string // skill steps can outlive their issuing turn
 }
 
 func (c *conn) notify() {
@@ -182,7 +183,11 @@ func (c *conn) serve(ctx context.Context) {
 	}()
 
 	// initial replay
+	skillReplayFrom := c.sentThrough
 	c.catchup(ctx)
+	if c.emitTools {
+		c.emitSkillCalls(ctx, &skillReplayFrom)
+	}
 	if c.send(resumedFrame{Type: "resumed", ThroughTurnSeq: c.sentThrough}) == nil {
 		log.Printf("mobile websocket synchronized trace=%s session=%s through_turn=%d", c.traceID, c.sessionKey, c.sentThrough)
 	}
@@ -205,10 +210,17 @@ func (c *conn) serve(ctx context.Context) {
 		case <-c.wakeCh:
 			log.Printf("mobile websocket wake trace=%s session=%s", c.traceID, c.sessionKey)
 			c.catchup(ctx)
+			if c.emitTools {
+				c.emitSkillCalls(ctx, nil)
+			}
 		case seq := <-c.resumeCh:
 			c.sentThrough = seq
 			c.curTurnSeq = -1
+			c.sentSkillTools = make(map[string]string)
 			c.catchup(ctx)
+			if c.emitTools {
+				c.emitSkillCalls(ctx, &seq)
+			}
 		case <-ping.C:
 			c.writeMu.Lock()
 			_ = c.ws.SetWriteDeadline(time.Now().Add(writeWait))
@@ -492,6 +504,62 @@ func (c *conn) emitToolCalls(ctx context.Context, turnSeq int, turnID string) {
 		if c.send(frame) == nil {
 			c.sentTools[frame.ToolCallID] = string(snapshot)
 		}
+	}
+}
+
+// emitSkillCalls projects the bounded skill_io iterations as ordinary tool
+// cards. A skill step may finish long after the chat turn that confirmed it,
+// so these snapshots are tailed by session rather than by the current turn.
+func (c *conn) emitSkillCalls(ctx context.Context, replayAfter *int) {
+	if c.sentSkillTools == nil {
+		c.sentSkillTools = make(map[string]string)
+	}
+	rows, err := c.h.pool.Query(ctx,
+		"SELECT t.turn_seq, s.step_id || ':skill:' || s.iteration, m.seq, "+
+			"s.request->>'tool', COALESCE(s.request->'arguments', '{}'::jsonb), "+
+			"CASE WHEN s.response IS NOT NULL THEN 'ok' "+
+			"WHEN tc.result->>'skill_step_terminal' = 'true' THEN tc.status ELSE 'pending' END, "+
+			"s.response, COALESCE(CASE WHEN s.response IS NULL AND tc.result->>'skill_step_terminal' = 'true' THEN tc.reason END, ''), "+
+			"s.created_at, COALESCE(s.completed_at, CASE WHEN tc.result->>'skill_step_terminal' = 'true' THEN tc.completed_at END) "+
+			"FROM skill_io s JOIN tool_calls tc ON tc.tool_call_id = s.step_id "+
+			"JOIN turns t ON t.turn_id = tc.parent_id AND t.parent_type = 'session' "+
+			"JOIN messages m ON m.message_id = tc.message_id "+
+			"WHERE t.parent_id = $1 AND s.request ? 'tool' AND ("+
+			"($2::integer IS NOT NULL AND t.turn_seq > $2) OR "+
+			"(tc.result->>'skill_step_terminal' IS DISTINCT FROM 'true' AND tc.started_at > now() - interval '15 minutes') OR "+
+			"tc.completed_at > now() - interval '5 minutes') "+
+			"ORDER BY t.turn_seq, m.seq, s.iteration",
+		c.sessionKey, replayAfter,
+	)
+	if err != nil {
+		log.Printf("mobile websocket skill-io query failed trace=%s session=%s error=%v", c.traceID, c.sessionKey, err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var frame toolCallFrame
+		var arguments, result []byte
+		if err := rows.Scan(&frame.TurnSeq, &frame.ToolCallID, &frame.MessageSeq,
+			&frame.ToolName, &arguments, &frame.Status, &result, &frame.Reason,
+			&frame.StartedAt, &frame.CompletedAt); err != nil {
+			log.Printf("mobile websocket skill-io scan failed trace=%s error=%v", c.traceID, err)
+			return
+		}
+		frame.Type = "tool_call"
+		frame.Arguments = json.RawMessage(arguments)
+		if len(result) > 0 {
+			frame.Result = json.RawMessage(result)
+		}
+		snapshot, err := json.Marshal(frame)
+		if err != nil || c.sentSkillTools[frame.ToolCallID] == string(snapshot) {
+			continue
+		}
+		if c.send(frame) == nil {
+			c.sentSkillTools[frame.ToolCallID] = string(snapshot)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("mobile websocket skill-io rows failed trace=%s error=%v", c.traceID, err)
 	}
 }
 

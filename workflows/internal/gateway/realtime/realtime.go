@@ -90,16 +90,17 @@ func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := &conn{
-		h:           h,
-		ws:          ws,
-		traceID:     r.Header.Get("X-Nighthawk-Connection-Trace"),
-		wakeCh:      make(chan struct{}, 1),
-		resumeCh:    make(chan int),
-		deadCh:      make(chan struct{}),
-		sentThrough: -1,
-		sentMsgSeq:  -1,
-		curTurnSeq:  -1,
-		sentTools:   make(map[string]string),
+		h:              h,
+		ws:             ws,
+		traceID:        r.Header.Get("X-Nighthawk-Connection-Trace"),
+		wakeCh:         make(chan struct{}, 1),
+		resumeCh:       make(chan int),
+		deadCh:         make(chan struct{}),
+		sentThrough:    -1,
+		sentMsgSeq:     -1,
+		curTurnSeq:     -1,
+		sentTools:      make(map[string]string),
+		sentSkillTools: make(map[string]string),
 	}
 	c.serve(r.Context())
 }
