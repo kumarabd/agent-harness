@@ -1,123 +1,146 @@
-"""skills.journaling — docs/05-architecture-domain-control-loops.md.
-
-Selected by model_call.py whenever this turn's own ModelCallInput.mode ==
-"journaling" (set by workflow/mode_journaling.go's own runTurn(..., mode)
-call — a real top-level turn, not a scoped reasoning bridge) — replacing
-2026-09-27's earlier RunReasoningTurn-based design entirely, after a real
-production incident: that design's reasoning turn returned "ok" having
-made zero tool calls at all, and the skill told the user "Saved" having
-written nothing.
-
-A genuinely standalone prompt, not a diff against llm.DEFAULT_SYSTEM_PROMPT
-— same reasoning llm.VOICE_SYSTEM_PROMPT's own comment already gives.
-Critically, this does NOT mention "registered skills" the way the default
-prompt does — that exact framing is what caused the original incident's
-sibling bug (a scoped reasoning turn recursively calling the very skill it
-was already executing, because its system prompt told it "there's a
-registered skill for this, call it," with no awareness it WAS that skill's
-own internal work). There is no "journaling" tool offered here at all now —
-only switch_mode, which is how this mode was entered and how it's left.
-
-The final report_status sentence must stay in step with every other system
-prompt's own equivalent (llm.DEFAULT_SYSTEM_PROMPT's own comment) — it's
-how the model authors turn-pipeline.md's status/next_step output, not a
-style choice. "report_status" is a literal here, not imported from
-llm.py — this package deliberately has zero dependency on llm.py (see
-base.py's own comment); duplicating this one stable literal is the same
-convention providers/base.py already uses for the same reason.
-
-2026-09-28: steps 3-6 were tightened after a real recurring incident — a
-fresh dated child page kept getting created on separate journaling
-sessions for what should have been the same day. Root-caused to two
-compounding gaps, not the model lying about a successful write: (1) the
-original wording never specified HOW to find an existing dated page, and
-the model's own chosen method was a plain, unscoped workspace-wide Notion
-search — ranked/indexed independently of "My Diary"'s actual page tree,
-so a small recently-created child page can rank low or lag the search
-index and simply not surface; (2) a real observed artifact — a fetched
-page titled "📅 📅 2026-09-28" (a doubled emoji) — showed the title
-format itself drifting across separate sessions, so even a would-be
-exact-title search from a later session wouldn't match an earlier
-session's differently-formatted title. Fixed by name-checking the actual
-Notion tool schemas rather than assuming: notion-search's own `page_url`
-parameter ("restrict keyword search to a page and its descendants") is a
-documented, reliable way to check "does today's page exist under My
-Diary specifically" — instructed explicitly, replacing the model's own
-prior unscoped-search habit — with tolerant substring matching on the
-date so an already-drifted existing title still gets recognized, plus a
-pinned canonical title format for future creations, `allow_async=false`
-on creation (the default is async, which could otherwise race the
-mandatory fetch-back verification against a still-empty page), and an
-explicit insert-not-replace instruction for appending to an existing
-page. Deliberately still model-driven, not a native Go/Python activity —
-considered and declined for now: the model retains judgment over the
-actual Notion tool calls, this only tightens which calls/parameters it's
-told to use.
-"""
+"""Journaling domain policy. Only the user owns selection; chat owns dialogue."""
 
 from __future__ import annotations
 
-from .base import SkillMode, register
+import json
+import re
 
-DESCRIPTION = (
-    "a dedicated journaling session: the user is recording a diary entry (explicitly asking "
-    "to, or you judging a thought worth preserving and confirming that with them). Switch to "
-    "it as soon as that's decided, before doing any of the actual recording work — the mode's "
-    "own curated instructions take over from there."
+from .base import SkillDefinition, register
+
+SYSTEM_PROMPT = """Advance the confirmed diary proposal using only your offered Notion tools.
+The user has already approved the exact text. Preserve their words and uncertainty.
+Find and fetch the unique page titled My Diary. If missing or ambiguous, stop and
+explain the blocker; chat will ask the user. Search for the dated child beneath
+that root using page_url and filters.title_only=true. Match the YYYY-MM-DD portion
+even if an existing title has surrounding symbols. Never use an unscoped search
+as evidence that a dated page is absent. Use the date specified in the proposal;
+if none is provided, use the supplied current UTC date and state that choice.
+Create at most one dated page (plain YYYY-MM-DD title, allow_async=false), or append
+with command=insert_content, position.type=end, content=the exact approved text,
+and allow_async=false to an existing page. Never replace existing content or
+change properties, icons or covers. Read the Notion Markdown specification through
+notion-fetch before writing. Use only operations present in the discovered schema.
+After the write, fetch the SAME page and verify the exact entry is present.
+Only verification ends this step successfully. Make one tool call per response.
+You cannot select modes, ask the user directly, spawn agents, use shell, or deliver
+a reply. Stop with an explanation if you need new information or authority."""
+
+READ_TOOLS = frozenset({"notion-search", "notion-fetch"})
+WRITE_TOOLS = frozenset({"notion-create-pages", "notion-update-page"})
+
+
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return
+        if isinstance(parsed, (dict, list)):
+            yield from _strings(parsed)
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings(v)
+
+
+def _refs(value) -> set[str]:
+    return {
+        m.replace("-", "").lower()
+        for s in _strings(value)
+        for m in re.findall(
+            r"[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}",
+            s,
+        )
+    }
+
+
+def validate(tool: str, args: dict, content: str, history: list[dict]) -> None:
+    if tool not in WRITE_TOOLS:
+        return
+    if any(h["request"].get("tool") in WRITE_TOOLS for h in history):
+        raise ValueError(
+            "one diary mutation per confirmed step; inspect the outcome before another write"
+        )
+    if tool == "notion-update-page":
+        if args.get("command") != "insert_content" or args.get("position") != {
+            "type": "end"
+        }:
+            raise ValueError("diary updates must append to the end, never replace")
+        if set(args) - {"page_id", "command", "position", "content", "allow_async"}:
+            raise ValueError(
+                "diary append cannot change page metadata or other content"
+            )
+        written_text = args.get("content", "")
+    else:
+        pages = args.get("pages") or []
+        if len(pages) != 1:
+            raise ValueError("create exactly one dated diary page per confirmed entry")
+        if set(args) - {"parent", "pages", "allow_async"} or set(pages[0]) - {
+            "properties",
+            "content",
+        }:
+            raise ValueError(
+                "diary creation cannot apply templates or unrelated metadata"
+            )
+        properties = pages[0].get("properties") or {}
+        if set(properties) != {"title"} or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}", str(properties["title"])
+        ):
+            raise ValueError("diary page title must be YYYY-MM-DD")
+        if not (args.get("parent") or {}).get("page_id"):
+            raise ValueError("diary page requires a parent page")
+        written_text = pages[0].get("content", "")
+    if args.get("allow_async") is not False:
+        raise ValueError("diary mutations require allow_async=false")
+    if not isinstance(written_text, str) or written_text.strip() != content.strip():
+        raise ValueError("write must preserve the exact confirmed entry text")
+
+
+def complete(content: str, current: dict, history: list[dict]) -> bool:
+    if current["request"].get("tool") != "notion-fetch":
+        return False
+    response = current.get("response")
+    if not response or response.get("isError") or response.get("error"):
+        return False
+    if content not in "\n".join(_strings(response)):
+        return False
+    args = current["request"].get("arguments", {})
+    fetched = _refs(args.get("id", ""))
+    return any(
+        h["request"].get("tool") in WRITE_TOOLS
+        and h.get("response") is not None
+        and not h["response"].get("isError")
+        and not h["response"].get("error")
+        and bool(fetched & _written_pages(h))
+        for h in history
+    )
+
+
+def _written_pages(observation: dict) -> set[str]:
+    request = observation["request"]
+    args = request.get("arguments", {})
+    if request["tool"] == "notion-update-page":
+        # Do not mistake UUIDs in entry text for the actual write target.
+        return _refs(args.get("page_id", ""))
+    # Creation has no target id in its request. Use the provider result,
+    # excluding the parent/root reference, which is not the created page.
+    return _refs(observation["response"]) - _refs(args.get("parent", {}))
+
+
+register(
+    SkillDefinition(
+        name="journaling",
+        description="Prepare, confirm, append and verify a diary entry in Notion.",
+        system_prompt=SYSTEM_PROMPT,
+        aliases=("journaling", "journal"),
+        backend="notion",
+        read_tools=READ_TOOLS,
+        write_tools=WRITE_TOOLS,
+        native_tools={},
+        validate=validate,
+        complete=complete,
+    )
 )
-
-SYSTEM_PROMPT = (
-    "You are in a dedicated journaling mode — the user is actively recording a diary entry, and "
-    "this conversation is scoped to that single activity until it's genuinely finished. You have "
-    "direct shell access (shell_exec) and your usual tools (discover_tools/call_tool for Notion, "
-    "recall, ask_user), the same as always.\n\n"
-    "RECORDING AN ENTRY.\n"
-    "1. Read the entry back to the user in your own words (or verbatim, if that's what preserves "
-    "their voice) and confirm via ask_user before writing anything — never write on a first pass "
-    "without an explicit yes. Preserve their wording, perspective, and uncertainty; do not turn it "
-    "into a generic summary.\n"
-    "2. Use Notion as a diary hierarchy, not a database. Find the page titled \"My Diary\" (a "
-    "search, not a fetch by name — discover_tools/call_tool the same as any other Notion lookup), "
-    "then fetch it and treat it as the diary's root. If it does not exist, or more than one "
-    "plausible page exists, ask_user to decide whether/where to create it or which one to use.\n"
-    "3. Check whether today's dated child page already exists using Notion search SCOPED to "
-    "\"My Diary\" specifically — pass My Diary's own URL/ID as page_url (\"restrict keyword search "
-    "to a page and its descendants\") and set filters.title_only=true, searching for today's "
-    "YYYY-MM-DD date. A plain, unscoped workspace search is NOT reliable for this — it ranks and "
-    "indexes independently of the page tree and can miss or bury a real, recently-created child "
-    "page; the page_url-scoped search is the authoritative check for \"does today's page already "
-    "exist,\" not a bare search. Match tolerantly: today's page may already exist from an earlier "
-    "session with extra characters around the date (an emoji, a leading/trailing symbol) — if a "
-    "result's title contains today's YYYY-MM-DD date, that IS today's page, use it rather than "
-    "creating a second one. Only create a new dated child page when the scoped search genuinely "
-    "finds nothing.\n"
-    "4. Creating: title it with EXACTLY the plain YYYY-MM-DD string and nothing else — no emoji or "
-    "other characters in the title text itself (an emoji belongs only in the page's own icon field, "
-    "never baked into the title), so a future session's match stays reliable instead of drifting "
-    "further — and set allow_async=false so the page is fully ready before you fetch it back to "
-    "verify in the next step; the default (async) creation may not have real content yet if you "
-    "fetch immediately after.\n"
-    "5. Appending to an existing page: use the update command that inserts content rather than one "
-    "that replaces the page's content wholesale — the entry must be added to whatever's already "
-    "there, never overwrite it.\n"
-    "6. Once written, you MUST fetch that same page back and confirm the entry text is genuinely "
-    "present in the fetch result before telling the user it's saved — this fetch is mandatory, not "
-    "optional. Only report success once that fetch's own result actually contains the entry text; "
-    "if it doesn't, say so plainly and try again rather than reporting success anyway.\n\n"
-    "STAYING IN OR LEAVING THIS MODE. Recording one entry does not end this activity — the user "
-    "may have more to add in a follow-up message, and you should stay ready for that (this "
-    "conversation keeps coming to you, not the ordinary assistant, until you explicitly leave). "
-    "Call switch_mode() with no argument only when the user has clearly indicated they're done "
-    "journaling for now (said so directly, moved on to an unrelated topic, or gone quiet after a "
-    "natural close) — never automatically after just one entry, and never mid-entry before it's "
-    "confirmed and verified.\n\n"
-    "Every response, also call report_status alongside anything else you call: "
-    "status=working while there is more to do, status=done when your message is the answer for "
-    "this step, status=blocked when you cannot proceed without the user (pair it with ask_user). "
-    "Set est_remaining_steps to your honest estimate of reasoning steps left, and note anything "
-    "the next step needs to remember. Reaching status=done here is routine — it happens after "
-    "every reply — and is completely separate from leaving journaling mode; only switch_mode "
-    "does that."
-)
-
-register(SkillMode(name="journaling", description=DESCRIPTION, system_prompt=SYSTEM_PROMPT))

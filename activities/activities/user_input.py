@@ -42,15 +42,38 @@ class RequestUserInputActivity:
         # contain ':' and would break discord_user_input.go's custom_id parse.
         if request.kind == "question" and not prompt:
             tc = await self._pool.fetchrow(
-                "SELECT arguments FROM tool_calls WHERE tool_call_id = $1", request.request_id
+                "SELECT arguments FROM tool_calls WHERE tool_call_id = $1",
+                request.request_id,
             )
             args = json.loads(tc["arguments"]) if tc and tc["arguments"] else {}
-            prompt = str(args.get("question", "")).strip() or "(the assistant needs your input)"
+            prompt = (
+                str(args.get("question", "")).strip()
+                or "(the assistant needs your input)"
+            )
             options = [
                 {"id": f"opt_{i}", "label": str(o).strip()}
                 for i, o in enumerate(args.get("options") or [])
                 if str(o).strip()
             ]
+            content_id = args.get("skill_content_id")
+            if content_id:
+                # A proposal belongs to this session, and the prompt/options
+                # are server-authored so an approval cannot refer to other text.
+                from .ids import session_key_of
+
+                row = await self._pool.fetchrow(
+                    "SELECT content FROM skill_content WHERE content_id=$1 AND session_key=$2",
+                    content_id,
+                    session_key_of(request.turn_id),
+                )
+                if row is None:
+                    raise ValueError("unknown skill proposal for this session")
+                prompt = "Approve this exact proposal?\n\n" + row["content"]
+                options = [
+                    {"id": "approve", "label": "Approve"},
+                    {"id": "deny", "label": "Do not proceed"},
+                ]
+                request.context = {"skill_content_id": content_id}
 
         await self._pool.execute(
             "INSERT INTO user_input_requests "
@@ -68,7 +91,10 @@ class RequestUserInputActivity:
         )
         logger.info(
             "RequestUserInput[%s]: kind=%s %r options=%r",
-            request.request_id, request.kind, prompt[:80], [o["label"] for o in options],
+            request.request_id,
+            request.kind,
+            prompt[:80],
+            [o["label"] for o in options],
         )
 
 
@@ -89,7 +115,11 @@ class CloseUserInputActivity:
 
     @activity.defn(name="CloseUserInput")
     async def __call__(
-        self, request_id: str, status: str, selected_option_id: str | None, free_text: str | None
+        self,
+        request_id: str,
+        status: str,
+        selected_option_id: str | None,
+        free_text: str | None,
     ) -> None:
         row = await self._pool.fetchrow(
             "UPDATE user_input_requests SET status = $2, selected_option_id = $3, "
@@ -99,7 +129,12 @@ class CloseUserInputActivity:
             selected_option_id,
             free_text,
         )
-        logger.info("CloseUserInput[%s]: status=%s selected=%r", request_id, status, selected_option_id)
+        logger.info(
+            "CloseUserInput[%s]: status=%s selected=%r",
+            request_id,
+            status,
+            selected_option_id,
+        )
 
         if not row or row["kind"] != "question":
             return
@@ -107,7 +142,10 @@ class CloseUserInputActivity:
         answer = (free_text or "").strip() or None
         if answer is None and selected_option_id is not None:
             opts = json.loads(row["options"]) if row["options"] else []
-            answer = next((o["label"] for o in opts if o["id"] == selected_option_id), selected_option_id)
+            answer = next(
+                (o["label"] for o in opts if o["id"] == selected_option_id),
+                selected_option_id,
+            )
 
         if status == "answered" and answer:
             await self._pool.execute(

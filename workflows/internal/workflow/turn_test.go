@@ -169,64 +169,18 @@ func TestRunReasonActLoop_TopLevelTurn_NeverCallsATool_StaysNoToolCalls(t *testi
 	require.Equal(t, "no_tool_calls", result.StopReason)
 }
 
-// TestJournalingModeTurn_PassesModeToModelCall / TestTurnWorkflow_PassesEmptyModeToModelCall
-// prove runTurn's own mode parameter (turn.go) actually reaches
-// ModelCallInput.Mode — the one thing model_call.py reads to pick
-// llm.JOURNALING_SYSTEM_PROMPT over the session's own stored prompt
-// (docs/05-architecture-domain-control-loops.md). JournalingModeTurn and
-// TurnWorkflow share runTurn's entire body; this is the one observable
-// difference between them under test.
-func TestJournalingModeTurn_PassesModeToModelCall(t *testing.T) {
+// Every conversational turn remains on the ordinary model path.
+func TestTurnWorkflow_UsesOrdinaryModelCall(t *testing.T) {
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()
 	mockTurnInfra(env)
-
-	var gotMode string
-	env.RegisterActivityWithOptions(
-		func(_ context.Context, in types.ModelCallInput) (types.ModelCallOutput, error) {
-			gotMode = in.Mode
-			return types.ModelCallOutput{Status: "done", HasContent: true}, nil
-		},
-		activity.RegisterOptions{Name: "ModelCall"},
-	)
-
-	env.ExecuteWorkflow(JournalingModeTurn, types.TurnInput{
-		SessionKey:  "u:web",
-		TurnID:      "t1",
-		ParentType:  "session",
-		PreInserted: true,
-	})
-
-	require.True(t, env.IsWorkflowCompleted())
+	calls := 0
+	env.RegisterActivityWithOptions(func(_ context.Context, in types.ModelCallInput) (types.ModelCallOutput, error) {
+		calls++
+		require.Equal(t, "t1", in.TurnID)
+		return types.ModelCallOutput{Status: "done", HasContent: true}, nil
+	}, activity.RegisterOptions{Name: "ModelCall"})
+	env.ExecuteWorkflow(TurnWorkflow, types.TurnInput{SessionKey: "u:web", TurnID: "t1", ParentType: "session", PreInserted: true})
 	require.NoError(t, env.GetWorkflowError())
-	require.Equal(t, "journaling", gotMode)
-}
-
-func TestTurnWorkflow_PassesEmptyModeToModelCall(t *testing.T) {
-	var ts testsuite.WorkflowTestSuite
-	env := ts.NewTestWorkflowEnvironment()
-	mockTurnInfra(env)
-
-	var gotMode string
-	sawCall := false
-	env.RegisterActivityWithOptions(
-		func(_ context.Context, in types.ModelCallInput) (types.ModelCallOutput, error) {
-			gotMode = in.Mode
-			sawCall = true
-			return types.ModelCallOutput{Status: "done", HasContent: true}, nil
-		},
-		activity.RegisterOptions{Name: "ModelCall"},
-	)
-
-	env.ExecuteWorkflow(TurnWorkflow, types.TurnInput{
-		SessionKey:  "u:web",
-		TurnID:      "t1",
-		ParentType:  "session",
-		PreInserted: true,
-	})
-
-	require.True(t, env.IsWorkflowCompleted())
-	require.NoError(t, env.GetWorkflowError())
-	require.True(t, sawCall)
-	require.Equal(t, "", gotMode)
+	require.Equal(t, 1, calls)
 }

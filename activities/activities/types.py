@@ -63,17 +63,6 @@ class ModelCallInput:
     # Delivery-in-the-loop — offers deliver_reply/deliver_attachment for this
     # one call: turn.go's bounded post-Deliver-failure recovery round.
     offer_delivery_tools: bool = False
-    # docs/05-architecture-domain-control-loops.md — which curated system
-    # prompt this call should use, set by the Go workflow itself (it already
-    # knows its own identity at compile time — workflow/mode_journaling.go's
-    # runTurn(..., mode) call passes "journaling"; TurnWorkflow's own default
-    # entry point passes ""). Empty ⇒ the session's stored prompt or
-    # DEFAULT_SYSTEM_PROMPT, exactly as before this field existed. Distinct
-    # from messages.mode ("voice"/"" — is this ONE message speech-to-text)
-    # and from sessions.mode (the coordinator's own dispatch-routing state,
-    # tools.switch_mode) — this one only ever affects which prompt string
-    # model_call.py picks for this specific call.
-    mode: str = ""
 
 
 @dataclass

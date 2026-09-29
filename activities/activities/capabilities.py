@@ -112,15 +112,7 @@ _STATIC_CAPABILITIES: list[Capability] = [
     # 5 CRUD ops -> 1 dispatcher (list/inspect/revise/snooze/cancel) —
     # tool-registry.md, "Resolved: Three-Layer Tool Taxonomy".
     Capability("manage_intention", Layer.CONTROL, _MAIN, handler_ref="manage_intention"),
-    # docs/05-architecture-domain-control-loops.md — an ordinary, activity-
-    # backed tool (tools.switch_mode: a Postgres write + a Temporal signal to
-    # this session's own CoordinatorWorkflow), deliberately NOT peeled like
-    # report_status. report_status fires every step regardless — mode must
-    # never move just because a round finished; only an explicit switch_mode
-    # call may change it, in either direction (chat -> a skill's own mode, or
-    # back). The tool_calls row this call mints is the mode change's own
-    # durable, Temporal-native record — no separate state field needed.
-    Capability("switch_mode", Layer.CONTROL, _MAIN, handler_ref="switch_mode"),
+    Capability("skill_command", Layer.CONTROL, frozenset({TurnKind.REASONING}), handler_ref="skill_command"),
     Capability("lcm_grep", Layer.COGNITION, _MAIN, handler_ref="lcm_grep", timing=LOCAL),
     Capability("lcm_describe", Layer.COGNITION, _MAIN, handler_ref="lcm_describe", timing=LOCAL),
     Capability("lcm_expand", Layer.COGNITION, frozenset({TurnKind.SUBAGENT}), handler_ref="lcm_expand", timing=LOCAL),
@@ -138,13 +130,7 @@ _STATIC_CAPABILITIES: list[Capability] = [
     Capability("deliver_attachment", Layer.CONTROL, frozenset()),
 ]
 
-# A "skill" is entirely a mode now (docs/05-architecture-domain-control-loops.md
-# — 2026-09-27, after journaling and service_monitoring both migrated onto
-# the session-mode mechanism): entered via switch_mode, never called
-# directly by its own name, so there is no per-tenant Capability to rebuild
-# here any more — CAPABILITIES is a fixed, static list, identical for every
-# tenant. Per-tenant enablement of a mode name is a separate concern,
-# handled entirely by llm.ENABLED_MODES/llm.load_skills.
+# Domain skills are invoked through explicit coordinator commands.
 CAPABILITIES: list[Capability] = list(_STATIC_CAPABILITIES)
 BY_NAME: dict[str, Capability] = {c.name: c for c in CAPABILITIES}
 HANDLER_REFS: dict[str, str] = {c.name: c.handler_ref for c in CAPABILITIES if c.handler_ref}

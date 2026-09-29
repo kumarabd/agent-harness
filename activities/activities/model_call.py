@@ -28,7 +28,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from . import capabilities as _cap
-from . import ids, llm, llm_client, model_registry, permissions, skills
+from . import ids, llm, llm_client, model_registry, permissions
 from .types import ModelCallInput, ModelCallOutput, NextStep, ToolCallRef, Usage
 
 logger = logging.getLogger(__name__)
@@ -167,23 +167,6 @@ class ModelCallActivity:
                 )
                 if mode_row and mode_row["mode"] == "voice":
                     system_prompt = llm.VOICE_SYSTEM_PROMPT
-                # docs/05-architecture-domain-control-loops.md — this turn's
-                # own workflow identity (set by the Go workflow itself, which
-                # already knows it at compile time — workflow/
-                # mode_journaling.go's runTurn(..., mode) call) overrides
-                # both the session's stored prompt and the voice check
-                # above: which ACTIVITY this whole turn is takes priority
-                # over which MESSAGE mode the triggering input happened to
-                # carry. Empty (the ordinary case) leaves system_prompt
-                # exactly as already resolved. Generic lookup, never a
-                # domain name here — each domain's own prompt lives in its
-                # own module under activities/activities/skills/, self-
-                # registered into skills.prompt_for's registry; this file
-                # never names "journaling"/"service_monitoring" itself.
-                if input.mode:
-                    mode_prompt = skills.prompt_for(input.mode)
-                    if mode_prompt:
-                        system_prompt = mode_prompt
                 # prompt_assemble_latency_seconds — step 9 (docs/components/
                 # request-pipeline/09-prompt-assembly.md). Only the real path
                 # assembles; the fixture path above returns a scripted response
@@ -194,6 +177,10 @@ class ModelCallActivity:
                 conversation, context_tokens, resolved = await llm.build_conversation(
                     conn, input.turn_id, system_prompt,
                 )
+                from .skill_runtime import conversation_context
+                snapshot = await conversation_context(conn, self._temporal_client, input.turn_id)
+                conversation.insert(1, {"role": "system", "content": snapshot})
+                context_tokens += len(snapshot) // 4
                 resolved_by_name = {c.name: c for c in resolved}
                 activity.metric_meter().create_histogram_float(
                     "prompt_assemble_latency_seconds", unit="s"

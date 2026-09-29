@@ -243,7 +243,7 @@ from the user-visible stream and the iteration budget):
 |---|---|
 | `recall(query)` | returns matched long-term memory as an observation |
 | `discover_tools(query)` | matched tool schemas become callable for the rest of the turn |
-| `discover_skills(query)` | matched domain-workflow "skills" become callable for the rest of the turn (see *Skills*) |
+| `skill_command(action, revision, content?)` | explicitly route approved domain work to the user-selected skill via a coordinator Update |
 | `spawn_subagent(brief, …)` | starts a child `TurnWorkflow` (see *Subagents*) |
 | `ask_user(question, options?)` | parks the turn on a user-input request (see *Interrupts*) |
 
@@ -306,44 +306,15 @@ reads it.
 
 ## Skills
 
-The harness's entire notion of a "skill," full stop — there is no separate
-prose-procedure mechanism alongside this one. See
-`docs/05-architecture-domain-control-loops.md` for the full design; this section
-covers only how it plugs into the turn loop.
+Every incoming utterance runs this ordinary conversational turn, regardless of selected mode. Each real ModelCall reads the coordinator's selection and skill snapshot without replacing the normal chat/voice prompt.
 
-A skill's body is a Temporal workflow (its own registered type, its own states,
-approvals, retries, and completion rules), not a document. It is authored like
-code — the workflow declares its own `{name, description, input_schema}` — and
-never auto-recorded from a transcript; the earlier `RecordSkill`/EMA-learned
-version of "skill" is gone, not deferred (see *Meta-tools*).
+Chat calls the generic `skill_command` tool for submit, amend, confirm or cancel. The activity sends a durable coordinator Update keyed by tool-call ID. Exact-proposal confirmation uses the existing `ask_user` child and a server-authored prompt. Status questions and unrelated conversation do not invoke domain work or change selection.
 
-**Discovery** is local, not mcp-hub-mediated: an in-process semantic index
-(`skill-hub`, the same in-process hybrid vector+FTS mechanism `shell-hub`
-already uses for local tool discovery — `components/tool-registry.md`) built at
-worker startup by scanning registered workflow types, not a manifest file to
-hand-sync. `discover_skills(query)` searches it and mints matches as directly
-callable actions for the rest of the turn, exactly like `discover_tools`.
+Confirmed work runs in a bounded `SkillStepWorkflow` child owned by the coordinator, independently of this chat turn. It receives content references, never raw NewMessage signals, and owns no user-facing delivery. Its domain definition owns prompt, tool restrictions, argument validation and completion evidence.
 
-**Invocation has no separate "load" step.** The model calls a minted skill by
-name with arguments matching its own `input_schema` — the same `tool_calls`
-channel as any other tool. Whichever loop makes that call, root `TurnWorkflow`
-or a subagent's, dispatches it as a child workflow of that specific registered
-type and blocks on it at the same drain point as any other in-flight call
-(`drainResult` in `turn.go`) — a new branch alongside the activity/subagent/
-ask_user cases, not a reuse of any of them. The result folds back as an
-observation into the *same* loop that invoked it.
+Ordinary chat interruption leaves the skill running. Only explicit cancellation, mode changes or the session Cancel signal request cancellation. Completion notices wait until active chat finishes, then return through normal persistence and delivery. A completed step does not deactivate the user-selected mode.
 
-**Independent of `spawn_subagent`, not a variant of it.** No context clone, no
-brief, no narrowing check — a skill's contract is entirely whatever its own
-`input_schema` declares, defined by the workflow itself. `spawn_subagent` is the
-model's choice to delegate open-ended scoped work; a skill is a fixed process
-fragment reachable from anywhere in the execution lifecycle, root or subagent,
-with no ceremony either way.
-
-**Interrupts** treat an in-flight skill workflow the same way as everything
-else in the *Interrupt model* table: `RequestCancelChildWorkflowExecution`, a
-`cancelled` observation, cooperative cancellation all the way down — no
-special-casing for a skill's own internal approval/retry stages.
+See [Conversational skills](../05-architecture-domain-control-loops.md) for the full contract and breaking-deployment requirements. There is no `switch_mode`, skill discovery index, mode-specific top-level turn, or direct by-name skill dispatch.
 
 ---
 
@@ -421,7 +392,7 @@ flight, not a queue-after.
 | `ModelCall`, streaming (turn-1 voice/discord) | barge-in cancels it; partial output → `[response interrupted]` observation | near-instant |
 | Tool calls (activities) | cancel context, await settle; non-cancellable Tier-A tools run to completion; `cancelled` observation per call | heartbeat + teardown |
 | Subagent (child workflow) | cascade cancel; `SubagentManifest` still runs for partial file work; `cancelled` observation | deepest in-flight tool's heartbeat |
-| Skill workflow (child) | same cooperative-cancel treatment as a subagent — `RequestCancelChildWorkflowExecution`, `cancelled` observation — regardless of the skill's own internal stages | deepest in-flight step's heartbeat |
+| Coordinator-owned skill child | ordinary chat messages do not cancel it; explicit cancel or mode change requests cooperative cancellation | skill execution heartbeat |
 | Multiple queued | FIFO, one per boundary | — |
 | Blocked on `ask_user` | **the message resolves the block** (below) | instant |
 | Hard compaction (blocking) | let it finish — it makes the next `ModelCall` viable — then fold in | compaction completes |
@@ -493,7 +464,7 @@ There is none, and there won't be. `RecordSkill`/`load_skill`/`SkillDiscover`/
 per-turn-fragmentation regression that subsystem produced (teaching the agent
 something across several messages fragmented into partial, half-learned
 procedures) is closed by removing recording as a concept entirely, not by
-fixing it. See *Skills* above: a skill is a hand-authored Temporal workflow,
+fixing it. See *Skills* above: a skill is a hand-authored domain definition executed by a bounded Temporal child,
 declared once in code, never inferred from a transcript.
 
 ---

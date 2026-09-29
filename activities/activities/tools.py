@@ -530,43 +530,25 @@ async def call_tool(arguments: dict, ctx: ToolContext) -> dict:
     return await mcp_hub.call_tool("call_tool", arguments)
 
 
-async def switch_mode(arguments: dict, ctx: ToolContext) -> dict:
-    """docs/05-architecture-domain-control-loops.md — switches (or reverts)
-    this session's own active mode. An ordinary, activity-backed tool exactly
-    like create_intention/manage_intention above (thin wrapper over the
-    Temporal client, same ctx.temporal_client precedent tools_intention.py
-    already set) — deliberately NOT a new peeled meta-tool or a bespoke Go-
-    side mechanism: the model decides when to call this, same as any other
-    tool, and the tool_calls row it mints is this decision's own durable
-    record.
+async def skill_command(arguments: dict, ctx: ToolContext) -> dict:
+    """Durable Temporal Update: a cancelled chat activity only stops waiting;
+    the coordinator still owns any accepted skill command and child step."""
+    if ctx.temporal_client is None:
+        raise RuntimeError("skill_command requires Temporal")
+    async def heartbeat():
+        while True:
+            activity.heartbeat()
+            await asyncio.sleep(2)
 
-    Two effects, both needed: (1) signal this session's own
-    CoordinatorWorkflow (workflow ID == session_key, same addressing
-    CancelSignalName/NewMessageSignalName already use) so its own in-memory
-    routing state updates for the NEXT incoming message — the operational
-    source of truth, read only by the coordinator itself, never round-
-    tripped through Postgres; (2) mirror the new mode into `sessions.mode`
-    in the same call, purely for external/client visibility (same role
-    turns.status already plays for turn state) — never read back by the
-    coordinator for its own dispatch decisions.
-
-    `mode` defaults to "chat" when omitted — a skill reverting control
-    doesn't need to name the default explicitly, only the forward direction
-    (chat -> some skill's own name) does.
-    """
-    if getattr(ctx, "temporal_client", None) is None:
-        raise RuntimeError("switch_mode requires a Temporal client (not wired into this ToolCallActivity)")
-    mode = str(arguments.get("mode") or "chat").strip().lower()
-    if mode != "chat" and mode not in llm.ENABLED_MODES:
-        # No silent fallback to "chat" here — a model naming a mode that
-        # isn't actually a registered turn-shaped handler, OR one this
-        # tenant hasn't enabled (llm.ENABLED_MODES — llm.py's own doc
-        # comment above it has the two-gate rationale), is a real error to
-        # surface, not something to paper over.
-        raise ValueError(f"switch_mode: {mode!r} is not an enabled mode for this tenant (valid: {sorted(llm.ENABLED_MODES)})")
-    await ctx.pool.execute("UPDATE sessions SET mode = $2 WHERE session_key = $1", ctx.session_key, mode)
-    await ctx.temporal_client.get_workflow_handle(ctx.session_key).signal("SetMode", mode)
-    return {"mode": mode}
+    heartbeat_task = asyncio.create_task(heartbeat())
+    try:
+        result = await ctx.temporal_client.get_workflow_handle(ctx.session_key).execute_update(
+            "SkillCommand", ctx.tool_call_id, id=ctx.tool_call_id,
+        )
+    finally:
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+    return {"skill_command": True, "state": result}
 
 
 async def lcm_grep(arguments: dict, ctx: ToolContext) -> dict:
@@ -667,7 +649,7 @@ _HANDLERS: dict[str, Any] = {
     "lcm_expand": lcm_expand,
     "create_intention": _ti.create_intention,
     "manage_intention": _ti.manage_intention,
-    "switch_mode": switch_mode,
+    "skill_command": skill_command,
 }
 
 # Every capability with a real activity handler, built from the single

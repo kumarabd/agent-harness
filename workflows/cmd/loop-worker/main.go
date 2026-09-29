@@ -54,7 +54,6 @@ import (
 	"go.temporal.io/sdk/client"
 	contribtally "go.temporal.io/sdk/contrib/tally"
 	"go.temporal.io/sdk/worker"
-	temporalworkflow "go.temporal.io/sdk/workflow"
 
 	wf "agent-harness/workflows/internal/workflow"
 )
@@ -117,25 +116,7 @@ func run(ctx context.Context, address, namespace, taskQueue string, metricsHandl
 	w.RegisterWorkflow(wf.CompressContextWorkflow)
 	w.RegisterWorkflow(wf.UserInputRequestWorkflow)
 	w.RegisterWorkflow(wf.IntentionWorkflow)
-	// docs/05-architecture-domain-control-loops.md — a mode-based turn
-	// (session-persistent, dispatched directly by CoordinatorWorkflow via
-	// tools.switch_mode, never by the model calling a tool) is a real
-	// turn-shaped entry point (types.TurnInput/TurnResult, runTurn), so it's
-	// registered here directly, under the exact string switch_mode's own
-	// `mode` argument names — which must also be a key in
-	// activities/activities/llm.py's MODE_TURNS. 2026-09-27: this is now the
-	// ONLY skill-dispatch shape — the earlier one-shot skill mechanism
-	// (types.SkillWorkflowInput, turn.go's runSkill, its own
-	// workflows/internal/workflow/skills/ package) is deleted outright, not
-	// kept alongside this as a second option: a skill whose own activity is
-	// naturally single-round (service_monitoring) is still just a mode whose
-	// curated prompt calls switch_mode() back to chat as soon as that one
-	// round concludes, not a structurally different dispatch shape. Each
-	// mode's own `skills` table row (migration 040_skills.sql) is kept, now
-	// serving only as the per-tenant enable/disable gate (llm.ENABLED_MODES),
-	// not a dispatch target.
-	w.RegisterWorkflowWithOptions(wf.JournalingModeTurn, temporalworkflow.RegisterOptions{Name: "journaling"})
-	w.RegisterWorkflowWithOptions(wf.ServiceMonitoringModeTurn, temporalworkflow.RegisterOptions{Name: "service_monitoring"})
+	w.RegisterWorkflow(wf.SkillStepWorkflow)
 
 	log.Printf("loop worker starting: temporal=%q namespace=%q task_queue=%q", address, namespace, taskQueue)
 

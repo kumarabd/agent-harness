@@ -126,10 +126,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "rather than a raw result list).\n"
     "- discover_tools — find a tool that isn't already offered; a match becomes callable by its "
     "own name on your NEXT step, not the response that found it.\n"
-    "- switch_mode — enter a dedicated mode for an activity that owns its own fixed process (an "
-    "approval gate, a defined finish condition) instead of freehanding it, for anything enabled "
-    "for this tenant. Its own description lists what's actually available and when to use each; "
-    "if it lists none, there's nothing to switch to right now.\n"
+    "- skill_command — explicitly submit, amend, confirm or cancel work for the user-selected skill. "
+    "Only the user selects a mode; never infer a mode change from their topic or inactivity.\n"
     "- spawn_subagent — delegate a self-contained slice of work to its own focused turn.\n"
     "- ask_user — put a question to the user and wait for their answer (the turn pauses; they "
     "may also just send a new message, which is the answer).\n"
@@ -596,11 +594,8 @@ _STATIC_TOOLS_SCHEMA = [
     },
 ]
 
-# switch_mode's own schema (its enum of this tenant's actually-enabled mode
-# names) is rebuilt by load_skills below, called from tenant_worker.py after
-# skills.init(pool) resolves — not known until that startup query resolves,
-# so this starts with an empty enum, same "just isn't offered yet" shape
-# shell_hub already has before its own init().
+# load_skills below adds the generic command schema and tenant-enabled skill
+# descriptions before the worker begins polling.
 TOOLS_SCHEMA: list[dict] = list(_STATIC_TOOLS_SCHEMA)
 
 # docs/components/context-slot.md's Memory-Access Tools — lcm_expand is
@@ -717,6 +712,7 @@ _ASK_USER_SCHEMA = {
             "type": "object",
             "properties": {
                 "question": {"type": "string", "description": "The question to put to the user."},
+                "skill_content_id": {"type": "string", "description": "For skill confirmation, use the current snapshot content_id. The server supplies the exact proposal and approval options."},
                 "options": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -735,82 +731,37 @@ _ASK_USER_SCHEMA = {
 # rebuilt this into); the nested spawn_subagent variant is passed separately.
 _SCHEMA_BY_NAME: dict[str, dict] = {}
 
-# This tenant's own subset of skills.names() it may actually switch_mode()
-# into — both a real Go dispatch target (skills.names()) AND an enabled row
-# in this tenant's own skills table (load_skills below). tools.switch_mode
-# reads this directly for its own validation, so there is exactly one place
-# that combines the two gates.
+# Enabled skill descriptions are loaded at worker startup. Selection and execution
+# additionally check the live tenant catalog, so disabling a skill takes effect.
 ENABLED_MODES: set[str] = set()
 
-
-def _switch_mode_schema(enabled_modes: list[str]) -> dict:
-    if enabled_modes:
-        modes_desc = "\n".join(f"- \"{name}\" — {skills.description_of(name)}" for name in enabled_modes)
-    else:
-        modes_desc = "(none enabled for this tenant right now)"
-    return {
-        "type": "function",
-        "function": {
-            "name": "switch_mode",
-            "description": (
-                "Switch this session's active mode, changing which workflow handles future "
-                "messages until switched back — not just this one reply. Available modes:\n"
-                + modes_desc
-                + "\nCall with no mode (or omit it) to revert to ordinary chat handling once that "
-                "activity is genuinely, entirely finished, not merely once its current reply is "
-                "ready — a mode's own replies finish every step regardless (that alone must never "
-                "switch mode back); only call this bare once the activity itself is done."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "mode": {
-                        "type": "string",
-                        "enum": enabled_modes,
-                        "description": "The mode to switch to. Omit to revert to ordinary chat handling.",
-                    },
-                },
-                "required": [],
-            },
-        },
+_SKILL_COMMAND_SCHEMA = {
+    "type": "function", "function": {
+        "name": "skill_command",
+        "description": "Route work to the user-selected skill. Use submit/amend to prepare a proposal. "
+            "Then ask_user with skill_content_id to display the exact proposal. Confirm only after "
+            "explicit approval of that revision. Status and unrelated questions are ordinary chat; "
+            "they do not submit work or change selection. Cancel cancels work but keeps user selection.",
+        "parameters": {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["submit", "amend", "confirm", "cancel"]},
+            "revision": {"type": "integer", "minimum": 0},
+            "content": {"type": "string", "description": "Exact proposed entry or task instructions; only for submit/amend."},
+        }, "required": ["action", "revision"], "additionalProperties": False}
     }
-
+}
 
 def load_skills(entries: list[dict]) -> None:
-    """Rebuilds TOOLS_SCHEMA/_SCHEMA_BY_NAME/ENABLED_MODES from this tenant's
-    freshly loaded skills table rows (skills.init's return value) —
-    tenant_worker.py calls this once at startup, after skills.init(pool) and
-    before the Temporal worker starts polling. Idempotent.
-
-    A "skill" is entirely a mode now (docs/05-architecture-domain-control-loops.md,
-    2026-09-27) — a row here only ever gates switch_mode's own enum/
-    description (ENABLED_MODES below), the intersection of skills.names()
-    (which names are real Go dispatch targets — activities/activities/
-    skills/, one module per domain) with this tenant's own enabled rows. A
-    row whose name isn't in skills.names() is stale/unexpected data (there
-    is no other kind of row any more) and is silently ignored here rather
-    than granted its own directly-callable tool schema.
-    """
-    known_modes = set(skills.names())
     ENABLED_MODES.clear()
-    ENABLED_MODES.update(e["name"] for e in entries if e["name"] in known_modes)
-    # skills.names()'s own order, not the DB's — deterministic regardless of row order.
-    enabled_modes_ordered = [name for name in skills.names() if name in ENABLED_MODES]
-
-    TOOLS_SCHEMA[:] = _STATIC_TOOLS_SCHEMA + [_switch_mode_schema(enabled_modes_ordered)]
-    _SCHEMA_BY_NAME.clear()
-    _SCHEMA_BY_NAME.update(
-        {
-            t["function"]["name"]: t
-            for t in [
-                *TOOLS_SCHEMA,
-                _ASK_USER_SCHEMA,
-                _DELIVER_REPLY_SCHEMA,
-                _DELIVER_ATTACHMENT_SCHEMA,
-            ]
-        }
+    ENABLED_MODES.update(e["name"] for e in entries if e["name"] in skills.names())
+    schema = {**_SKILL_COMMAND_SCHEMA, "function": {**_SKILL_COMMAND_SCHEMA["function"]}}
+    schema["function"]["description"] += " Enabled selections: " + "; ".join(
+        f"{name}: {skills.description_of(name)}" for name in sorted(ENABLED_MODES)
     )
-
+    TOOLS_SCHEMA[:] = _STATIC_TOOLS_SCHEMA + [schema]
+    _SCHEMA_BY_NAME.clear()
+    _SCHEMA_BY_NAME.update({t["function"]["name"]: t for t in [
+        *TOOLS_SCHEMA, _ASK_USER_SCHEMA, _DELIVER_REPLY_SCHEMA, _DELIVER_ATTACHMENT_SCHEMA,
+    ]})
 
 load_skills([])
 

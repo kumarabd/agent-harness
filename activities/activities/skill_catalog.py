@@ -1,35 +1,10 @@
-"""skill_catalog.py — docs/05-architecture-domain-control-loops.md. The
-per-tenant registry of authored domain workflows ("skills") this tenant has
-enabled — sourced from this tenant's own `skills` table (migration
-040_skills.sql), not a hardcoded list.
+"""Tenant skill enablement, read from the skills table at worker startup.
 
-Named skill_catalog.py, not skills.py — 2026-09-28, renamed to make room for
-the actual `skills` package (activities/activities/skills/), which holds
-each domain's own system prompt and switch_mode description (skills/
-journaling.py, skills/service_monitoring.py), self-registered into
-skills/base.py's generic registry. This module is a different, narrower
-concern: per-TENANT enablement data (which of those registered domains this
-tenant has turned on), not domain content itself.
-
-2026-09-27: a "skill" is entirely a mode now — journaling and
-service_monitoring both migrated onto the session-mode mechanism
-(tools.switch_mode), and the one-shot skill dispatch shape they used before
-(a nested child workflow, dispatched by name at ModelCall mint time) was
-deleted outright rather than kept as a second, redundant mechanism. This
-table's own role narrowed to match: a row's `name` must be a key in the
-`skills` package's own registry (skills.names() — the fixed, deployment-wide
-fact of which names are real turn-shaped Go dispatch targets —
-workflows/internal/workflow/mode_journaling.go, mode_service_monitoring.go),
-and `enabled` is purely this tenant's own opt-in/opt-out gate on top of that
-(llm.load_skills intersects the two into llm.ENABLED_MODES, which
-tools.switch_mode reads). Gateway's own GET /skills queries this same table
-directly (workflows/internal/gateway/web/skills.go).
-
-Hand-authored only, never auto-populated or learned from a transcript
-(docs/components/turn-pipeline.md, "Skill recording": "There is none, and
-there won't be.") — this module just moved WHERE the hand-authoring lives
-(a database row instead of a Python literal), not who authors it or how a new
-mode gets registered.
+Domain definitions live in the skills package. This module only loads enabled
+catalog entries; llm.load_skills intersects them with the registered names for
+chat's descriptions. Selection and command validation also check the live tenant
+gate. Gateway GET /skills queries the same catalog. Names are user selections,
+not top-level workflow dispatch targets.
 """
 
 from __future__ import annotations

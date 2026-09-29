@@ -1,63 +1,22 @@
-# Journaling skill loop
+# Journaling skill
 
-`journaling` is the control loop for turning a thought the agent judges worth
-preserving into an entry in the user's Notion journal. The user can explicitly
-ask to journal something, or the agent can invoke the skill implicitly; either
-way, the skill obtains confirmation before writing.
+Journaling uses the [generic conversational skill contract](../05-architecture-domain-control-loops.md). The user explicitly selects `/skill journaling` or “let's journal”. Every later utterance still enters ordinary chat; unrelated questions and status checks do not become diary entries or deactivate journaling.
 
-## Logical loop
+Chat submits/amends the exact proposed entry and presents its content-bound confirmation. Only explicit approval starts the bounded skill child. New diary content needs a new proposal and confirmation; completion never changes the user's selection.
 
-```mermaid
-flowchart TD
-    Start([M or user: identify an entry worth preserving]) --> Confirm[D: Request durable confirmation]
-    Confirm --> Approved{D: Explicit confirmation recorded?}
-    Approved -- no --> Stop([D: Close without writing])
-    Approved -- yes --> Locate[M: Locate the user's journal in Notion]
-    Locate --> Found{M: One usable journal?}
-    Found -- no / ambiguous --> Clarify[M: Ask the user where to journal or whether to create one]
-    Clarify --> Locate
-    Found -- yes --> Today[M: Find today's page]
-    Today --> Page{M: Today's page exists?}
-    Page -- no --> CreatePage[M: Create today's page]
-    Page -- yes --> Write
-    CreatePage --> Write[M: Append the entry]
-    Write --> Verify{M: Write succeeded?}
-    Verify -- no / unclear --> Diagnose[M: Inspect the result or explain the blocker]
-    Diagnose --> Locate
-    Verify -- yes --> Report([M: Report what was recorded])
-```
+## Domain work
 
-`D` = deterministic workflow behavior. `M` = a model-directed step inside the
-scoped reasoning turn. The confirmation wait is durable and deterministic; the
-human, rather than the model, supplies the approval.
+The domain prompt directs the skill to locate one Notion page titled `My Diary`, fetch it, and search for a dated child scoped beneath that root. It must reuse the dated page when present and stop on an ambiguous/missing root. The date comes from the proposal; absent a date, the current implementation supplies UTC, not the user's local date. Chat should put the desired date in the approved proposal when that distinction matters.
 
-The loop repeats whenever the agent lacks enough information to safely proceed:
-it asks the user to resolve an ambiguity, or inspects Notion again after an
-unclear result. It ends when the entry was recorded and reported, or when the
-agent can clearly explain why it cannot safely continue.
+The only external tools offered are `notion-search`, `notion-fetch`, `notion-create-pages`, and `notion-update-page`. Updates are restricted in code to `insert_content` with `position.type=end`; replacement and metadata edits are rejected. Mutations require `allow_async=false`. Creation is restricted to one dated page under a page parent. The content written must equal the exact confirmed text (apart from surrounding whitespace), and only one mutation is allowed per step. The policy targets the available Notion append schema, not legacy insertion commands; validate the tenant's discovered schema during rollout.
 
-## Logical stages
+Success requires a fetch containing the approved text and a page reference associated with a successful write. A model's “done” or “saved” claim is not completion evidence. A lost write response, missing readback or budget exhaustion is a failed/unverified outcome, not permission to repeat a write automatically.
 
-| Stage | Intent |
-|---|---|
-| Locate | Use the connected Notion capability to identify exactly one page titled `My Diary`, the diary root. |
-| Establish today’s page | Reuse the `YYYY-MM-DD` child page for the user’s current local date, or create it beneath `My Diary` if it does not exist. |
-| Confirm | Let the user see and approve the actual proposed entry before it is written. |
-| Write and verify | Append the entry, then use the returned evidence to decide whether the write was successful. |
-| Recover or stop | If a tool result is unclear, re-inspect and continue; if required information or access is unavailable, explain the blocker rather than guessing. |
+Page/root selection and date interpretation are model-directed under the domain prompt; append-only behavior, exact-content preservation, mutation count and readback evidence are code-enforced. The skill cannot ask/deliver directly, switch modes, call shell, or spawn a subagent. Ordinary chat reports the result or asks for missing information.
 
-## Runtime boundary
+## Implementation and limits
 
-This is the intended work loop, not a literal Temporal execution trace. The
-first native state is already implemented: `JournalingSkill` requests and
-waits for durable confirmation itself. After approval, the current
-implementation still uses a scoped reasoning bridge for dynamic Notion
-discovery and interpretation. That bridge is being replaced state-by-state by
-native capability and model-decision primitives; a failure, parent
-cancellation, or loop budget/error never pretends that the journal entry was
-written.
+Domain logic: `activities/activities/skills/journaling.py`.
+Shared execution: `skill_runtime.py`, `workflows/internal/workflow/skill.go`, and `coordinator.go`.
 
-Relevant implementation: `workflows/internal/workflow/skills/journaling.go`,
-`workflows/internal/workflow/skills/support.go`,
-`workflows/internal/workflow/turn.go`, and
-`workflows/internal/workflow/user_input.go`.
+The current step does not create a missing diary root, perform multiple entry writes, undo writes, or bypass tenant permission rules. Cancellation can stop pending work but cannot guarantee that an already-started provider write was undone. See the shared design for retry and rollout requirements.

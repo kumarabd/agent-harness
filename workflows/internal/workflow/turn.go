@@ -55,50 +55,6 @@ const KeepAliveSignalName = "KeepAlive"
 // decides placement.
 const WakeSignalName = "Wake"
 
-// SetModeSignalName — docs/05-architecture-domain-control-loops.md. Sent
-// directly by the tools.switch_mode ACTIVITY (Python), not forwarded by the
-// coordinator like NewMessage/Cancel/Wake are — this changes the
-// coordinator's OWN dispatch decision, it's not conversational content to
-// relay into whatever's currently running. Payload: the new mode (a plain
-// string; "chat" or empty means ordinary TurnWorkflow dispatch, anything
-// else names a registered skill's own workflow type to dispatch instead).
-//
-// Deliberately NOT tied to any turn's own completion (report_status fires
-// every round regardless, successful or not, and must never move mode on its
-// own) — only an explicit switch_mode call ever changes it, in either
-// direction: a "chat" turn calling switch_mode("some-skill") hands ongoing
-// control to that skill's own turn-shaped handler for however many future
-// messages it takes; that handler calling switch_mode() bare (defaulting to
-// "chat") hands it back. The coordinator's own in-memory mode field, updated
-// by this signal, is the operational source of truth for the NEXT dispatch
-// decision — sessions.mode (written by the same switch_mode call) is purely
-// the external/client-visible mirror of it, never read back here.
-const SetModeSignalName = "SetMode"
-
-// chatMode is the sentinel meaning "ordinary TurnWorkflow dispatch" —
-// distinct from turnWorkflowTypeName's own returned string (which is the
-// registered Temporal workflow type name, "TurnWorkflow") since a mode is a
-// session-level concept ("what governs the next dispatch") and a workflow
-// type name is a Temporal-level one ("what to actually start"); collapsing
-// them would make it easy to typo one while meaning the other.
-const chatMode = "chat"
-
-// turnWorkflowTypeName resolves a session's own mode to the Temporal
-// workflow type coordinator.go's startTurn should dispatch for the next
-// message — TurnWorkflow's own registered name (w.RegisterWorkflow(TurnWorkflow),
-// cmd/loop-worker/main.go, whose default type name matches its Go func name
-// exactly, same convention every skill's own bare type-name dispatch
-// already relies on) when mode is empty/"chat", or the mode string itself
-// otherwise — a mode name IS the workflow type name to start, by
-// construction (tools.switch_mode only ever sets it to a registered skill's
-// own name).
-func turnWorkflowTypeName(mode string) string {
-	if mode == "" || mode == chatMode {
-		return "TurnWorkflow"
-	}
-	return mode
-}
-
 // modelCallChunkSignalName — docs/components/gateway.md's "Resolved:
 // ModelCall Streaming". Signaled directly by the ModelCall ACTIVITY
 // (Python, model_call.py), not forwarded by the Coordinator like
@@ -856,28 +812,9 @@ func awaitModelCallWithStreaming(ctx workflow.Context, mcFuture workflow.Future,
 // and control-flow metadata (counters, tool names, usage numbers). Every
 // content read/write happens inside an activity, against Postgres.
 func TurnWorkflow(ctx workflow.Context, input types.TurnInput) (types.TurnResult, error) {
-	return runTurn(ctx, input, "")
-}
-
-// runTurn is TurnWorkflow's real body, parameterized by mode — shared
-// verbatim with any other turn-shaped workflow entry point that wants the
-// exact same message-forwarding/cancellation/progress-watchdog machinery
-// with a different curated system prompt (llm.py's mode -> prompt table),
-// docs/05-architecture-domain-control-loops.md. workflow/mode_journaling.go's
-// JournalingModeTurn is the first such caller, passing "journaling" — 2026-
-// 09-27, replacing that mode's earlier RunReasoningTurn-based design
-// entirely (a scoped reasoning bridge nested inside one ordinary turn's own
-// tool-call step) with a real top-level turn of its own, dispatched
-// directly by the session's own CoordinatorWorkflow (tools.switch_mode +
-// coordinator.go's mode-aware dispatch) rather than by the model deciding to
-// call a "journaling" tool. Every other turn-shaped entry point gets full
-// conversational continuity for free this same way: a real turn_id under
-// the same session_key, assembled via the exact same LCM context path any
-// ordinary turn already uses — no bespoke context-passing needed.
-func runTurn(ctx workflow.Context, input types.TurnInput, mode string) (types.TurnResult, error) {
 	ctx = WithTenantTaskQueue(ctx, input.TenantSlug)
 	logger := workflow.GetLogger(ctx)
-	logger.Info("turn workflow started", "turn_id", input.TurnID, "parent_type", input.ParentType, "mode", mode)
+	logger.Info("turn workflow started", "turn_id", input.TurnID, "parent_type", input.ParentType)
 
 	// --- Start-of-turn: write the inbound message (or, for a subagent, let
 	// InsertMessage derive its kickoff content from its own tool_calls row)
@@ -978,7 +915,6 @@ func runTurn(ctx workflow.Context, input types.TurnInput, mode string) (types.Tu
 		CancelRequested:    &cancelRequested,
 		Interrupts:         interrupts,
 		ProgressGen:        &progressGen,
-		Mode:               mode,
 	})
 	// The reason-act loop is done — tell the watchdog goroutine to stop before
 	// the (bounded) egress + delivery below, so it can't ping during teardown.
@@ -1019,14 +955,9 @@ func runTurn(ctx workflow.Context, input types.TurnInput, mode string) (types.Tu
 }
 
 // RunReasonActLoopInput/RunReasonActLoopResult — docs/05-architecture-domain-control-loops.md.
-// The reason-act loop itself, factored out of TurnWorkflow so any other
-// turn-shaped workflow entry point (runTurn's own callers — a mode turn like
-// mode_journaling.go/mode_service_monitoring.go) can run the *exact* same
-// mechanism — the same ModelCall dispatch, the same status/tool_calls stop
-// condition, the same real RequiresApproval → UserInputRequestWorkflow path,
-// the same drainResult — rather than a hand-rolled parallel one. Plain Go
-// function call, not a child workflow: runs in-process inside whichever
-// workflow execution calls it.
+// The ordinary conversational reason-act loop, including ModelCall dispatch,
+// approval waits, interruptions, and drainResult. Skills execute separately
+// under the coordinator and never become conversational turn entry points.
 //
 // Not a JSON/cross-language boundary type (this never crosses Temporal's data
 // converter — it's a direct call within one workflow execution's
@@ -1035,40 +966,26 @@ func runTurn(ctx workflow.Context, input types.TurnInput, mode string) (types.Tu
 type RunReasonActLoopInput struct {
 	TurnID, SessionKey, ConnectionID, ParentType string
 	// TenantSlug — see types.TurnInput's own doc comment. ctx already carries
-	// the resolved tenant queue by the time this runs (every runTurn caller
+	// the resolved tenant queue by the time this runs (TurnWorkflow
 	// calls WithTenantTaskQueue before this), but every child workflow THIS
 	// loop itself starts (WriteMemoryWorkflow, CompressContextWorkflow,
-	// UserInputRequestWorkflow, a subagent TurnWorkflow, a skill workflow) is
+	// UserInputRequestWorkflow, a subagent TurnWorkflow) is
 	// a separate execution that doesn't inherit ctx's values — each needs
 	// this passed explicitly.
 	TenantSlug         string
 	OfferDeliveryTools bool
 	// PendingMessages/CancelRequested — caller-owned. TurnWorkflow passes
-	// pointers fed by its own signal-listening goroutines; a skill's scoped
-	// reasoning turn passes pointers to values nothing ever mutates (no
-	// signal listener of its own — a scoped turn is never signaled directly,
-	// only cascade-cancelled via ctx when the outer turn is interrupted,
-	// already handled structurally, not through this mechanism).
+	// pointers fed by its own signal-listening goroutines.
 	PendingMessages *[]types.SignalPayload
 	CancelRequested *bool
 	// Interrupts — nil is a valid, meaningful value (deliveryInterruptSource's
 	// own doc comment): every place this loop actually dereferences it is
 	// already gated on ParentType == "session", so a non-"session" caller
-	// (a subagent, or a skill's scoped turn) never touches it regardless.
+	// (a subagent) never touches it regardless.
 	Interrupts *deliveryInterruptSource
 	// ProgressGen — bumped once per reason-act pass, read by the top-level
-	// progress watchdog goroutine (TurnWorkflow-only). A skill's scoped turn
-	// passes a pointer nothing reads.
+	// progress watchdog goroutine.
 	ProgressGen *int
-	// Mode — docs/05-architecture-domain-control-loops.md. Which curated
-	// system prompt model_call.py should use for every ModelCall this loop
-	// makes (llm.py's mode -> prompt table) — set once by the calling
-	// workflow, which already knows its own identity at compile time
-	// (workflow/mode_journaling.go's runTurn(..., mode) call passes
-	// "journaling"; TurnWorkflow's own default entry point passes "").
-	// Empty is the ordinary case — the session's stored prompt or
-	// DEFAULT_SYSTEM_PROMPT, exactly as before this field existed.
-	Mode string
 }
 
 type RunReasonActLoopResult struct {
@@ -1163,7 +1080,6 @@ loop:
 			HintModality:       hintModality,
 			HintTier:           hintTier,
 			OfferDeliveryTools: in.OfferDeliveryTools,
-			Mode:               in.Mode,
 		}
 		mcFuture := workflow.ExecuteActivity(mctx, "ModelCall", modelInput)
 

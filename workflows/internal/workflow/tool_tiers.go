@@ -22,6 +22,7 @@ type toolTiming struct {
 // tools — falls back to defaultToolTiming, preserving this project's
 // existing fast local-demo timing exactly.
 var toolActivityOptions = map[string]toolTiming{
+	"skill_command": {HeartbeatTimeout: 10 * time.Second, StartToCloseTimeout: 2 * time.Minute},
 	// shell_exec: Tier B — heartbeat ~3s (Python side), ~10s heartbeat
 	// timeout, 5-minute ceiling on total run time.
 	"shell_exec": {

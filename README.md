@@ -14,9 +14,9 @@ The specialization normally carried by a “skill” moves into an authored, dom
 - A control workflow encodes the procedure as durable state, explicit transitions, waits, retries, and lifecycle rules.
 - The model still contributes judgment inside bounded steps; the workflow owns and enforces how the work progresses.
 
-Skills remain useful as optional guidance or compatibility packaging, but they are not a required execution layer. When a procedure is important enough to govern, audit, interrupt, or resume correctly, it belongs in a workflow.
+Every utterance enters ordinary chat. Users select a durable skill mode; chat routes explicit, confirmed work into bounded coordinator-owned skill children. Skills own domain policy, while Temporal owns lifecycle and chat remains the only conversational delivery path.
 
-Read the full proposal in [the domain control-loop strategy](docs/05-architecture-domain-control-loops.md).
+Read the implemented contract in [the domain control-loop strategy](docs/05-architecture-domain-control-loops.md).
 
 ## What the harness provides
 

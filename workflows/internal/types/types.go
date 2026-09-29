@@ -183,13 +183,6 @@ type ModelCallInput struct {
 	// see there. Also set directly (without a TurnInput) by turn.go's local
 	// post-Deliver-failure recovery round.
 	OfferDeliveryTools bool `json:"offer_delivery_tools,omitempty"`
-	// Mode — docs/05-architecture-domain-control-loops.md. Which curated
-	// system prompt model_call.py should use for this call, mirroring
-	// RunReasonActLoopInput's own field of the same name straight through —
-	// set once per workflow (runTurn's own mode parameter), not per call.
-	// Empty ⇒ the session's stored prompt or DEFAULT_SYSTEM_PROMPT, exactly
-	// as before this field existed.
-	Mode string `json:"mode,omitempty"`
 }
 
 // ToolCallRef is one tool call minted by ModelCall — name/ID/dispatch-kind
@@ -425,9 +418,9 @@ type IntentionInput struct {
 	// Schedule tick) — carried through ContinueAsNew automatically since
 	// it's part of input, never re-derived.
 	TenantSlug string `json:"tenant_slug"`
-	Objective   string `json:"objective"`
-	Why         string `json:"why,omitempty"`
-	Kind        string `json:"kind"`
+	Objective  string `json:"objective"`
+	Why        string `json:"why,omitempty"`
+	Kind       string `json:"kind"`
 
 	FireAt     time.Time     `json:"fire_at,omitempty"`     // one-shot: absolute wall-clock
 	Probe      *ProbeSpec    `json:"probe,omitempty"`       // poll kinds

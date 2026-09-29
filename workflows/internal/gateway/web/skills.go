@@ -15,20 +15,9 @@ type listSkillsResponse struct {
 	Skills []skillSummary `json:"skills"`
 }
 
-// handleListSkills queries this tenant's own `skills` table (migration
-// 040_skills.sql) directly. A "skill" is entirely a session mode now
-// (docs/05-architecture-domain-control-loops.md, 2026-09-27 — entered via
-// tools.switch_mode, not called directly by name): this row's `enabled` is
-// this tenant's own opt-in/opt-out gate on a mode name, mirrored into
-// activities/activities/llm.py's ENABLED_MODES. input_schema is unused for
-// a mode row (switch_mode has its own single schema, not per-row) — kept
-// in the response only because the column itself still exists on the row.
-//
-// Same Postgres this tenant's own tenant-worker already reads via
-// skill_catalog.init(pool) (activities/activities/skill_catalog.py — named
-// distinctly from the activities/activities/skills/ package, which holds
-// each domain's own prompt content, not per-tenant enablement data) — no
-// new cross-service plumbing.
+// handleListSkills reads tenant-enabled skill selections. Domain behavior lives
+// in the Python skills registry; every user message still enters ordinary chat.
+// input_schema remains catalog metadata, not a directly callable skill schema.
 func (h *Handler) handleListSkills(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rows, err := h.pool.Query(ctx,

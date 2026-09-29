@@ -87,22 +87,21 @@ from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
 from . import agent_brain, llm, llm_client, shell_hub, skill_catalog
-from .metrics import LATENCY_BUCKETS_SECONDS, SECONDS_LATENCY_METRICS
 from .compress_context import CompressContextActivity
 from .db import create_pool
 from .get_max_turn_seq import GetMaxTurnSeqActivity
 from .insert_message import InsertMessageActivity
 from .intention import CheckConditionActivity, FireIntentionActivity
+from .metrics import LATENCY_BUCKETS_SECONDS, SECONDS_LATENCY_METRICS
 from .model_call import ModelCallActivity
 from .persist import PersistActivity
 from .seed_child_session import SeedChildSessionContextActivity
+from .skill_runtime import SkillActivities
 from .status_ping import StatusPingActivity
 from .subagent_manifest import SubagentManifestActivity
 from .tool_call import DenyToolCallActivity, ToolCallActivity
 from .user_input import CloseUserInputActivity, RequestUserInputActivity
 from .write_memory import WriteMemoryActivity
-
-
 
 
 async def main() -> None:
@@ -118,11 +117,8 @@ async def main() -> None:
     # No-op if shell_hub.CATALOG is empty or EMBEDDING_BASE_URL isn't set.
     await shell_hub.init()
     # docs/05-architecture-domain-control-loops.md — this tenant's own
-    # enabled modes, loaded from its own Postgres `skills` table (a "skill"
-    # is entirely a mode now, 2026-09-27 — the table's own per-tenant
-    # enable/disable gate is the only thing this reads any more). Must run
-    # before llm.load_skills, which needs these entries to build
-    # llm.ENABLED_MODES and switch_mode's own schema, before the Temporal
+    # enabled selections, loaded from its own Postgres `skills` table.
+    # llm.load_skills builds the generic command's enabled descriptions before the Temporal
     # worker below starts polling — so no ModelCall ever runs against a
     # stale/empty set.
     skill_entries = await skill_catalog.init(pool)
@@ -188,10 +184,17 @@ async def main() -> None:
     # @activity.defn attaches its metadata to the decorated function, and
     # `instance.__call__` (bound) carries that metadata; the bare instance
     # does not.
+    skill_activities = SkillActivities(pool, client)
     worker = Worker(
         client,
         task_queue=task_queue,
         activities=[
+            skill_activities.load_mode,
+            skill_activities.select,
+            skill_activities.prepare,
+            skill_activities.record,
+            skill_activities.reason,
+            skill_activities.execute,
             ModelCallActivity(pool, client).__call__,
             ToolCallActivity(pool, client).__call__,
             InsertMessageActivity(pool).__call__,

@@ -1,380 +1,261 @@
 package workflow
 
 import (
+	"fmt"
 	"time"
 
-	enumspb "go.temporal.io/api/enums/v1"
-	"go.temporal.io/sdk/workflow"
-
 	"agent-harness/workflows/internal/types"
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/workflow"
 )
 
-// IdleTTL is deliberately short in this local-dev slice so the coordinator's
-// self-termination behavior is easy to observe without a long wait. The real
-// design's resolved default is 5-15 minutes (components/session-coordinator.md);
-// 30s here is a dev-loop convenience, not a design change. Exported so a
-// gateway's own KeepAlive cadence (mobile/conn.go) can be derived as a
-// fraction of it rather than hardcoding a second, possibly-stale constant
-// that has to be remembered to move in lockstep with this one.
 const IdleTTL = 30 * time.Second
 
-// CoordinatorInput starts (or is ignored by, if the workflow already exists —
-// SignalWithStart handles that) a Session Coordinator.
 type CoordinatorInput struct {
-	SessionKey string `json:"session_key"`
-	// ParentSessionKey — gateway.md's "Resolved: Multi-Session Channels".
-	// Set ONLY by the Gateway's own genuine genesis check (its sessions-table
-	// INSERT's RowsAffected — never re-derived here), so this workflow can
-	// trust its mere presence as proof this is genuinely this session_key's
-	// first-ever execution, safe to act on unconditionally rather than
-	// needing its own genesis check. A later restart of this SAME session
-	// (idleTTL, SignalWithStart's ALLOW_DUPLICATE reuse) never carries this
-	// — the Gateway only sets it once, at true genesis — so seeding never
-	// re-fires on an ordinary restart.
+	SessionKey       string `json:"session_key"`
 	ParentSessionKey string `json:"parent_session_key,omitempty"`
-	// ConnectionID — types.TurnInput's own doc comment has the full detail.
-	// Unlike ParentSessionKey, this is NOT gated to true genesis: the
-	// Gateway sets it on every SignalWithStart call, so it's re-supplied
-	// correctly both on a session's real first message and on an ordinary
-	// idle-timeout coordinator restart (Temporal only consumes these
-	// start-args on whichever call actually starts a fresh execution,
-	// whatever the reason).
-	ConnectionID string `json:"connection_id,omitempty"`
-	// TenantSlug — docs/components/multi-tenancy.md's "Resolved: Shared
-	// Temporal Namespace, Per-Tenant Task Queues" (2026-09-26). Set on every
-	// SignalWithStart call (like ConnectionID, not gated to genesis) —
-	// routes this workflow's own activity dispatches (SeedChildSessionContext,
-	// GetMaxTurnSeq) and every TurnWorkflow/WriteMemoryWorkflow it starts to
-	// this tenant's own tenant-worker queue, never another tenant's.
-	TenantSlug string `json:"tenant_slug,omitempty"`
+	ConnectionID     string `json:"connection_id,omitempty"`
+	TenantSlug       string `json:"tenant_slug,omitempty"`
+	// Continue-as-new carries live skill state. An unfinished skill never idles out.
+	State *types.ConversationState `json:"state,omitempty"`
 }
 
-// CoordinatorWorkflow is the long-lived, nearly-stateless control-plane
-// workflow: workflow ID = session key. It holds only a pointer to the
-// currently-running Turn Workflow (if any) and a turn-sequence counter — no
-// conversation content (components/session-coordinator.md).
+type queuedChatMessage struct {
+	payload     types.SignalPayload
+	initiatedBy string
+}
+
+// CoordinatorWorkflow owns user selection and skill lifecycle. Every unsolicited
+// message goes to ordinary chat; bounded skill steps accept explicit commands.
+// Only the one active chat turn may deliver messages to the user.
 func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 	ctx = WithTenantTaskQueue(ctx, input.TenantSlug)
+	ao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 3}}
+	actx := workflow.WithActivityOptions(ctx, ao)
 	logger := workflow.GetLogger(ctx)
-	logger.Info("coordinator started", "session_key", input.SessionKey)
-
-	// gateway.md's "Resolved: Multi-Session Channels" — LCM-copy genesis
-	// context injection. Best-effort, same fire-and-forget tolerance as
-	// Persist/Deliver's own end-of-turn bookkeeping calls elsewhere in this
-	// codebase: a failed seed means this child session just starts with no
-	// injected parent context (the pre-this-feature behavior), not a hard
-	// failure of the whole session.
 	if input.ParentSessionKey != "" {
-		sao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
-		sctx := workflow.WithActivityOptions(ctx, sao)
-		if err := workflow.ExecuteActivity(sctx, "SeedChildSessionContext", input.ParentSessionKey, input.SessionKey).Get(sctx, nil); err != nil {
-			logger.Error("failed to seed child session context", "session_key", input.SessionKey, "parent_session_key", input.ParentSessionKey, "error", err)
+		if err := workflow.ExecuteActivity(actx, "SeedChildSessionContext", input.ParentSessionKey, input.SessionKey).Get(ctx, nil); err != nil {
+			return err
+		}
+		input.ParentSessionKey = ""
+	}
+	state := types.ConversationState{Mode: "chat"}
+	if input.State != nil {
+		state = *input.State
+	} else {
+		if err := workflow.ExecuteActivity(actx, "LoadSessionMode", input.SessionKey).Get(ctx, &state.Mode); err != nil {
+			return err
 		}
 	}
-
-	// Seed turnSeq from the real Postgres-backed maximum rather than always
-	// starting at 0 — a fresh CoordinatorWorkflow execution (workflow ID =
-	// session key, so this runs every time a prior execution idled out and a
-	// later message starts a new one) otherwise reminted turn:1 on every
-	// restart, colliding with turns the session already had. The Coordinator
-	// can't query Postgres directly (would break the workflow determinism
-	// boundary), so GetMaxTurnSeq does that lookup on its behalf, mirroring
-	// cmd/starter/main.go's own client-side prediction of this same value.
-	var maxTurnSeq int
-	gao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA}
-	gctx := workflow.WithActivityOptions(ctx, gao)
-	if err := workflow.ExecuteActivity(gctx, "GetMaxTurnSeq", input.SessionKey).Get(gctx, &maxTurnSeq); err != nil {
-		logger.Error("failed to look up max turn seq, starting from 0", "session_key", input.SessionKey, "error", err)
-		maxTurnSeq = 0
+	var turnSeq int
+	if err := workflow.ExecuteActivity(actx, "GetMaxTurnSeq", input.SessionKey).Get(ctx, &turnSeq); err != nil {
+		return err
 	}
-	turnSeq := maxTurnSeq
-	// The active unit of work: one TurnWorkflow (startTurn starts it, we hold its
-	// future). nil / not-active between turns.
-	var workHandle workflow.ChildWorkflowFuture
-	var workID string
-	workActive := false
+	if err := workflow.SetQueryHandler(ctx, conversationStateQuery, func() (types.ConversationState, error) { return state, nil }); err != nil {
+		return err
+	}
 
-	// docs/05-architecture-domain-control-loops.md — this session's own
-	// active mode, set/cleared exclusively by tools.switch_mode's own SetMode
-	// signal (never inferred from a turn's ordinary completion). Read only
-	// at the two places below that decide what to START for a brand-new
-	// message — never consulted while workActive (an already-running turn
-	// or mode-turn just gets the message forwarded into it, same as always,
-	// regardless of what mode currently says).
-	mode := chatMode
-
-	signalChan := workflow.GetSignalChannel(ctx, NewMessageSignalName)
-	var pendingSignal *types.SignalPayload
-	haveSignal := false
-
-	// docs/components/proactivity.md — a fired IntentionWorkflow wakes the
-	// coordinator here. Handled as a sibling of NewMessage: no active turn →
-	// start a proactive turn from a synthesised seed; active turn → fold the
-	// objective in as a follow-up and let the live turn place it.
-	wakeChan := workflow.GetSignalChannel(ctx, WakeSignalName)
-	var pendingWake *types.WakePayload
-	haveWake := false
-
-	// docs/components/gateway/first-party-plan.md's cancel/stop primitive —
-	// its own signal (never a NewMessage payload, see CancelSignalName's own
-	// doc comment). No active turn means nothing to cancel — a plain no-op,
-	// never starts one the way a real NewMessage would.
-	cancelChan := workflow.GetSignalChannel(ctx, CancelSignalName)
-	haveCancel := false
-
-	// docs/components/gateway/first-party-plan.md's cross-replica presence —
-	// KeepAliveSignalName's own doc comment has the full reasoning. Widens
-	// the idle-exit condition below; needs no forwarding, no payload, no
-	// tracking of who sent it.
-	keepAliveChan := workflow.GetSignalChannel(ctx, KeepAliveSignalName)
-	haveKeepAlive := false
-
-	// SetModeSignalName's own doc comment (turn.go) has the full reasoning.
-	// Updated directly in the receive callback below, not staged like
-	// pendingSignal/pendingWake — there's no forwarding decision to make
-	// afterward, just a variable to update before the next dispatch choice.
-	setModeChan := workflow.GetSignalChannel(ctx, SetModeSignalName)
-	haveSetMode := false
-
-	for {
-		// Were we actually idle-waiting on entry to this iteration? Only then
-		// can the idle timer be what wakes us — a turn completing (which also
-		// clears workActive, below) must NOT be mistaken for an idle timeout,
-		// or the coordinator exits the instant every turn ends and a follow-up
-		// message can never continue an in-progress task-run. The guard gives a
-		// real post-turn grace window (idleTTL).
-		wasIdle := !workActive
-		idleTimerCtx, cancelIdleTimer := workflow.WithCancel(ctx)
-		idleTimer := workflow.NewTimer(idleTimerCtx, IdleTTL)
-
-		sel := workflow.NewSelector(ctx)
-		sel.AddReceive(signalChan, func(c workflow.ReceiveChannel, more bool) {
-			var payload types.SignalPayload
-			c.Receive(ctx, &payload)
-			pendingSignal = &payload
-			haveSignal = true
-		})
-		sel.AddReceive(wakeChan, func(c workflow.ReceiveChannel, more bool) {
-			var w types.WakePayload
-			c.Receive(ctx, &w)
-			pendingWake = &w
-			haveWake = true
-		})
-		sel.AddReceive(cancelChan, func(c workflow.ReceiveChannel, more bool) {
-			var ignored struct{}
-			c.Receive(ctx, &ignored)
-			haveCancel = true
-		})
-		sel.AddReceive(keepAliveChan, func(c workflow.ReceiveChannel, more bool) {
-			var ignored struct{}
-			c.Receive(ctx, &ignored)
-			haveKeepAlive = true
-		})
-		sel.AddReceive(setModeChan, func(c workflow.ReceiveChannel, more bool) {
-			var newMode string
-			c.Receive(ctx, &newMode)
-			if newMode == "" {
-				newMode = chatMode
+	var chat workflow.ChildWorkflowFuture
+	var chatID string
+	var stepCancel workflow.CancelFunc
+	var step workflow.ChildWorkflowFuture
+	commands := workflow.NewMutex(ctx)
+	changed := workflow.NewBufferedChannel(ctx, 1)
+	var pending []queuedChatMessage
+	var notices []queuedChatMessage
+	if err := workflow.SetUpdateHandler(ctx, skillCommandUpdate, func(uctx workflow.Context, toolCallID string) (types.ConversationState, error) {
+		defer func() {
+			notify := workflow.NewSelector(ctx)
+			notify.AddSend(changed, true, func() {})
+			notify.AddDefault(func() {})
+			notify.Select(ctx)
+		}()
+		if err := commands.Lock(uctx); err != nil {
+			return state, err
+		}
+		defer commands.Unlock()
+		var command types.SkillCommand
+		in := types.SkillCommandInput{ToolCallID: toolCallID, SessionKey: input.SessionKey, State: state}
+		if err := workflow.ExecuteActivity(workflow.WithActivityOptions(uctx, ao), "PrepareSkillCommand", in).Get(uctx, &command); err != nil {
+			return state, err
+		}
+		if command.AlreadyApplied {
+			return state, nil
+		}
+		if state != in.State {
+			return state, temporal.NewNonRetryableApplicationError("skill state changed during validation; reread snapshot", "SkillStale", nil)
+		}
+		if step != nil {
+			if command.Action != "cancel" {
+				return state, temporal.NewNonRetryableApplicationError("skill step is running; cancel it before amending", "SkillBusy", nil)
 			}
-			mode = newMode
-			haveSetMode = true
-		})
-		if workActive {
-			sel.AddFuture(workHandle, func(f workflow.Future) {
-				var result types.TurnResult
-				err := f.Get(ctx, &result)
-				if err != nil {
-					logger.Error("turn workflow ended with error", "turn_id", workID, "error", err)
-					// docs/components/turn-pipeline.md, "Progress watchdog" —
-					// a TurnWorkflow killed by its WorkflowRunTimeout (or any
-					// other hard failure) cannot run failTurn, so nothing has
-					// told the user. The coordinator holds the future, so it
-					// is the one place that still can: best-effort fallback
-					// notice, same tolerance as every other bookkeeping call
-					// here.
-					deliverWedgedFallback(ctx, input.SessionKey, input.ConnectionID, workID)
-				} else {
-					logger.Info("turn workflow completed", "turn_id", workID, "stop_reason", result.StopReason)
-				}
-				workActive = false
-				workID = ""
-				workHandle = nil
-				// docs/components/gateway/discord-voice.md's "Resolved:
-				// Overlapping Speech / Interrupts" gap, closed 2026-08-25:
-				// a signal that arrived while this turn's connection-based
-				// delivery was still in flight got cancelled and handed
-				// back here (TurnWorkflow's own signal-drain queue is
-				// gone along with that execution) rather than lost.
-				// Treated exactly like a freshly-arrived signal — the very
-				// next loop iteration starts a brand-new turn with it, the
-				// same path an ordinary NewMessage signal already takes.
-				if result.InterruptedDuringDelivery != nil {
-					pendingSignal = result.InterruptedDuringDelivery
-					haveSignal = true
-				}
-			})
+			stepCancel()
+			state.Skill.Phase = "cancelling"
 		} else {
-			sel.AddFuture(idleTimer, func(f workflow.Future) {
-				// no-op callback; presence in the selector is what lets the
-				// idle path win the select below
+			switch command.Action {
+			case "submit", "amend":
+				state.Skill = types.SkillState{Kind: state.Mode, ContentID: command.ContentID, Revision: state.Skill.Revision + 1, Phase: "awaiting_confirmation"}
+			case "cancel":
+				if state.Skill.Phase == "completed" {
+					return state, temporal.NewNonRetryableApplicationError("completed work cannot be cancelled", "SkillCompleted", nil)
+				}
+				state.Skill.Phase = "cancelled"
+			case "confirm":
+				state.Skill.Phase = "running"
+				state.Skill.StepID = toolCallID
+				cctx, cancel := workflow.WithCancel(ctx)
+				stepCancel = cancel
+				cctx = workflow.WithChildOptions(cctx, workflow.ChildWorkflowOptions{WorkflowID: toolCallID + ":skill", ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL, WorkflowRunTimeout: 10 * time.Minute, WaitForCancellation: true})
+				step = workflow.ExecuteChildWorkflow(cctx, SkillStepWorkflow, types.SkillStepInput{StepID: toolCallID, ContentID: state.Skill.ContentID, Kind: state.Skill.Kind, TenantSlug: input.TenantSlug, SessionKey: input.SessionKey})
+				if err := step.GetChildWorkflowExecution().Get(uctx, nil); err != nil {
+					step, stepCancel = nil, nil
+					state.Skill.Phase = "failed"
+					return state, err
+				}
+			default:
+				return state, temporal.NewNonRetryableApplicationError("invalid skill action", "SkillCommand", nil)
+			}
+		}
+		if err := workflow.ExecuteActivity(workflow.WithActivityOptions(uctx, ao), "RecordSkillCommand", toolCallID, state).Get(uctx, nil); err != nil {
+			return state, err
+		}
+		return state, nil
+	}); err != nil {
+		return err
+	}
+
+	newMessage := workflow.GetSignalChannel(ctx, NewMessageSignalName)
+	wake := workflow.GetSignalChannel(ctx, WakeSignalName)
+	cancelSignal := workflow.GetSignalChannel(ctx, CancelSignalName)
+	keepAlive := workflow.GetSignalChannel(ctx, KeepAliveSignalName)
+	for {
+		// Skill completion must not interrupt a user's active confirmation or
+		// delivery. Only ordinary chat delivers the queued notification.
+		if chat == nil && len(pending) == 0 && len(notices) > 0 {
+			pending, notices = notices, nil
+		}
+		if len(pending) > 0 {
+			queued := pending[0]
+			payload := queued.payload
+			pending = pending[1:]
+			// Selection is applied only by this authenticated user-input path. The
+			// activity recognizes registered explicit commands; models cannot set it.
+			if payload.Message.SpeakerID != "" {
+				if err := commands.Lock(ctx); err != nil {
+					return err
+				}
+				var mode string
+				err := workflow.ExecuteActivity(actx, "ApplyUserSelection", types.UserSelectionInput{SessionKey: input.SessionKey, Message: payload.Message}).Get(ctx, &mode)
+				if err == nil && mode != "" && mode != state.Mode {
+					state.Mode = mode
+					state.Skill.Revision++
+					if stepCancel != nil {
+						stepCancel()
+						state.Skill.Phase = "cancelling"
+					} else {
+						state.Skill = types.SkillState{Revision: state.Skill.Revision}
+					}
+				} else if err != nil {
+					logger.Error("user selection failed", "error", err)
+				}
+				commands.Unlock()
+			}
+			if chat != nil {
+				if err := workflow.SignalExternalWorkflow(ctx, chatID, "", NewMessageSignalName, payload).Get(ctx, nil); err != nil {
+					// Preserve a message that raced child completion and consume completion
+					// before trying to start the next chat turn.
+					pending = append([]queuedChatMessage{queued}, pending...)
+				} else {
+					continue
+				}
+			} else {
+				turnSeq++
+				var err error
+				chat, chatID, err = startTurn(ctx, input.TenantSlug, input.SessionKey, input.ConnectionID, turnSeq, payload.Message, queued.initiatedBy)
+				if err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		// Closing while updates or signals are queued would discard durable input.
+		quiescent := chat == nil && step == nil && len(pending) == 0 && len(notices) == 0 && workflow.AllHandlersFinished(ctx) &&
+			newMessage.Len() == 0 && wake.Len() == 0 && cancelSignal.Len() == 0 && keepAlive.Len() == 0 && changed.Len() == 0
+		if quiescent && workflow.GetInfo(ctx).GetContinueAsNewSuggested() {
+			input.State = &state
+			return workflow.NewContinueAsNewError(ctx, CoordinatorWorkflow, input)
+		}
+		tctx, cancelTimer := workflow.WithCancel(ctx)
+		sel := workflow.NewSelector(ctx)
+		idle := false
+		sel.AddReceive(changed, func(c workflow.ReceiveChannel, _ bool) { var v bool; c.Receive(ctx, &v) })
+		sel.AddReceive(newMessage, func(c workflow.ReceiveChannel, _ bool) {
+			var p types.SignalPayload
+			c.Receive(ctx, &p)
+			pending = append(pending, queuedChatMessage{payload: p, initiatedBy: "user"})
+		})
+		sel.AddReceive(wake, func(c workflow.ReceiveChannel, _ bool) {
+			var p types.WakePayload
+			c.Receive(ctx, &p)
+			pending = append(pending, queuedChatMessage{payload: types.SignalPayload{Message: types.Message{Role: "user", Content: proactiveSeedText(p)}}, initiatedBy: "intn:" + p.IntentionID})
+		})
+		sel.AddReceive(keepAlive, func(c workflow.ReceiveChannel, _ bool) { var v struct{}; c.Receive(ctx, &v) })
+		sel.AddReceive(cancelSignal, func(c workflow.ReceiveChannel, _ bool) {
+			var v struct{}
+			c.Receive(ctx, &v)
+			if stepCancel != nil {
+				stepCancel()
+				state.Skill.Phase = "cancelling"
+			}
+			if chat != nil {
+				_ = workflow.SignalExternalWorkflow(ctx, chatID, "", CancelSignalName, v).Get(ctx, nil)
+			}
+		})
+		if chat != nil {
+			sel.AddFuture(chat, func(f workflow.Future) {
+				var result types.TurnResult
+				if err := f.Get(ctx, &result); err != nil {
+					deliverWedgedFallback(ctx, input.SessionKey, input.ConnectionID, chatID)
+				}
+				chat, chatID = nil, ""
+				if result.InterruptedDuringDelivery != nil {
+					pending = append(pending, queuedChatMessage{payload: *result.InterruptedDuringDelivery, initiatedBy: "user"})
+				}
 			})
+		}
+		if step != nil {
+			sel.AddFuture(step, func(f workflow.Future) {
+				var out types.SkillObservation
+				err := f.Get(ctx, &out)
+				state.Skill.Phase = "failed"
+				if err == nil && out.Complete {
+					state.Skill.Phase = "completed"
+				}
+				if temporal.IsCanceledError(err) {
+					state.Skill.Phase = "cancelled"
+				}
+				step, stepCancel = nil, nil
+				notice := fmt.Sprintf("[Skill step finished: kind=%s content_id=%s step_id=%s phase=%s. Report this outcome without conflating it with a newer proposal. Failed/cancelled work may have unverified external effects; do not claim success or automatic rollback. This is a system notification, not user input or authorization.]", state.Skill.Kind, state.Skill.ContentID, state.Skill.StepID, state.Skill.Phase)
+				notices = append(notices, queuedChatMessage{payload: types.SignalPayload{Message: types.Message{Role: "user", Content: notice}}, initiatedBy: "system"})
+			})
+		}
+		// Keep the latest proposal/outcome in durable workflow state until the
+		// user clears it by selecting another mode. Continue-as-new bounds history.
+		if quiescent && state.Skill.ContentID == "" {
+			sel.AddFuture(workflow.NewTimer(tctx, IdleTTL), func(workflow.Future) { idle = true })
 		}
 		sel.Select(ctx)
-		cancelIdleTimer()
-
-		if wasIdle && !workActive && !haveSignal && !haveWake && !haveCancel && !haveKeepAlive && !haveSetMode {
-			// The idle timer fired while we were genuinely idle (no turn just
-			// completed into this branch, and nothing has sent a KeepAlive
-			// recently either — first-party-plan.md's cross-replica
-			// presence: as long as some gateway connection keeps one
-			// arriving, this branch never fires, so WriteMemoryWorkflow
-			// below waits for "nobody needs this any more," not just "the
-			// conversation went quiet") — self-terminate per the resolved
-			// TTL design (components/session-coordinator.md). A fresh
-			// SignalWithStart recreates this workflow on demand. A turn
-			// finishing instead falls through to the `!haveSignal` continue
-			// below, which loops back and arms a fresh idle timer — so there IS
-			// a real post-turn grace window for a continuation message.
-			logger.Info("coordinator idle timeout, exiting", "session_key", input.SessionKey)
-
-			// docs/components/memory-slot.md's "Resolved: Write-Path
-			// Construction" correction — session completion (this idle
-			// timeout) is one of the two boundaries agent-brain's own
-			// mining-pipeline-redesign contract asks for (the other is a
-			// real hard context compaction, turn.go's own compressionState
-			// branch). Detached child, same ABANDON reasoning turn.go's
-			// WriteMemoryWorkflow doc comment already gives — this
-			// workflow returns right after, doesn't wait for the write to
-			// finish, only for the child to have started.
-			wcwo := workflow.ChildWorkflowOptions{
-				WorkflowID:        input.SessionKey + ":write-memory:" + workflow.GetInfo(ctx).WorkflowExecution.RunID,
-				ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON,
-			}
-			wcctx := workflow.WithChildOptions(ctx, wcwo)
-			wmFuture := workflow.ExecuteChildWorkflow(wcctx, WriteMemoryWorkflow, input.SessionKey, input.TenantSlug)
-			_ = wmFuture.GetChildWorkflowExecution().Get(wcctx, nil)
-
+		cancelTimer()
+		if idle && len(pending) == 0 && len(notices) == 0 && workflow.AllHandlersFinished(ctx) && step == nil && state.Skill.ContentID == "" &&
+			newMessage.Len() == 0 && wake.Len() == 0 && changed.Len() == 0 {
+			cctx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: input.SessionKey + ":write-memory:" + workflow.GetInfo(ctx).WorkflowExecution.RunID, ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_ABANDON})
+			_ = workflow.ExecuteChildWorkflow(cctx, WriteMemoryWorkflow, input.SessionKey, input.TenantSlug).GetChildWorkflowExecution().Get(ctx, nil)
 			return nil
 		}
-
-		if !haveSignal && !haveWake && !haveCancel && !haveKeepAlive && !haveSetMode {
-			// Turn completion path looped back around with nothing new yet;
-			// go wait again.
-			continue
-		}
-
-		// SetMode has already done its one job (updating `mode` above,
-		// synchronously in its own receive callback) — nothing further to
-		// act on this tick beyond that, and definitely not a reason to start
-		// or forward anything on its own. Cleared here, same as
-		// haveKeepAlive at the bottom, so it doesn't linger and get
-		// mis-read as "still pending" next iteration.
-		haveSetMode = false
-
-		// A cancel takes priority over everything else landing the same tick
-		// — an explicit stop shouldn't be starved behind processing one more
-		// message first. Nothing is lost either way: a real message that
-		// also arrived this tick stays in pendingSignal/haveSignal and is
-		// handled next iteration, same as it would be for a wake.
-		if haveCancel {
-			haveCancel = false
-			if workActive {
-				if err := workflow.SignalExternalWorkflow(ctx, workID, "", CancelSignalName, struct{}{}).Get(ctx, nil); err != nil {
-					logger.Error("failed to forward cancel to active turn", "turn_id", workID, "error", err)
-				}
-			}
-			// No active turn: nothing to cancel, deliberately a no-op —
-			// never starts one the way a real NewMessage would.
-			continue
-		}
-
-		// A real inbound message takes priority over a proactive wake — if both
-		// landed, handle the message this iteration and the wake next.
-		if haveSignal {
-			payload := *pendingSignal
-			pendingSignal = nil
-			haveSignal = false
-
-			if workActive {
-				// Forward into the running Turn Workflow rather than starting a
-				// second one — this IS the distributed active-session guard
-				// (02-architecture-temporal-execution.md §2).
-				if err := workflow.SignalExternalWorkflow(ctx, workID, "", NewMessageSignalName, payload).Get(ctx, nil); err != nil {
-					logger.Error("failed to forward signal to active turn", "turn_id", workID, "error", err)
-				}
-				continue
-			}
-
-			turnSeq++
-			h, id, err := startTurn(ctx, input.TenantSlug, input.SessionKey, input.ConnectionID, turnSeq, payload.Message, "user", turnWorkflowTypeName(mode))
-			if err != nil {
-				logger.Error("startTurn failed", "session_key", input.SessionKey, "error", err)
-				continue
-			}
-			workHandle, workID = h, id
-			workActive = true
-			continue
-		}
-
-		if haveWake {
-			// docs/components/proactivity.md — a fired intention.
-			wake := *pendingWake
-			pendingWake = nil
-			haveWake = false
-
-			if workActive {
-				// Fold the objective into the live turn as an ordinary follow-up;
-				// that turn's model decides whether/where to surface it — it has the
-				// live conversation, this workflow does not.
-				fold := types.SignalPayload{Message: types.Message{Role: "user", Content: proactiveFoldText(wake)}}
-				if err := workflow.SignalExternalWorkflow(ctx, workID, "", NewMessageSignalName, fold).Get(ctx, nil); err != nil {
-					logger.Error("failed to fold wake into active turn", "turn_id", workID, "intention_id", wake.IntentionID, "error", err)
-				}
-				continue
-			}
-
-			turnSeq++
-			h, id, err := startTurn(ctx, input.TenantSlug, input.SessionKey, input.ConnectionID, turnSeq,
-				types.Message{Role: "user", Content: proactiveSeedText(wake)}, "intn:"+wake.IntentionID, turnWorkflowTypeName(mode))
-			if err != nil {
-				logger.Error("startTurn (proactive) failed", "intention_id", wake.IntentionID, "error", err)
-				continue
-			}
-			workHandle, workID = h, id
-			workActive = true
-			continue
-		}
-
-		// The only remaining possibility per the continue-guard above —
-		// nothing to do beyond having looped: the idle timer was already
-		// cancelled on entry and gets re-armed fresh next iteration, which
-		// is the whole mechanism (idle-exit becomes N seconds from the LAST
-		// KeepAlive, not from session start). Lowest priority of the four
-		// signal kinds on purpose — it never delays a real cancel, message,
-		// or wake even by one iteration.
-		haveKeepAlive = false
 	}
 }
 
-// proactiveSeedText builds the seed "user" message (role='user', seq=0 — the
-// turn's first ModelCall reads it as the request; turns.initiated_by carries
-// the real provenance) for a proactive turn started with no conversation in
-// flight.
 func proactiveSeedText(w types.WakePayload) string {
-	s := "[Proactive check — you set this intention for yourself; the user did not send this message]\n\n" + w.Objective
-	if w.Why != "" {
-		s += "\n\n" + w.Why
-	}
-	return s + "\n\nDecide whether and how to surface this to the user now. Check whatever you need to " +
-		"first. If nothing is worth saying right now, end the turn without responding."
-}
-
-// proactiveFoldText builds the follow-up message when a wake arrives while a
-// turn is already running — the live turn's model decides placement.
-func proactiveFoldText(w types.WakePayload) string {
-	s := "[Proactive note — surface this to the user if and when it fits the conversation]\n\n" + w.Objective
-	if w.Why != "" {
-		s += "\n\n" + w.Why
-	}
-	return s
+	return "[Proactive check — the user did not send this message]\n" + w.Objective + "\n" + w.Why + "\nDecide whether anything is worth reporting."
 }
