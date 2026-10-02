@@ -61,7 +61,7 @@ The tension:
 
 **Deliberately deferred, at the user's direction**: prompt tuning is its own real analysis task (understanding exactly why this specific instruction shape produces this behavior across a range of real conversations, not just the one traced here, and fitting a change that doesn't regress the `declare_next_step_hint` mechanism's own purpose), not something to bolt on as a quick reaction to one traced case.
 
-**To revisit**: a real prompt-engineering pass on `DEFAULT_SYSTEM_PROMPT` (`activities/activities/llm.py`) — likely separating "you must always end with a plain-text summary" from the `declare_next_step_hint` instruction more forcefully, or restructuring how/when that meta-tool gets requested. Also worth deciding, once a fix direction is chosen: should the *symptom* (frontend mislabeling a content-empty completed turn as "cancelled") get fixed independently in the meantime, since it's user-visibly wrong regardless of the root cause's timeline?
+**To revisit**: a real prompt-engineering pass on `DEFAULT_SYSTEM_PROMPT` (`tenant-worker/tenant_worker/llm.py`) — likely separating "you must always end with a plain-text summary" from the `declare_next_step_hint` instruction more forcefully, or restructuring how/when that meta-tool gets requested. Also worth deciding, once a fix direction is chosen: should the *symptom* (frontend mislabeling a content-empty completed turn as "cancelled") get fixed independently in the meantime, since it's user-visibly wrong regardless of the root cause's timeline?
 
 ---
 

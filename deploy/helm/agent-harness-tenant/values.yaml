@@ -66,7 +66,7 @@ tenantWorker:
     path: "/metrics"
 
 # -- The Web platform's inbound/outbound path (docs/components/gateway.md,
-# docs/components/gateway/web.md) — workflows/cmd/gateway. One per tenant,
+# docs/components/gateway/web.md) — gateway. One per tenant,
 # same isolation reasoning as tenantWorker above: this process talks
 # directly to this tenant's own Postgres, so it is never shared across
 # tenants. Disabled by default — a tenant with no Web client configured yet
@@ -116,7 +116,7 @@ gateway:
     # -- REQUIRED when gateway.enabled=true. The browser app's own public
     # origin (agent-web, e.g. "https://mission-control.nighthawklabs.org") —
     # NOT this tenant's own gateway/router hostname. Wired into
-    # GATEWAY_WEB_ALLOWED_ORIGINS (workflows/internal/gateway/web/web.go's
+    # GATEWAY_WEB_ALLOWED_ORIGINS (gateway/internal/web/web.go's
     # webSocketOriginAllowed). 2026-09-27: this was never set anywhere in
     # this chart or in buildTenantValues, and /web/ws's own same-host
     # fallback (`u.Host == r.Host`) can never match in this shared-router
@@ -146,8 +146,8 @@ gateway:
     # bots:
     #   - botToken: ""
     bots: []
-  # -- Optional but required for any real voice call — workflows/cmd/
-  # gateway/voice_stt_tts.go's SPEECH_API_KEY, the litellm-service API key
+  # -- Optional but required for any real voice call — gateway/
+  # voice_stt_tts.go's SPEECH_API_KEY, the litellm-service API key
   # Gateway's own STT/TTS calls (transcribeAudio/synthesizeSpeechPCM)
   # authenticate with. Real, live 401 confirmed (2026-08-26) before this
   # value existed at all — nothing ever wired it, so every voice turn's
@@ -158,8 +158,8 @@ gateway:
   # treatment as gateway.discord.bots above. Do NOT commit a real value
   # here; set it per tenant in deploy/helm/tenants/<tenant>.yaml.
   speechAPIKey: ""
-  # -- Optional but required for any real voice call — workflows/cmd/
-  # gateway/voice_stt_tts.go's TTS_VOICE, a Kokoro voice name
+  # -- Optional but required for any real voice call — gateway/
+  # voice_stt_tts.go's TTS_VOICE, a Kokoro voice name
   # (voice_stt_tts.go's own comment: "deliberately has no default — Kokoro's
   # own voice-name convention isn't obviously guessable"). Real, live 500
   # confirmed (2026-08-26) once speechAPIKey (above) was fixed: litellm's
@@ -241,7 +241,7 @@ gateway:
 # service or worker — mcp-hub itself now owns connection management end to
 # end (its own Postgres-backed `connections` table, POST/DELETE
 # /api/connections, GET /api/catalog), reached directly through the shared
-# router's /connections/ proxy (workflows/internal/router/core/tenant.go's
+# router's /connections/ proxy (router/internal/core/tenant.go's
 # McpHubBaseURL()). Nothing to configure here; see the mcp-hub subchart's
 # own values below instead.
 
@@ -264,9 +264,9 @@ postgresql:
   # -- 2026-09-27: this tenant already gets its own dedicated Kubernetes
   # namespace, so a release-name/tenant-slug prefix on top of "postgresql" is
   # pure redundancy, not a real collision guard — drop it. Every other
-  # template/value in this chart, plus workflows/internal/router/core/
-  # tenant.go's endpoint builders and workflows/internal/automation/
-  # activities/helm.go's buildTenantValues, assumes this exact bare name.
+  # template/value in this chart, plus router/internal/core/
+  # tenant.go's endpoint builders and automation/activities/
+  # helm.go's buildTenantValues, assumes this exact bare name.
   fullnameOverride: "postgresql"
   # -- Custom Postgres image: a Bitnami-postgresql-compatible build with the
   # pgvector and timescaledb extensions baked in. Because it is not one of
@@ -357,7 +357,7 @@ agentBrainRetain:
   # commit a real value here.
   apiKey: ""
 
-# -- Real LLM config for ModelCall (activities/activities/llm.py). Only
+# -- Real LLM config for ModelCall (tenant-worker/tenant_worker/llm.py). Only
 # needed for turns with no _test_scripted_responses fixture row — pure
 # fixture-based usage (e.g. workflows/scenarios/) never touches this, so
 # it's fine to leave disabled for local/demo deployments.
@@ -392,7 +392,7 @@ llm:
   # etc.) — they all speak the same protocol and differ only in
   # baseURL + model name. "anthropic" is Anthropic's native Messages
   # API (a separate SDK, different request/response shape, handled by
-  # activities/activities/providers/anthropic_provider.py). Any tier
+  # tenant-worker/tenant_worker/providers/anthropic_provider.py). Any tier
   # with a non-empty `model` must also set `provider` and `apiKey`;
   # `baseURL` is required for provider=openai and optional for
   # provider=anthropic (that SDK has its own default).
@@ -465,7 +465,7 @@ agent-brain:
   # "agent-brain" — fullnameOverride alone wouldn't affect that label.
   # Referenced directly (not computed) by
   # templates/tenant-worker-deployment.yaml's AGENT_BRAIN_RETAIN_BASE_URL and
-  # workflows/internal/router/core/tenant.go's AgentBrainBaseURL.
+  # router/internal/core/tenant.go's AgentBrainBaseURL.
   nameOverride: "memory"
   fullnameOverride: "memory"
   image:
@@ -492,7 +492,7 @@ agent-brain:
     # generating a random per-tenant string for it — that could never work,
     # since this litellm-service has no per-tenant virtual-key system, only
     # this one static master key (core namespace's litellm-config
-    # ConfigMap). workflows/internal/automation/activities/helm.go's
+    # ConfigMap). automation/activities/helm.go's
     # buildTenantValues now only overrides this when the requester actually
     # opted into an external endpoint, so this default is what most tenants
     # actually run on.
@@ -531,7 +531,7 @@ agent-brain:
   # read — found by cross-checking against deploy/helm/tenants/abishekk.yaml
   # (which had always set the correct, unnested path) while auditing why
   # self-serve onboarding's generated values were missing this entirely
-  # (workflows/internal/automation/activities/helm.go).
+  # (automation/activities/helm.go).
   llm:
     baseURL: ""
     model: ""
@@ -616,7 +616,7 @@ mcp-hub:
   # >= 0.1.1 (see above). nameOverride kept alongside fullnameOverride so the
   # app.kubernetes.io/name label still reads "tools" too. Referenced directly
   # (not computed) by templates/tenant-worker-deployment.yaml's MCP_HUB_URL
-  # and EMBEDDING_API_KEY, and workflows/internal/router/core/tenant.go's
+  # and EMBEDDING_API_KEY, and router/internal/core/tenant.go's
   # McpHubBaseURL.
   nameOverride: "tools"
   fullnameOverride: "tools"

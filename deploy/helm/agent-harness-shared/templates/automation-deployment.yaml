@@ -1,12 +1,12 @@
 {{- if .Values.automation.enabled -}}
 {{- if not .Values.router.clerkIssuer }}
-{{- fail "router.clerkIssuer is required when automation.enabled=true — every tenant this worker provisions gets that same shared issuer written into its own gateway.web.clerkIssuer (workflows/internal/automation/activities/helm.go, cmd/automation/main.go's own CLERK_ISSUER check). Unlike the router (which can verify tokens with just clerkJwksUrl), this worker needs the literal issuer string to embed into each generated tenant's config — clerkJwksUrl alone does not substitute here." }}
+{{- fail "router.clerkIssuer is required when automation.enabled=true — every tenant this worker provisions gets that same shared issuer written into its own gateway.web.clerkIssuer (automation/activities/helm.go, cmd/automation/main.go's own CLERK_ISSUER check). Unlike the router (which can verify tokens with just clerkJwksUrl), this worker needs the literal issuer string to embed into each generated tenant's config — clerkJwksUrl alone does not substitute here." }}
 {{- end }}
 {{- if not .Values.router.allowedOrigins }}
-{{- fail "router.allowedOrigins is required when automation.enabled=true — every tenant this worker provisions gets it written into its own gateway.web.allowedOrigins (workflows/internal/automation/activities/helm.go, cmd/automation/main.go's own WEB_ORIGIN check), without which every browser's WebSocket upgrade to that tenant's gateway is silently rejected." }}
+{{- fail "router.allowedOrigins is required when automation.enabled=true — every tenant this worker provisions gets it written into its own gateway.web.allowedOrigins (automation/activities/helm.go, cmd/automation/main.go's own WEB_ORIGIN check), without which every browser's WebSocket upgrade to that tenant's gateway is silently rejected." }}
 {{- end }}
 {{- if not .Values.router.publicURL }}
-{{- fail "router.publicURL is required when automation.enabled=true — every tenant this worker provisions gets it written into its own mcp-hub.oauth.mcpHubBaseUrl (workflows/internal/automation/activities/helm.go, cmd/automation/main.go's own ROUTER_PUBLIC_URL check), without which that tenant's OAuth backends (e.g. Notion) complete consent against the wrong mcp-hub instance entirely." }}
+{{- fail "router.publicURL is required when automation.enabled=true — every tenant this worker provisions gets it written into its own mcp-hub.oauth.mcpHubBaseUrl (automation/activities/helm.go, cmd/automation/main.go's own ROUTER_PUBLIC_URL check), without which that tenant's OAuth backends (e.g. Notion) complete consent against the wrong mcp-hub instance entirely." }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment

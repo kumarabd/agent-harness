@@ -1,17 +1,25 @@
 .DEFAULT_GOAL := help
 
-# Builds and exports the three container images (deploy/docker/*.Dockerfile)
-# using Podman. Image names come from the two Helm charts' values.yaml files
-# (deploy/helm/agent-harness-shared for the loop worker, deploy/helm/
-# agent-harness-tenant for the tenant worker and gateway — split per
-# docs/components/multi-tenancy.md) rather than duplicated here, so
-# `helm install` always picks up exactly what this built without a
-# values.yaml edit, and they can't silently drift apart. Tags default the
-# same way, but can be overridden for all three images at once with
-# `make export TAG=<tag>` — handy for a one-off build that isn't meant to
-# match the checked-in values.yaml. All three Dockerfiles require the repo
+# Builds and exports container images (deploy/docker/*.Dockerfile) using
+# Podman. `build`/`export` (no target) cover the five images this repo
+# itself deploys and rebuilds routinely — loop-worker, tenant-worker,
+# gateway, router, automation. vad-sidecar is deliberately NOT part of
+# either: it changes rarely (a third-party model wrapper, not this repo's
+# own logic) and pulling in its own separate Python/ML base image on every
+# routine `make build` would slow that down for no benefit — build/export
+# it explicitly with `make build-vad-sidecar` / `make export-vad-sidecar`
+# when it actually needs rebuilding. Image names come from the two Helm
+# charts' values.yaml files (deploy/helm/agent-harness-shared for the loop
+# worker, deploy/helm/agent-harness-tenant for the tenant worker and
+# gateway — split per docs/components/multi-tenancy.md) rather than
+# duplicated here, so `helm install` always picks up exactly what this
+# built without a values.yaml edit, and they can't silently drift apart.
+# Tags default the same way, but can be overridden for all images at once
+# with `make export TAG=<tag>` — handy for a one-off build that isn't meant
+# to match the checked-in values.yaml. All Dockerfiles require the repo
 # root as their build context — see the comment at the top of each for why
-# (they COPY from workflows/ and/or activities/).
+# (they COPY from shared/, loop-worker/, gateway/, automation/, router/,
+# and/or tenant-worker/, depending on the image).
 
 SHARED_VALUES_FILE := deploy/helm/agent-harness-shared/values.yaml
 TENANT_VALUES_FILE := deploy/helm/agent-harness-tenant/values.yaml
@@ -85,6 +93,10 @@ help: ## Show this help
 	@echo "  router:        $(ROUTER_IMAGE)  ($(SHARED_VALUES_FILE))"
 	@echo "  automation:    $(AUTOMATION_IMAGE)  ($(SHARED_VALUES_FILE), automation.image)"
 	@echo
+	@echo "vad-sidecar is excluded from the plain 'build'/'export' targets —"
+	@echo "changes rarely and has its own ML base image; build/export it"
+	@echo "explicitly with build-vad-sidecar / export-vad-sidecar when needed."
+	@echo
 	@echo "Not covered here: infra/model/whisperlive/Dockerfile — a separate"
 	@echo "repo's own image (self-hosted third-party infra, not an"
 	@echo "agent-harness component), built directly with podman, no Makefile."
@@ -92,7 +104,7 @@ help: ## Show this help
 	@echo
 	@grep -E '^[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*##"}; {printf "  %-24s %s\n", $$1, $$2}'
 
-build: build-loop-worker build-tenant-worker build-gateway build-vad-sidecar build-router build-automation ## Build all six images
+build: build-loop-worker build-tenant-worker build-gateway build-router build-automation ## Build the five routinely-rebuilt images (not vad-sidecar — see build-vad-sidecar)
 
 build-loop-worker: ## Build the Go loop-worker image
 	podman build -f deploy/docker/loop-worker.Dockerfile -t $(LOOP_IMAGE) .
@@ -112,7 +124,7 @@ build-router: ## Build the Go router image
 build-automation: ## Build the Go automation (tenant onboarding) worker image
 	podman build -f deploy/docker/automation.Dockerfile -t $(AUTOMATION_IMAGE) .
 
-export: export-loop-worker export-tenant-worker export-gateway export-vad-sidecar export-router export-automation ## Build and export all six images as tars under $(EXPORT_DIR)
+export: export-loop-worker export-tenant-worker export-gateway export-router export-automation ## Build and export the five routinely-rebuilt images as tars under $(EXPORT_DIR) (not vad-sidecar — see export-vad-sidecar)
 
 export-loop-worker: build-loop-worker ## Build and export the loop-worker image
 	mkdir -p $(EXPORT_DIR)

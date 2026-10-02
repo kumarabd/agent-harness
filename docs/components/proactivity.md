@@ -236,7 +236,7 @@ activities. Delivery failure fails the turn and is surfaced. No channel fallback
 | intention provenance on work | `turns.initiated_by` (one column; `episodes.initiated_by` was moot from the start — that table was dropped) |
 | a proactive turn's seed | a `system`-role `messages` row |
 | preferences / quiet hours / "stop doing X" | agent-brain memory (already the store) |
-| engagement feedback | agent-brain memory (a deciding turn observing the follow-up writes it — same loop as skill confidence) |
+| engagement feedback | agent-brain memory (a deciding turn observing the follow-up writes it) |
 
 ### Degradation (no fallback)
 

@@ -6,8 +6,8 @@
 > "REVISION" section below routes project work through `PlanWorkflow` +
 > `request-pipeline/08-planning.md`'s PLAN.md checkpoints, and closes an
 > episode with one `RecordSkill` call — all three of those (`PlanWorkflow`,
-> the planning-turn machinery, `RecordSkill`/the skill subsystem) were deleted
-> by the turn-pipeline redesign and the skill-subsystem removal
+> the planning-turn machinery, and the learned-procedural-memory subsystem
+> `RecordSkill` belonged to) were deleted by the turn-pipeline redesign
 > (`turn-pipeline.md`, 2026-09-07…09.5). The underlying asks — a persistent
 > project workspace, Claude Code session continuity across delegations, a
 > build+deploy+verify step — are still reasonable and undecided; whatever
@@ -102,13 +102,15 @@ covers:
   outcome that decides deploy success;
 - operational gotchas.
 
-Ground truth lives here, versioned with the code. The skill store's role is
-*not* to duplicate this per project — it's to hold the **general** SWE
-procedure ("discover under /projects → read PROJECT.md → `code_task` for code
-changes → build → deploy → verify") and, after a successful deploy, the
-**learned operational specifics** the RL loop records (the flag that mattered,
-the step that's flaky, the wait that's too short). In-repo instructions +
-earned operational memory on top.
+Ground truth lives here, versioned with the code. The design below leaned on
+a learned-procedural-memory store's role as *not* duplicating this per
+project — holding the **general** SWE procedure ("discover under /projects →
+read PROJECT.md → `code_task` for code changes → build → deploy → verify")
+and, after a successful deploy, the **learned operational specifics** an RL
+loop would record (the flag that mattered, the step that's flaky, the wait
+that's too short). That store no longer exists in any form — whatever
+replaces it (per the banner above) still needs in-repo instructions plus
+some form of earned operational memory on top.
 
 #### `code_task` — `delegate_claude_code`, project-bound
 
@@ -177,8 +179,9 @@ Project work is a **Deliberate task** (`lane-model.md`) — no new workflow type
 - Its **plan ledger** (`08-planning.md`) is the task breakdown ("scaffold the
   workflow", "add the activity", "write the test", "build", "deploy", "verify").
 - `code_task`, `shell_exec`, and `deploy` are tools in the reason-act loop.
-- Recording it feeds the skill loop — the general SWE procedure and the
-  per-project operational specifics get learned.
+- Recording it would feed a learned-procedure loop — the general SWE procedure
+  and the per-project operational specifics get learned. (That store no
+  longer exists in any form — see the banner at the top of this doc.)
 
 The one piece with real orchestration is **`deploy`**, a Tier B activity that
 does the sequence atomically: run the `make`/`helm` command → `kubectl rollout
@@ -196,7 +199,7 @@ of `deploy`, not a fallback path.
 | Claude Code session id | `/projects/<name>/.agent/cc-session` (file) |
 | project locking | `session_filesystem_leases` (existing table, path extended) |
 | delegation audit / cost | `delegated_agent_events` (`delegated-agents.md`, existing) |
-| learned operational specifics | `skill_procedures` (existing) |
+| learned operational specifics | would have been `skill_procedures` — that table no longer exists |
 
 ### Temporal shape
 

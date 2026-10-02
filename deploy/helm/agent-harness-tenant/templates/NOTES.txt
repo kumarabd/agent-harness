@@ -69,7 +69,7 @@ single Postgres pod only.
 
 {{- if .Values.llm.enabled }}
 
-Real LLM calls are configured for this release (activities/activities/llm.py,
+Real LLM calls are configured for this release (tenant-worker/tenant_worker/llm.py,
 Provider ABC dispatch). Every configured tier owns its own provider identity
 (docs/components/model-registry.md, 2026-08-28) — the provider client is
 cached per (provider, baseURL, apiKey) triple, so tiers pointing at the same

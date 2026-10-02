@@ -7,7 +7,7 @@
 Produces the real, observable usage metrics a turn accumulates (tokens, cost, iteration count, retries, wall-clock, per-tool spend), and evaluates configurable rules/conditions against them to force a controlled stop — replacing today's four hardcoded constants with something that's both measurable and tunable.
 
 ### Why this exists (recap)
-`components/temporal-workflow.md`'s "Resolved: Stop-Condition Logic" and "...Default Values" sections already establish *where* stopping logic lives (pure inline workflow checks against already-recorded state) and today's actual thresholds: `max_iterations = 20`, `max_retries = 5` (turn-level, distinct from the per-activity retry ceiling), and a token/cost budget described as *"a generously high placeholder ceiling... tuned down later once real cost data exists."* Those are literal Go constants in `workflows/internal/workflow/turn.go` — not metrics anyone can observe outside a log line, and not rules anyone can configure per tenant or per session. This component is explicitly split from the context slot (`components/context-slot.md`) rather than folded into it: the context slot's job is curating *what the model sees*; this component's job is deciding, from real metrics, *whether the turn should keep going at all*.
+`components/temporal-workflow.md`'s "Resolved: Stop-Condition Logic" and "...Default Values" sections already establish *where* stopping logic lives (pure inline workflow checks against already-recorded state) and today's actual thresholds: `max_iterations = 20`, `max_retries = 5` (turn-level, distinct from the per-activity retry ceiling), and a token/cost budget described as *"a generously high placeholder ceiling... tuned down later once real cost data exists."* Those are literal Go constants in `loop-worker/workflow/turn.go` — not metrics anyone can observe outside a log line, and not rules anyone can configure per tenant or per session. This component is explicitly split from the context slot (`components/context-slot.md`) rather than folded into it: the context slot's job is curating *what the model sees*; this component's job is deciding, from real metrics, *whether the turn should keep going at all*.
 
 ### Responsibilities (from architecture)
 - Define what metrics get tracked per turn (and rolled up per session/tenant): input/output tokens, estimated cost, iteration count, retry count, wall-clock duration, per-tool-call count and cost.
@@ -33,94 +33,23 @@ Scoped narrowly and deliberately: **visibility only** — token consumption, cal
 
 **Token counts are available now; dollar cost is not — kept as separate, honest scope.** Cost requires a per-model `$`/token table, which `components/model-registry.md` was always meant to own but never actually built. Token-count metrics ship without waiting on that; cost-based metrics are a later addition once that dependency resolves, not blocked-and-silent.
 
-**Export: plain scrape, no ServiceMonitor.** Each worker process exposes its own `/metrics` HTTP endpoint (Prometheus exposition format) — `loop-worker` wires the Go SDK's metrics handler to a Prometheus registry and starts a listener (`workflows/cmd/loop-worker/main.go`); `tenant-worker` does the equivalent on the Python side (`activities/activities/tenant_worker.py`). Both charts need plain `prometheus.io/scrape`/`prometheus.io/port`/`prometheus.io/path` pod annotations added — `agent-harness-shared`'s `loop-worker-deployment.yaml` and `agent-harness-tenant`'s `tenant-worker-deployment.yaml` — no `ServiceMonitor` CRD, confirmed not needed for this cluster's setup.
+**Export: plain scrape, no ServiceMonitor.** Each worker process exposes its own `/metrics` HTTP endpoint (Prometheus exposition format) — `loop-worker` wires the Go SDK's metrics handler to a Prometheus registry and starts a listener (`loop-worker/cmd/loop-worker/main.go`); `tenant-worker` does the equivalent on the Python side (`tenant-worker/tenant_worker/__main__.py`). Both charts need plain `prometheus.io/scrape`/`prometheus.io/port`/`prometheus.io/path` pod annotations added — `agent-harness-shared`'s `loop-worker-deployment.yaml` and `agent-harness-tenant`'s `tenant-worker-deployment.yaml` — no `ServiceMonitor` CRD, confirmed not needed for this cluster's setup.
 
-**Extended to the Gateway process, 2026-08-26** — not this component's own turn-level metrics, but the same mechanism, added when real voice-latency numbers were needed (`docs/components/gateway/discord-voice.md`'s Notes Log has the full detail: `voice_first_audio_latency_seconds`, `voice_chunk_gap_seconds`, `voice_tts_ttfb_seconds`, `voice_chunk_signal_gap_seconds`). The Gateway (`workflows/cmd/gateway/main.go`) had no metrics exposition at all before this — it now dials its Temporal client with the identical `newMetricsHandler` construction loop-worker already used (duplicated, not shared — three independent binaries, no existing common package worth introducing for one function), scraped the same `prometheus.io/*` annotation way (`gateway.metrics.*` in `agent-harness-tenant`'s `values.yaml`, `enabled: true` by default at port 9090).
+**Extended to the Gateway process, 2026-08-26** — not this component's own turn-level metrics, but the same mechanism, added when real voice-latency numbers were needed (`docs/components/gateway/discord-voice.md`'s Notes Log has the full detail: `voice_first_audio_latency_seconds`, `voice_chunk_gap_seconds`, `voice_tts_ttfb_seconds`, `voice_chunk_signal_gap_seconds`). The Gateway (`gateway/main.go`) had no metrics exposition at all before this — it now dials its Temporal client with the identical `newMetricsHandler` construction loop-worker already used (duplicated, not shared — three independent binaries, no existing common package worth introducing for one function), scraped the same `prometheus.io/*` annotation way (`gateway.metrics.*` in `agent-harness-tenant`'s `values.yaml`, `enabled: true` by default at port 9090).
 
-### Resolved: Pipeline-Phase Visibility (2026-09-02)
+### Pipeline-Phase Visibility (removed)
 
-> **SUPERSEDED (2026-09-11).** This whole section is instrumentation for
-> `ClassifyRequest` / `ComposeSkill` / `MemoryRetrieve` / `RoutingWorkflow` /
-> `SkillDiscover` / `ToolDiscover` / `RecordSkill` / `OpenEpisode` — every one
-> of those activities was deleted by the turn-pipeline redesign
-> (`turn-pipeline.md`, done 2026-09-07…09) and the skill-subsystem removal
-> right after it. The dashboards/queries below return nothing today; kept as
-> history of the investigation, not as current operating guidance. If
-> pipeline-phase visibility is needed again, it'd be re-scoped against
-> `ModelCall` / tool-call activities / the new `report_status` peeled tool, not
-> rebuilt against these names.
-
-> **Note (2026-09-02, later):** the plan-and-execute revision
-> (`request-pipeline/08-planning.md`) **removes `ComposeSkill`** — the ~7.2s
-> medium-tier merge below stops existing; the planning turn (one model call per
-> episode) replaces it. The observability wiring stays useful for the remaining
-> activities; re-point the `ComposeSkill` panels at the planning turn once built.
-
-A Grafana pass on a full scenario-suite run showed the pre-LLM pipeline
-(`components/request-pipeline.md`) is ~60% of turn wall-time — `RoutingWorkflow`
-alone averaged 7.4s, and inside it `ComposeSkill` is ~7.2s (a medium-tier merge
-call, `max_tokens=1100`). Three gaps fixed:
-
-- **Per-activity latency was there all along, under the wrong name.** The
-  Python SDK core emits `temporal_activity_execution_latency` (histogram, unit
-  = **milliseconds**, label `activity_type`) for *every* activity — that's the
-  metric to query for `ClassifyRequest` / `ComposeSkill` / `MemoryRetrieve` /
-  … timing. The `..._seconds` variant is emitted only by the Gateway (Go, which
-  sets `durations_as_seconds=true`), so a query for
-  `temporal_activity_execution_latency_seconds{activity_type="ComposeSkill"}`
-  silently returns nothing. No code change — a query/dashboard note.
-- **The three hand-rolled `*_latency_seconds` histograms had unusable
-  buckets.** They record seconds but kept Temporal core's default
-  (millisecond-oriented) boundaries, so every real value fell in the first
-  bucket and every percentile read the same number. Fixed with
-  `PrometheusConfig(histogram_bucket_overrides=…)` in `tenant_worker.py` —
-  seconds-appropriate boundaries for `classify_request_latency_seconds`,
-  `model_call_latency_seconds`, `tool_call_latency_seconds` (the list and the
-  boundaries live in `activities/metrics.py`).
-- **Semantic outcome was invisible.** The SDK metric shows an activity
-  succeeded, not *what it decided*. Added one counter per pre-LLM activity via
-  the `observe_outcome` decorator (`activities/metrics.py`):
-  `memory_retrieve_total` / `tool_discover_total` / `skill_discover_total`
-  (`outcome` = `ok|empty|error`; `compose_skill_total` / `open_episode_total`
-  were dropped with ComposeSkill / the episodes table in the plan-and-execute
-  rework). `classify`'s existing latency histogram also carries the
-  `intent`/`fallback` attributes its counter already had, so classify latency
-  can be sliced by whether it fell back (a fallback both costs latency *and*
-  forces the Deliberate lane).
-- **The retrieval fan-out had no usable latency percentiles** (2026-09-03) —
-  `temporal_activity_execution_latency` keeps coarse ms-default buckets (`le`
-  50/100/500/…/60000), so `histogram_quantile` on `MemoryRetrieve` /
-  `ToolDiscover` / `SkillDiscover` is garbage and only the mean is trustworthy;
-  the bucket override can't be applied to that SDK metric without distorting
-  every other SDK duration. Fix: `observe_outcome` now *also* emits a paired
-  `<name>_latency_seconds{outcome}` histogram (`memory_retrieve_latency_seconds`,
-  `tool_discover_latency_seconds`, `skill_discover_latency_seconds`) with the
-  widened `LATENCY_BUCKETS_SECONDS` boundaries — real p50/p95/p99 for the three
-  activities whose serial cost is the turn's time-to-first-token. The name list
-  in `metrics.SECONDS_LATENCY_METRICS` derives these from `_OUTCOME_COUNTERS`,
-  so it's one source of truth for both the decorator and the bucket override.
-- **`prompt_assemble_latency_seconds`** (2026-09-02, second pass) — step 9's
-  full context assembly (`prompt.assemble` → `lcm.assemble`), recorded around
-  `build_conversation` in `model_call.py`. Only the real ModelCall path
-  assembles (the fixture path returns a scripted response without it), so this
-  had been unmeasured — and unmeasurable from scenario runs — even though it
-  fires on every real turn iteration. Same pass batched `lcm.assemble`'s
-  per-window-message `tool_calls` fetch (`migration 019` for the index) and
-  collapsed `prompt.assemble`'s three `turn_retrieval` reads into one. The
-  `real-assembly` scenario is the regression cover — it omits fixtures so its
-  ModelCall runs the real assembly against a seeded multi-turn history.
-- **`record_skill_phase_latency_seconds{phase=...}`** (2026-09-03) — RecordSkill
-  is a ~3s activity (`temporal_activity_execution_latency{activity_type="RecordSkill"}`
-  p50 ~= 3s) but a detached ABANDON child (`turn.go`'s `dispatchRecordSkill` only
-  waits for the child to *start*), so it adds nothing to turn latency. This
-  histogram splits it by phase — `gather_reads`, `embed_task`, `reinforce`,
-  `match_or_insert`, `generalize`, `embed_trigger`, `store_write`, `total` — and
-  confirms the cost is almost entirely the `generalize` medium-tier model call
-  (Qwen3-235B, <=1100 output tokens) that fires on a no-match / divergence. Same
-  pass parallelized the independent I/O: the four plan-id-only reads (messages /
-  tool_calls / turn_retrieval / PLAN.md) plus `current_procedures` now run in one
-  `asyncio.gather` instead of serially on one connection, and the `ema_update`
-  reinforce loop is fanned out.
+A 2026-09-02 pass added per-phase latency/outcome instrumentation for the
+pre-LLM request pipeline's own activities. That whole pipeline (classify /
+lane / routing / planning) and the learned-procedural-memory subsystem it
+instrumented were both deleted by the turn-pipeline redesign
+(`turn-pipeline.md`, done 2026-09-07…09) shortly after, taking every
+instrumented activity with them. Nothing from that pass is current operating
+guidance; if pipeline-phase visibility is needed again, it'd be re-scoped
+against `ModelCall` / tool-call activities / `report_status`, not rebuilt
+against these names. `prompt_assemble_latency_seconds` is the one metric from
+that pass that survives today, unchanged — it instruments `prompt.py`'s real
+context assembly, which is still live.
 
 ### Future Scope: Rule-Driven Controlled Stop
 Deliberately not addressed in this pass — parked, not designed:
@@ -132,7 +61,5 @@ Deliberately not addressed in this pass — parked, not designed:
 
 ### Notes Log
 - 2026-08-16: Introduced as a scaffold, split out as its own component (rather than folded into `components/context-slot.md`) at the user's explicit direction — the focus is producing real metrics first, then a rule-driven controlled stop on top of them, distinct enough from context curation to warrant its own design surface. Grounded in `turn.go`'s current hardcoded stop-condition constants and `temporal-workflow.md`'s existing resolved stop-condition logic, audited the same day — not yet designed.
-- 2026-09-02: Pipeline-phase visibility pass (see "Resolved" section above) — `activities/activities/metrics.py` (new: `observe_outcome` decorator + the seconds-histogram bucket-override list), `tenant_worker.py` (`histogram_bucket_overrides` on `PrometheusConfig`), `observe_outcome` applied to `ComposeSkill`/`MemoryRetrieve`/`SkillDiscover`/`ToolDiscover`/`OpenEpisode`, `compose_skill_merge_total` in `retrieval/compose.py`, `intent`/`fallback` attributes added to `classify_request_latency_seconds`. Latency itself is unchanged — this pass only makes where the ~9s pre-LLM cost goes measurable; the cuts (ComposeSkill retry/timeout, classify fallback root-cause, serial critical path) are the follow-up.
-- 2026-09-03: RecordSkill phase visibility + I/O parallelization — `record_skill_phase_latency_seconds{phase}` histogram (`activities/activities/skills/record.py`, added to `metrics.SECONDS_LATENCY_METRICS` so it gets the seconds buckets). Split the activity's top four plan-id-only reads + `current_procedures` into one `asyncio.gather` (was serial on one pooled connection), fanned out the `ema_update` reinforce loop, and moved `current_procedures` out of `_match_or_insert` (it no longer serializes behind the first embed). `generalize` (the ~2s medium-tier model call) left as-is — it is the real floor and is off the turn's critical path.
-- 2026-09-03: Retrieval fan-out latency histograms — `observe_outcome` (`activities/activities/metrics.py`) now emits a paired `<counter without _total>_latency_seconds{outcome}` histogram alongside its counter, so `MemoryRetrieve` / `ToolDiscover` / `SkillDiscover` get real seconds-bucket percentiles instead of relying on `temporal_activity_execution_latency`'s unusable coarse buckets. `SECONDS_LATENCY_METRICS` derives the three names from a new `_OUTCOME_COUNTERS` tuple — single source of truth for the decorator and `tenant_worker.py`'s bucket override. No behaviour change; `@observe_outcome` still transparent to Temporal registration (verified via `_Definition.from_callable`).
+- 2026-09-02…03: Pipeline-phase visibility pass and two follow-ups (per-phase outcome counters, retrieval fan-out latency histograms) — all instrumentation for the pre-LLM pipeline and learned-procedural-memory subsystem, both deleted shortly after; see "Pipeline-Phase Visibility (removed)" above.
 - 2026-08-22: At the user's explicit direction, scoped this pass to metrics export only (visibility for an external observability system), deferring the rule-driven controlled-stop half entirely to "Future Scope." Resolved the export mechanism as Temporal's own built-in per-SDK metrics handlers (replay-safe, no new activities/Postgres writes, no `GetVersion` gate needed), the concrete metric set on both the Go workflow side and Python activity side, the required per-tenant `namespace` label (since `loop-worker` is shared across tenants), and plain Prometheus scrape annotations (no `ServiceMonitor`) on both charts' worker Deployments.

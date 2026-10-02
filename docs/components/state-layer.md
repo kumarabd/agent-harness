@@ -160,7 +160,7 @@ CREATE TABLE gateway_shard_state (
 );
 
 -- Test-fixture-only, never touched in a real deployment. Written by the
--- starter CLI (workflows/cmd/starter) before SignalWithStart, read by
+-- starter CLI (loop-worker/cmd/starter) before SignalWithStart, read by
 -- ModelCall's own implementation — never passed through the workflow, so
 -- the fixture mechanism doesn't itself violate the reference-passing
 -- contract it exists to exercise (components/temporal-workflow.md,

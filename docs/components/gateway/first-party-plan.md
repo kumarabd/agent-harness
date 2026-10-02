@@ -212,8 +212,8 @@ grounded in the existing session and history model.
 
 ## Local evidence
 
-Reviewed: workflows/internal/gateway/{core,web,mobile}/,
-workflows/internal/workflow/{coordinator,turn,user_input,dispatch}.go,
-activities/activities/{insert_message,seed_child_session,model_call}.py, and
-activities/activities/lcm/. Findings describe the code inspected during planning;
+Reviewed: gateway/internal/{core,web,mobile}/,
+loop-worker/workflow/{coordinator,turn,user_input,dispatch}.go,
+tenant-worker/tenant_worker/{insert_message,seed_child_session,model_call}.py, and
+tenant-worker/tenant_worker/lcm/. Findings describe the code inspected during planning;
 proposed behavior above is not a claim of implementation.

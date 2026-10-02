@@ -1,0 +1,9 @@
+go 1.26.1
+
+use (
+	./automation
+	./gateway
+	./loop-worker
+	./router
+	./shared
+)

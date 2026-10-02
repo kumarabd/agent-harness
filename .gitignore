@@ -1,13 +1,21 @@
 # Python
-activities/.venv/
-activities/agent_harness_activities.egg-info/
+tenant-worker/.venv/
+tenant-worker/agent_harness_tenant_worker.egg-info/
 **/__pycache__/
 *.pyc
 
 # Go
-workflows/cmd/_*/
+loop-worker/cmd/_*/
+# A stray `go build` run from inside a service's own directory (rather than
+# via the Dockerfiles, which always build to /out/<name>) produces a binary
+# matching that directory's own name — ignore the one place each service
+# could actually leave one behind.
+/loop-worker/loop-worker
+/gateway/gateway
+/automation/automation
+/router/router
 
-# Local build output (deep-conversation/run.sh and workflows/scenarios/
+# Local build output (deep-conversation/run.sh and loop-worker/scenarios/
 # run_scenario.sh both compile local binaries here — e.g. .build/starter)
 .build/
 

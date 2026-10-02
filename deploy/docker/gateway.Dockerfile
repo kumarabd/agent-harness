@@ -1,5 +1,5 @@
 # Go gateway (Web + Discord text/voice platform inbound/outbound path) —
-# see workflows/cmd/gateway and docs/components/gateway/{web,discord,discord-voice}.md.
+# see gateway/ and docs/components/gateway/{web,discord,discord-voice}.md.
 #
 # Build context must be the REPO ROOT, not deploy/docker/:
 #   docker build -f deploy/docker/gateway.Dockerfile -t gcr.io/kumarabd/agent-harness/gateway:latest .
@@ -18,12 +18,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy module files first so `go mod download` is cached independently of
-# source changes.
-COPY workflows/go.mod workflows/go.sum ./
-RUN go mod download
+# source changes. go.work isn't copied here — gateway/go.mod's own `replace`
+# directives for agent-harness/shared and agent-harness/loop-worker resolve
+# both cross-module dependencies this image needs without requiring the
+# whole workspace.
+COPY shared/go.mod shared/go.sum ./shared/
+COPY loop-worker/go.mod loop-worker/go.sum ./loop-worker/
+COPY gateway/go.mod gateway/go.sum ./gateway/
+RUN cd gateway && go mod download
 
-COPY workflows/ ./
-RUN CGO_ENABLED=1 GOOS=linux go build -o /out/gateway ./cmd/gateway
+COPY shared/ ./shared/
+COPY loop-worker/ ./loop-worker/
+COPY gateway/ ./gateway/
+RUN cd gateway && CGO_ENABLED=1 GOOS=linux go build -o /out/gateway .
 
 # NOT distroless/static — the cgo libopus binding above needs libopus's
 # shared library present at runtime, not just link time, and distroless/

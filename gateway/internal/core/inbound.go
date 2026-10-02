@@ -1,0 +1,254 @@
+// Package core is the platform-agnostic inbound seam every gateway platform
+// funnels through: normalize a platform's raw message into a MessageEvent,
+// then Ingest it (resolve session_key, dedup, SignalWithStart the session
+// coordinator). It also owns session-key identity (SessionKeyFor) and the
+// per-platform system-prompt table. It imports no platform adapter, no
+// net/http, no discordgo — the dependency rule made concrete.
+package core
+
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/sdk/client"
+
+	wf "agent-harness/loop-worker/workflow"
+	"agent-harness/shared/types"
+)
+
+// Ingestor implements gateway.md's "Resolved: Inbound Flow" steps 3-6.
+// Constructed once per gateway process; every platform adapter (web,
+// discord, discordvoice) holds a pointer to the same one.
+type Ingestor struct {
+	pool       *pgxpool.Pool
+	temporal   client.Client
+	taskQueue  string
+	tenantSlug string
+}
+
+// NewIngestor wires an Ingestor to its infrastructure dependencies.
+// tenantSlug — docs/components/multi-tenancy.md's "Resolved: Shared Temporal
+// Namespace, Per-Tenant Task Queues" (2026-09-26): this Gateway's own
+// tenant's identity (== its release name, == its Kubernetes namespace),
+// stamped onto every CoordinatorInput it starts/signals so the coordinator
+// and everything it dispatches route to this tenant's own tenant-worker
+// queue, never another tenant's — this Gateway is one of potentially many
+// sharing the same Temporal namespace now.
+func NewIngestor(pool *pgxpool.Pool, temporal client.Client, taskQueue, tenantSlug string) *Ingestor {
+	return &Ingestor{pool: pool, temporal: temporal, taskQueue: taskQueue, tenantSlug: tenantSlug}
+}
+
+// MessageEvent is the generic/agentic boundary docs/components/gateway.md's
+// "Resolved: Inbound Flow" step 2 names but never wrote a concrete shape
+// for. Platform-specific code (handleSend, for Web) normalizes its own raw
+// payload into this; core.Ingest below implements the
+// platform-agnostic remainder of that flow (steps 3-6) against it — nothing
+// past this struct is Web-specific.
+type MessageEvent struct {
+	// Platform this event came from — "web" today, "discord"/"slack" once
+	// built.
+	Platform string
+	// ChannelID scopes the SESSION — shared across every user posting in
+	// that channel (a Discord channel, a Slack channel). Deliberately NOT
+	// the same thing as User below: conflating the two would merge
+	// different users' conversations into one session, or treat a shared
+	// group channel as belonging to whichever user happened to post last.
+	ChannelID string
+	// User is who sent THIS message, within ChannelID — orthogonal to
+	// session scoping. The real human identity (a Clerk sub, a Discord user
+	// id, ...), threaded into messages.speaker_id. For Web and Mobile, User
+	// and ChannelID are currently the same Clerk user_id (no group-chat
+	// concept on either), but kept as a separate field so a group-chat
+	// platform doesn't need this struct to change shape later. (This
+	// comment used to say "not yet persisted" — stale since migration 027
+	// added messages.speaker_id; corrected 2026-09-12 when it was found
+	// mobile had been putting DeviceID's value here instead of the real
+	// human identity, exactly what this field's own doc was warning against.)
+	User string
+	// DeviceID — docs/components/gateway/first-party-plan.md §2. Which
+	// device sent this, threaded into messages.client_device_id —
+	// deliberately NOT part of User/speaker identity. Empty for any
+	// platform without a device concept (Web, Discord).
+	DeviceID string
+	// Mode — "voice" | "text" (empty means text), threaded into
+	// messages.mode. Per-message, not per-session — see types.Message.Mode's
+	// own doc comment for why this can't be a session-genesis decision the
+	// way Discord voice's system-prompt override is.
+	Mode string
+	// Content is the message text.
+	Content string
+	// PlatformMessageID is the idempotency/dedup key against
+	// ingested_messages(platform, platform_message_id) — gateway.md's
+	// "Resolved: Inbound Flow" step 4. For Web this is the client-generated
+	// client_message_id (no platform-native message id exists for a
+	// same-request HTTP POST); for a webhook platform it would be that
+	// platform's own message/event id.
+	PlatformMessageID string
+	// Discriminator — gateway.md's "Resolved: Multi-Session Channels" —
+	// which of possibly-many sessions in ChannelID this event belongs to.
+	// ALWAYS populated by the caller, never empty: "channel:{channelID}" for
+	// a channel's own main session, or "<type>:<id>" (e.g. Discord's
+	// "reply_to_platform_message_id:{rootID}") for a reply/thread-scoped
+	// one. Fed into core.SessionKeyFor alongside Platform/ChannelID.
+	Discriminator string
+	// ParentSessionKey — gateway.md's "Resolved: Multi-Session Channels" —
+	// set only when Discriminator resolves to a session that doesn't exist
+	// yet (detected via the sessions INSERT's own RowsAffected below, not a
+	// separate lookup): which session this new one branched from. Empty for
+	// a channel's own main session, which has no parent.
+	ParentSessionKey string
+	// ConnectionID — gateway.md's "Resolved: Outbound Flow" (2026-08-25
+	// correction). Set only on a connection-based platform (Discord: the
+	// bot's own user id, resolved by the caller once at startup via GET
+	// /users/@me — never re-derived here); empty for Web. Unlike
+	// ParentSessionKey, passed to CoordinatorInput on EVERY call, not just
+	// genesis — see CoordinatorInput's own doc comment for why.
+	ConnectionID string
+}
+
+// core.Ingest implements gateway.md's "Resolved: Inbound Flow" steps
+// 3-6: resolve session_key, dedup check-then-insert against
+// ingested_messages, SignalWithStart the session coordinator, ack. Returns
+// "accepted" or "already_accepted" (step 4's dedup short-circuit) — the
+// same response shape /send has always returned.
+func (i *Ingestor) Ingest(ctx context.Context, event MessageEvent) (string, error) {
+	sessionKey := SessionKeyFor(event.Platform, event.ChannelID, event.Discriminator)
+
+	// Upsert with real values, before SignalWithStart — replaces the real
+	// Gateway InsertMessageActivity's own 'unknown'/'unknown' placeholder
+	// upsert used before a real Gateway existed (session-filesystem.md's
+	// Notes Log). ON CONFLICT DO NOTHING on both writes below means
+	// whichever write lands first wins — since this runs before the signal
+	// that eventually triggers InsertMessageActivity, this one wins.
+	//
+	// parent_session_key: NULL when ParentSessionKey is unset (a channel's
+	// own main session has no parent); ON CONFLICT DO NOTHING means this
+	// only ever takes effect on the FIRST insert for a given session_key —
+	// exactly genesis, never overwritten by a later message for the same
+	// session.
+	var parentSessionKey *string
+	if event.ParentSessionKey != "" {
+		parentSessionKey = &event.ParentSessionKey
+	}
+	// platform_prompts.go's own comment has the full reasoning — a platform
+	// absent from that map (everything except discord-voice today) leaves
+	// this nil, same as before this existed: NULL in the column, ModelCall's
+	// own DEFAULT_SYSTEM_PROMPT fallback unaffected.
+	var systemPrompt *string
+	if p := platformSystemPrompts[event.Platform]; p != "" {
+		systemPrompt = &p
+	}
+	// A selectable client can create its first child before it has ever sent
+	// a message in the synthetic "main" conversation. Materialize that
+	// server-derived parent first so sessions.parent_session_key's foreign key
+	// remains valid. The key, platform, and channel all came from the
+	// authenticated adapter; no client-supplied internal key is trusted here.
+	if parentSessionKey != nil {
+		if _, err := i.pool.Exec(ctx,
+			"INSERT INTO sessions (session_key, platform, channel_id, system_prompt) VALUES ($1, $2, $3, $4) "+
+				"ON CONFLICT (session_key) DO NOTHING",
+			*parentSessionKey, event.Platform, event.ChannelID, systemPrompt,
+		); err != nil {
+			return "", err
+		}
+	}
+	// gateway.md's "Resolved: Multi-Session Channels" — genesis detection is
+	// free from state already being written: RowsAffected() > 0 means this
+	// is genuinely the first message this session_key has ever seen. This
+	// is the one moment CoordinatorWorkflow's own LCM-copy context injection
+	// (coordinator.go) needs to fire — CoordinatorInput.ParentSessionKey
+	// below is set ONLY on this exact condition, never on a later message
+	// for an already-existing session, regardless of what event.ParentSessionKey
+	// itself carries (harmless if the caller sends it on every message for
+	// a branch — this check is what actually gates the effect). system_prompt
+	// is set the same ON CONFLICT DO NOTHING way — a platform's prompt is
+	// decided once, at genesis, never revised for an existing session.
+	sessionsTag, err := i.pool.Exec(ctx,
+		"INSERT INTO sessions (session_key, platform, channel_id, parent_session_key, system_prompt) VALUES ($1, $2, $3, $4, $5) "+
+			"ON CONFLICT (session_key) DO NOTHING",
+		sessionKey, event.Platform, event.ChannelID, parentSessionKey, systemPrompt,
+	)
+	if err != nil {
+		return "", err
+	}
+	isGenesis := sessionsTag.RowsAffected() > 0
+
+	// Real PRIMARY KEY, not an app-level check — a race between two
+	// identical sends (e.g. a client retry) is resolved by the second
+	// INSERT failing, not by application logic (same reasoning gateway.md's
+	// own "Resolved: Connection Leasing" section relies on for dedup being
+	// free regardless of concurrent writers).
+	tag, err := i.pool.Exec(ctx,
+		"INSERT INTO ingested_messages (platform, platform_message_id, session_key) "+
+			"VALUES ($1, $2, $3) ON CONFLICT (platform, platform_message_id) DO NOTHING",
+		event.Platform, event.PlatformMessageID, sessionKey,
+	)
+	if err != nil {
+		return "", err
+	}
+	if tag.RowsAffected() == 0 {
+		// Already durably submitted by an earlier attempt at this exact
+		// platform_message_id — ack without re-signaling.
+		return "already_accepted", nil
+	}
+
+	// SignalWithStart is the durable submission; the gateway never writes
+	// the message body to Postgres itself (that happens later, inside the
+	// coordinator/turn flow, sourced from the signal payload).
+	//
+	// coordinatorInput.ParentSessionKey only set on isGenesis — these
+	// start-args are only actually consulted by Temporal if this call is
+	// the one that truly starts the workflow (an already-running execution
+	// just gets signaled, ignoring them), which for a brand-new session_key
+	// always coincides with isGenesis anyway; gating on isGenesis explicitly
+	// rather than relying on that coincidence is what keeps this correct
+	// across this session's OWN later idle-timeout restarts too.
+	coordinatorInput := wf.CoordinatorInput{SessionKey: sessionKey, ConnectionID: event.ConnectionID, TenantSlug: i.tenantSlug}
+	if isGenesis {
+		coordinatorInput.ParentSessionKey = event.ParentSessionKey
+	}
+	opts := client.StartWorkflowOptions{
+		ID:                    sessionKey,
+		TaskQueue:             i.taskQueue,
+		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+	}
+	payload := types.SignalPayload{Message: types.Message{
+		Role:           "user",
+		Content:        event.Content,
+		SpeakerID:      event.User,
+		ClientMsgID:    event.PlatformMessageID,
+		ClientDeviceID: event.DeviceID,
+		Mode:           event.Mode,
+	}}
+	if _, err := i.temporal.SignalWithStartWorkflow(
+		ctx, sessionKey, wf.NewMessageSignalName, payload, opts,
+		wf.CoordinatorWorkflow, coordinatorInput,
+	); err != nil {
+		return "", err
+	}
+
+	return "accepted", nil
+}
+
+// KeepAlive — docs/components/gateway/first-party-plan.md's cross-replica
+// presence, KeepAliveSignalName's own doc comment has the full reasoning.
+// SignalWithStart, not a plain signal: a device connecting to a session
+// whose coordinator has already idled out should still be able to hold it
+// open (the harness restarting cheaply on demand is the intended behavior,
+// not something to avoid). Deliberately minimal CoordinatorInput — no
+// ParentSessionKey (only meaningful at true genesis, which a keepalive never
+// is) and no ConnectionID (that's a Discord/connection-based-delivery
+// concept this signal has nothing to do with).
+func (i *Ingestor) KeepAlive(ctx context.Context, sessionKey string) error {
+	opts := client.StartWorkflowOptions{
+		ID:                    sessionKey,
+		TaskQueue:             i.taskQueue,
+		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+	}
+	_, err := i.temporal.SignalWithStartWorkflow(
+		ctx, sessionKey, wf.KeepAliveSignalName, nil, opts,
+		wf.CoordinatorWorkflow, wf.CoordinatorInput{SessionKey: sessionKey, TenantSlug: i.tenantSlug},
+	)
+	return err
+}

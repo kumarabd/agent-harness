@@ -15,7 +15,7 @@ agent-harness-side service, database, or workflow for this at all anymore.
    caller's Clerk JWT, resolves their tenant by convention
    (`tenantid.SlugForSub`), and reverse-proxies straight through to that
    tenant's own mcp-hub instance
-   (`workflows/internal/router/core/tenant.go`'s `McpHubBaseURL()`,
+   (`router/internal/core/tenant.go`'s `McpHubBaseURL()`,
    `http://<release>-tools.<namespace>.svc.cluster.local:8000`) —
    the exact same pattern as `/gateway/` and `/brain/`.
 2. mcp-hub serves the real API directly:

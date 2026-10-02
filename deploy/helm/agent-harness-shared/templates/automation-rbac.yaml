@@ -5,7 +5,7 @@
 # (deploy/helm/agent-harness-shared/templates/serviceaccount.yaml, which
 # stays automountServiceAccountToken: false — every OTHER workload in this
 # chart still never calls the Kubernetes API). This worker shells out to
-# kubectl/helm (workflows/internal/automation/activities/exec.go) to
+# kubectl/helm (automation/activities/exec.go) to
 # provision a whole tenant namespace + Helm release on a self-serve
 # request, so it genuinely needs broad-but-scoped cluster permissions —
 # documented here rather than left implicit.

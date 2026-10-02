@@ -3,9 +3,10 @@
 > STATUS: **CURRENT — this is how a turn runs.** Built and deployed over
 > 2026-09-07…09 (the classify / lane / routing / planning machinery and the
 > harness-owned skill subsystem were removed; a model-steered reason-act loop
-> over a thin set of deterministic rails is what runs now). *Skills* (below)
-> is the 2026-09-22 design that replaces the old skill subsystem — DESIGNED,
-> not yet built; see `docs/05-architecture-domain-control-loops.md`.
+> over a thin set of deterministic rails is what runs now). A later
+> conversational-skills/session-mode mechanism (built 2026-09-22…29) was
+> removed outright on 2026-09-30, per direction — there is no skill or mode
+> concept in the harness at all now, just this ordinary turn loop.
 
 ### Role (one line)
 
@@ -106,7 +107,7 @@ ModelTurnOutput {
 
   # ── actions (the model's real control channel) ──
   tool_calls: [ ... ]            # ordinary tools AND meta-tools:
-                                 #   recall · discover_tools · discover_skills
+                                 #   recall · discover_tools
                                  #   spawn_subagent · ask_user
 
   # ── advisory (recorded / used if present, safe to omit) ──
@@ -118,7 +119,7 @@ ModelTurnOutput {
 }
 ```
 
-Deliberately **not** fields: `needs_memory` / `needs_tools` / `needs_skills`
+Deliberately **not** fields: `needs_memory` / `needs_tools`
 (those are meta-tool calls), `plan` (that is the scratchpad, or prose in
 `message`), `confidence` (self-reported model confidence is poorly calibrated;
 do not route on it), `intent` / `complexity` (computed after the fact from the
@@ -203,18 +204,16 @@ tails it in every call.
 
 **LCM-assembled conversation** — the transcript. Append-only, compacted as it
 grows (verbatim window + summary DAG). Everything retrieved during the turn flows
-*into* this stream as ordinary observation messages: a `recall` result, a
-`discover_skills` match list, a skill workflow's result, a tool result, a
-subagent result. LCM compacts them uniformly with everything else. There is no
-separate managed "memory section" or "skills section" and no per-section budget
+*into* this stream as ordinary observation messages: a `recall` result, a tool
+result, a subagent result. LCM compacts them uniformly with everything else.
+There is no separate managed "memory section" and no per-section budget
 shedding — that logic collapses into LCM's normal compaction.
 
 **Tools param** — assembled separately because callable function schemas are a
 provider-request parameter, not messages. The core set (read / write / shell /
 search / list) is always present so exploration and coding tasks start without a
 discovery round-trip; `discover_tools` adds exotic capabilities (a weather API, a
-maps service), `discover_skills` adds matched domain-workflow skills, both for
-the rest of the turn, read from the per-turn discovered set.
+maps service) for the rest of the turn, read from the per-turn discovered set.
 
 **No ambient memory digest.** An earlier draft of this design added a thin
 always-on profile/memory block injected every turn. `memory-slot.md` ("Resolved:
@@ -223,13 +222,12 @@ had already examined and rejected exactly that — no genesis population, no
 staleness cache, no non-shed section. Retrieval instead rests on: the `recall`
 meta-tool, the "retrieve before answering" rule, and the "don't guess — ask or
 `create_intention`" rule. The completeness risk (a turn that needs a fact never
-triggering the lookup) is consciously accepted; there is no learned fallback for
-it — see *Skills* for the (unrelated) mechanism that replaced the old
-learned-procedure idea.
+triggering the lookup) is consciously accepted; there is no learned fallback
+for it.
 
 The result tailors itself: turn 1 is lean; turn 6 of a research task carries
-discovered skills, discovered tools, a scratchpad, and memory hits — the prompt
-grows with the work, not up front.
+discovered tools, a scratchpad, and memory hits — the prompt grows with the
+work, not up front.
 
 ---
 
@@ -243,7 +241,6 @@ from the user-visible stream and the iteration budget):
 |---|---|
 | `recall(query)` | returns matched long-term memory as an observation |
 | `discover_tools(query)` | matched tool schemas become callable for the rest of the turn |
-| `skill_command(action, revision, content?)` | explicitly route approved domain work to the user-selected skill via a coordinator Update |
 | `spawn_subagent(brief, …)` | starts a child `TurnWorkflow` (see *Subagents*) |
 | `ask_user(question, options?)` | parks the turn on a user-input request (see *Interrupts*) |
 
@@ -251,10 +248,11 @@ The earlier harness-owned procedural-memory subsystem (`load_skill`,
 `RecordSkill`, `SkillDiscover`, the `skill_procedures` store, the RL EMA loop)
 is gone for good — it auto-recorded prose procedures from transcripts, which is
 exactly what produced the per-turn-fragmentation regression this doc used to
-describe. It is not "deferred"; it's superseded by *Skills* below, a different
-mechanism entirely: no prose, no recording, no LCM injection — a skill's body
-is a Temporal workflow, authored like code, discovered locally, invoked like
-any other tool.
+describe. It is not "deferred." A later replacement (domain-specific
+workflows entered via a session mode, then a session-persistent
+conversational-skills mechanism) was built, iterated through several
+production incidents, and ultimately removed outright on 2026-09-30, per
+direction — there is no skill or mode concept of any kind in the harness now.
 
 The scratchpad uses the ordinary file tools against a session-scoped path
 (`…/turn/<seq>/scratchpad.md`); assembly auto-tails that path, so there is no
@@ -282,9 +280,8 @@ These are rules, not guidance. Eval them explicitly.
 
 ## Subagents
 
-The decomposition primitive — for delegating open-ended scoped work, not for
-invoking a fixed process (see *Skills* for that, a separate and independent
-mechanism). `spawn_subagent` starts a child `TurnWorkflow` (same workflow type,
+The decomposition primitive — for delegating open-ended scoped work.
+`spawn_subagent` starts a child `TurnWorkflow` (same workflow type,
 recursively), `ParentClosePolicy: REQUEST_CANCEL`.
 
 The child receives a **clone of the parent's session context** plus an
@@ -301,20 +298,6 @@ observation telling the model to do the work directly. Root's own sibling fan-ou
 On subagent completion or cancellation, a `SubagentManifest` activity records its
 changed-file list against its own turn id before the parent's next `ModelCall`
 reads it.
-
----
-
-## Skills
-
-Every incoming utterance runs this ordinary conversational turn, regardless of selected mode. Each real ModelCall reads the coordinator's selection and skill snapshot without replacing the normal chat/voice prompt.
-
-Chat calls the generic `skill_command` tool for submit, amend, confirm or cancel. The activity sends a durable coordinator Update keyed by tool-call ID. Exact-proposal confirmation uses the existing `ask_user` child and a server-authored prompt. Status questions and unrelated conversation do not invoke domain work or change selection.
-
-Confirmed work runs in a bounded `SkillStepWorkflow` child owned by the coordinator, independently of this chat turn. It receives content references, never raw NewMessage signals, and owns no user-facing delivery. Its domain definition owns prompt, tool restrictions, argument validation and completion evidence.
-
-Ordinary chat interruption leaves the skill running. Only explicit cancellation, mode changes or the session Cancel signal request cancellation. Completion notices wait until active chat finishes, then return through normal persistence and delivery. A completed step does not deactivate the user-selected mode.
-
-See [Conversational skills](../05-architecture-domain-control-loops.md) for the full contract and breaking-deployment requirements. There is no `switch_mode`, skill discovery index, mode-specific top-level turn, or direct by-name skill dispatch.
 
 ---
 
@@ -392,7 +375,6 @@ flight, not a queue-after.
 | `ModelCall`, streaming (turn-1 voice/discord) | barge-in cancels it; partial output → `[response interrupted]` observation | near-instant |
 | Tool calls (activities) | cancel context, await settle; non-cancellable Tier-A tools run to completion; `cancelled` observation per call | heartbeat + teardown |
 | Subagent (child workflow) | cascade cancel; `SubagentManifest` still runs for partial file work; `cancelled` observation | deepest in-flight tool's heartbeat |
-| Coordinator-owned skill child | ordinary chat messages do not cancel it; explicit cancel or mode change requests cooperative cancellation | skill execution heartbeat |
 | Multiple queued | FIFO, one per boundary | — |
 | Blocked on `ask_user` | **the message resolves the block** (below) | instant |
 | Hard compaction (blocking) | let it finish — it makes the next `ModelCall` viable — then fold in | compaction completes |
@@ -464,8 +446,10 @@ There is none, and there won't be. `RecordSkill`/`load_skill`/`SkillDiscover`/
 per-turn-fragmentation regression that subsystem produced (teaching the agent
 something across several messages fragmented into partial, half-learned
 procedures) is closed by removing recording as a concept entirely, not by
-fixing it. See *Skills* above: a skill is a hand-authored domain definition executed by a bounded Temporal child,
-declared once in code, never inferred from a transcript.
+fixing it. A later hand-authored replacement (a domain definition executed by
+a bounded Temporal child, declared once in code, never inferred from a
+transcript) was built and then removed outright on 2026-09-30 — there is no
+skill concept of any kind in the harness now, recorded or hand-authored.
 
 ---
 
@@ -482,7 +466,7 @@ Removed over 2026-09-07…09:
 - **Activities** — `ClassifyRequest`, `MemoryRetrieve`, `ToolDiscover`,
   `SkillDiscover`, `RecordSkill`, the plan-lifecycle activities.
 - **Modules** — `plan.py`, `plan_resolve.py`, `classify.py`,
-  `activities/activities/retrieval/`, `activities/activities/skills/`, the PLAN.md
+  `tenant-worker/tenant_worker/retrieval/`, `tenant-worker/tenant_worker/skills/`, the PLAN.md
   file store; the section-model / budget-shed logic in `prompt.py`.
 - **Schema / types** — `TaskRepresentation`, `RoutingPlan` / `RoutingResult`,
   `RecordSkillInput`, `SubsystemResult`, the `PlanningMode` / `PlanHandling` /

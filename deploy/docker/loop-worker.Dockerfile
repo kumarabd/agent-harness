@@ -1,4 +1,4 @@
-# Go loop-worker (Session Coordinator + Turn Workflow) — see workflows/cmd/loop-worker.
+# Go loop-worker (Session Coordinator + Turn Workflow) — see loop-worker/.
 #
 # Build context must be the REPO ROOT, not deploy/docker/:
 #   docker build -f deploy/docker/loop-worker.Dockerfile -t gcr.io/kumarabd/agent-harness/loop-worker:latest .
@@ -7,12 +7,16 @@ FROM docker.io/library/golang:1.26-alpine AS build
 WORKDIR /src
 
 # Copy module files first so `go mod download` is cached independently of
-# source changes.
-COPY workflows/go.mod workflows/go.sum ./
-RUN go mod download
+# source changes. go.work isn't copied here — loop-worker/go.mod's own
+# `replace agent-harness/shared => ../shared` resolves the one cross-module
+# dependency this image needs without requiring the whole workspace.
+COPY shared/go.mod shared/go.sum ./shared/
+COPY loop-worker/go.mod loop-worker/go.sum ./loop-worker/
+RUN cd loop-worker && go mod download
 
-COPY workflows/ ./
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/loop-worker ./cmd/loop-worker
+COPY shared/ ./shared/
+COPY loop-worker/ ./loop-worker/
+RUN cd loop-worker && CGO_ENABLED=0 GOOS=linux go build -o /out/loop-worker ./cmd/loop-worker
 
 # Distroless: no shell, no package manager — minimal attack surface for a
 # process that will eventually hold no tenant credentials itself (this is the

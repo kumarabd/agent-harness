@@ -72,14 +72,14 @@ dispatch its activities.
 A tenant is reachable through agent-web the moment its own namespace/
 Gateway/agent-brain actually exist in the cluster — there is no separate
 "register a tenant with the router" step (2026-09-25: tenant identity is
-pure convention, workflows/internal/router/core/tenant.go). Enabling
+pure convention, router/internal/core/tenant.go). Enabling
 automation.enabled (below) automates standing that infrastructure up in the
 first place, via self-serve onboarding.
 {{- end }}
 {{- if .Values.automation.enabled }}
 
 Self-serve tenant onboarding is live: POST /onboard on the router
-(workflows/internal/router/core/onboarding.go) signal-starts
+(router/internal/core/onboarding.go) signal-starts
 TenantOnboardingWorkflow on {{ include "agent-harness.componentFullname" (dict "context" . "component" "automation") }}.
 2026-09-26: no step in this workflow touches this release anymore (there is
 no more per-tenant Temporal namespace to register, and no shared-pool

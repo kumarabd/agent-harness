@@ -22,7 +22,7 @@ spec:
       # This process resolves tenants by pure convention and talks, per
       # request, to that tenant's own Gateway/agent-brain/mcp-hub
       # Services by DNS name — never the Kubernetes API itself, and
-      # (2026-09-25) no database of any kind (workflows/cmd/router/main.go).
+      # (2026-09-25) no database of any kind (router/main.go).
       automountServiceAccountToken: false
       containers:
         - name: router
@@ -37,7 +37,7 @@ spec:
             # Must match agent-harness-tenant/values.yaml's own gateway.port/
             # agent-brain subchart defaults — the router computes every
             # tenant's Service URL by convention now
-            # (workflows/internal/router/core/tenant.go), no lookup table to
+            # (router/internal/core/tenant.go), no lookup table to
             # get this from instead.
             - name: TENANT_GATEWAY_PORT
               value: "8090"
@@ -60,8 +60,8 @@ spec:
             # agent-web + Identity-Routing Router"), making this genuinely
             # cross-origin traffic for the first time in this codebase.
             # Comma-separated exact origins, or "*" — same parsing as
-            # workflows/internal/gateway/web/web.go's sibling
-            # GATEWAY_WEB_ALLOWED_ORIGINS (workflows/internal/router/core/cors.go).
+            # gateway/internal/web/web.go's sibling
+            # GATEWAY_WEB_ALLOWED_ORIGINS (router/internal/core/cors.go).
             {{- if .Values.router.allowedOrigins }}
             - name: ROUTER_ALLOWED_ORIGINS
               value: {{ join "," .Values.router.allowedOrigins | quote }}

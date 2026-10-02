@@ -5,7 +5,7 @@
 
 ## Role
 
-`workflows/internal/gateway/realtime` owns the common first-party connection
+`gateway/internal/realtime` owns the common first-party connection
 machinery: first-frame Clerk authentication, resumable catch-up, durable tail
 reads, live `NOTIFY` wakeups, turn/message/delta frames, cancellation, pending
 user-input responses, and coordinator keepalive. It is deliberately unaware of

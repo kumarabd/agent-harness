@@ -81,8 +81,8 @@ spec:
             - name: CLERK_ISSUER
               value: {{ .Values.gateway.web.clerkIssuer | quote }}
             {{- end }}
-            # webSocketOriginAllowed's env-var fallback (workflows/internal/
-            # gateway/web/web.go) — see values.yaml's own comment on why the
+            # webSocketOriginAllowed's env-var fallback (gateway/internal/
+            # web/web.go) — see values.yaml's own comment on why the
             # same-host fallback alone can never pass in this architecture.
             - name: GATEWAY_WEB_ALLOWED_ORIGINS
               value: {{ .Values.gateway.web.allowedOrigins | quote }}
@@ -105,7 +105,7 @@ spec:
                   name: {{ include "agent-harness.resourceName" (dict "context" . "name" "gateway-discord") }}
                   key: DISCORD_BOT_TOKENS
             {{- end }}
-            # workflows/cmd/gateway/voice_stt_tts.go's SPEECH_API_KEY —
+            # gateway/voice_stt_tts.go's SPEECH_API_KEY —
             # values.yaml's gateway.speechAPIKey's own comment has the real
             # 401 this fixes.
             {{- if .Values.gateway.speechAPIKey }}
@@ -115,13 +115,13 @@ spec:
                   name: {{ include "agent-harness.resourceName" (dict "context" . "name" "gateway-speech") }}
                   key: SPEECH_API_KEY
             {{- end }}
-            # workflows/cmd/gateway/voice_stt_tts.go's TTS_VOICE — not a
+            # gateway/voice_stt_tts.go's TTS_VOICE — not a
             # secret, values.yaml's own comment has the real 500 this fixes.
             {{- if .Values.gateway.ttsVoice }}
             - name: TTS_VOICE
               value: {{ .Values.gateway.ttsVoice | quote }}
             {{- end }}
-            # workflows/cmd/gateway/voice_filler_player.go's FILLER_ENABLED —
+            # gateway/voice_filler_player.go's FILLER_ENABLED —
             # opt-in filler injection, values.yaml's own comment has the
             # full reasoning. Only ever set to "true" when explicitly
             # enabled — omitted entirely otherwise, matching main.go's own

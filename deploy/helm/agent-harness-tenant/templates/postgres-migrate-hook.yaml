@@ -1,4 +1,4 @@
-# Applies every activities/migrations/*.sql file (verbatim copies under
+# Applies every tenant-worker/migrations/*.sql file (verbatim copies under
 # files/ — Helm charts can't reference files outside their own directory,
 # so this has to be duplicated; keep both in sync) against this tenant's own
 # agent_harness database, in filename order (001_, 002_, ...). Bitnami's

@@ -125,7 +125,7 @@ router:
   publicURL: "https://harness-router.nighthawklabs.org"
   # -- CORS — REQUIRED (in practice) alongside publicURL above: the browser
   # request from agent-web's own public origin is genuinely cross-origin
-  # now, so this router must explicitly allow it (workflows/internal/router/
+  # now, so this router must explicitly allow it (router/internal/
   # core/cors.go). Set to agent-web's own public origin (scheme+host, no
   # path, e.g. "https://app.example.com") — or "*" to allow any origin, not
   # recommended once this handles real tenant traffic. Comma-separated if
@@ -150,7 +150,7 @@ router:
     tls: []
 
 # -- Self-serve tenant onboarding (docs/components/gateway/web.md's Phase
-# 2, workflows/cmd/automation) — TenantOnboardingWorkflow, run on this
+# 2, automation) — TenantOnboardingWorkflow, run on this
 # worker's own "system" Temporal namespace/task queue.
 automation:
   enabled: true
@@ -182,7 +182,7 @@ automation:
   # agent-brain subchart defaults — written into that tenant's real Gateway/
   # agent-brain Services (HealthCheckActivity polls these ports directly;
   # the router computes the exact same ports independently on its own side,
-  # workflows/internal/router/core/tenant.go). Only need to change these if
+  # router/internal/core/tenant.go). Only need to change these if
   # that chart's own defaults ever do.
   tenantGatewayPort: 8090
   tenantAgentBrainPort: 8080

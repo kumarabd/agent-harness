@@ -17,7 +17,6 @@ This doc records a genuinely load-bearing shift in what this harness *is*, artic
 - The harness runs its own reason–act–observe loop over a much *narrower* set of tools.
 - For coding: delegate to Claude Code / Codex / Aider via a specialized `delegate_agent`-style tool (`components/delegated-agents.md`) that spawns the CLI with structured event streaming, parses events for real audit + cost, returns a clean summary.
 - For web: delegate to whichever CLI does that best (or route via mcp-hub if there's already a good backend).
-- For skills / procedural guidance: leverage mcp-hub's existing `search_skills`/`get_skill` (`components/skills.md`) — the same shape as `search_tools`/`call_tool` already resolved for the mcp-hub tier.
 - **The harness's contribution is the orchestration itself**: multi-turn, multi-tenant, durable, cancellable, subagent-recursive, cost-tracked. Not another Claude Code.
 
 ---
@@ -28,7 +27,7 @@ This doc records a genuinely load-bearing shift in what this harness *is*, artic
 
 **2. There are 5+ excellent coding CLIs already.** Claude Code, Codex, Aider, Cursor CLI, Gemini CLI — each backed by real teams, real integrations, real cost management, real prompt engineering. Reproducing any single one is a huge undertaking; picking the right one per task and running it durably is a genuinely different, smaller, more useful thing.
 
-**3. mcp-hub already gives us discovery mechanics, for both tools and skills.** `search_tools`/`call_tool` for capabilities that live behind APIs (GitHub, Notion, etc.); `search_skills`/`get_skill` for procedural knowledge. The harness's own tool surface (`shell_exec`, memory_*, model registry, subagents) plus these two mcp-hub-mediated tiers plus the new `delegate_*` tier cover an enormous range of tasks without the harness ever needing to build a "better `edit_file`."
+**3. mcp-hub already gives us discovery mechanics.** `search_tools`/`call_tool` for capabilities that live behind APIs (GitHub, Notion, etc.). The harness's own tool surface (`shell_exec`, memory_*, model registry, subagents) plus this mcp-hub-mediated tier plus the new `delegate_*` tier cover an enormous range of tasks without the harness ever needing to build a "better `edit_file`."
 
 **4. The dominant coding CLIs emit structured event streams.** Claude Code's `--output-format stream-json`, Codex's `codex exec --json`, gh's `--json`, Aider's `--stream` — real, documented, machine-readable. This means "delegate" doesn't mean "black box" — the orchestrator can genuinely see the tool calls the delegated agent made, the files it touched, the cost it incurred. See `components/delegated-agents.md` for the plumbing.
 
@@ -49,7 +48,7 @@ This doc records a genuinely load-bearing shift in what this harness *is*, artic
 **Changes in emphasis:**
 - **Model registry usage skews smaller.** If Claude Code (or Codex) is doing the load-bearing model calls, the orchestrator's own model tier is mostly `fast` — routing decisions, "which delegated tool," summarization. `expert` tier is rarely used by the orchestrator itself.
 - **Cost accounting relocates.** Real cost is now largely inside delegated calls, not the orchestrator's own model calls. `budget-guardrails.md` needs to consume `delegated_agent_events.cost_usd` (see below), not just orchestrator token counts.
-- **System prompt reshapes around orchestration, not execution.** The current prompt says "you're a coding assistant, use `shell_exec`." Under this vision it should say "you're an orchestrator; here's how to decide between `delegate_claude_code`, `search_tools`/`call_tool`, `search_skills`, `shell_exec`, and spawning a subagent." Not designed here — flagged as a follow-up in `components/skills.md` and `components/delegated-agents.md`.
+- **System prompt reshapes around orchestration, not execution.** The current prompt says "you're a coding assistant, use `shell_exec`." Under this vision it should say "you're an orchestrator; here's how to decide between `delegate_claude_code`, `search_tools`/`call_tool`, `shell_exec`, and spawning a subagent." Not designed here — flagged as a follow-up in `components/delegated-agents.md`.
 
 **Drops off the roadmap entirely:**
 - Native `read_file`, `edit_file`, `write_file`, `grep`, `glob` — deliberately not built. Claude Code / Codex / Aider are better at these than any native tool this project could reasonably ship.
@@ -78,14 +77,15 @@ This doc records a genuinely load-bearing shift in what this harness *is*, artic
 
 ---
 
-### The Two Concrete Components This Vision Adds
+### The Concrete Component This Vision Adds
 
-- **`components/skills.md`** — `search_skills` and `get_skill` as two new native tools, structurally identical to the already-resolved `search_tools`/`call_tool` from `components/tool-registry.md`'s mcp-hub-mediated tier. Skills are guidance documents ("how to do X in this environment"), not executable recipes — the model reads a skill and *decides* what to invoke (`shell_exec`, `delegate_*`, `call_tool`, etc.) from that guidance. Deliberately not a new execution mechanism; a new discovery mechanism.
 - **`components/delegated-agents.md`** — the `delegate_*` tool family, one adapter per supported CLI. Each adapter knows its CLI's structured-event format, spawns the CLI, streams+parses events into Postgres for audit + cost accounting, returns a clean summary to the orchestrator. Substantially closes the "opaque delegation" and "invisible cost" concerns above.
 
-Both are new; both fit the existing patterns (mcp-hub-mediated native tools, session-filesystem-scoped execution, Postgres-persisted per-tool metadata, reference-passing contract).
+(A companion `components/skills.md` — `search_skills`/`get_skill` as a guidance-document discovery mechanism — landed alongside this doc the same day. Never built; retired 2026-09-22, see `components/tool-registry.md`'s Notes Log.)
+
+Fits the existing patterns (mcp-hub-mediated native tools, session-filesystem-scoped execution, Postgres-persisted per-tool metadata, reference-passing contract).
 
 ---
 
 ### Notes Log
-- 2026-08-28: **Introduced.** Prompted directly by the user's articulation of the vision — "for coding tasks, I could use claude-code cli for eg. in my shell, with shell_exec, I would want to orchestrate the tasks in it. For skills, I would want to leverage search_skill and get_skill tools, similar to search_tool and call_tool. The idea is to offload the load-bearing parts out while still retaining immense quality." That's a coherent-enough shift in what this harness is that it deserves its own top-level architectural doc, not just a component-level note buried inside `tool-registry.md`. All Part 1–3 design work stays valid; this doc reframes what to build *next* rather than what already exists. Two new component docs (`components/skills.md`, `components/delegated-agents.md`) landed alongside this one, capturing the concrete mechanisms.
+- 2026-08-28: **Introduced.** Prompted directly by the user's articulation of the vision — "for coding tasks, I could use claude-code cli for eg. in my shell, with shell_exec, I would want to orchestrate the tasks in it. For skills, I would want to leverage search_skill and get_skill tools, similar to search_tool and call_tool. The idea is to offload the load-bearing parts out while still retaining immense quality." That's a coherent-enough shift in what this harness is that it deserves its own top-level architectural doc, not just a component-level note buried inside `tool-registry.md`. All Part 1–3 design work stays valid; this doc reframes what to build *next* rather than what already exists. Two new component docs (`components/skills.md`, `components/delegated-agents.md`) landed alongside this one, capturing the concrete mechanisms — `skills.md`'s own plan was never built and was retired 2026-09-22 (`components/tool-registry.md`'s Notes Log).

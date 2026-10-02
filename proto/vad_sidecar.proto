@@ -1,5 +1,5 @@
 // docs/components/gateway/discord-voice.md's "Resolved: Silero VAD" — the
-// contract between Gateway (Go, workflows/cmd/gateway) and the VAD sidecar
+// contract between Gateway (Go, gateway/) and the VAD sidecar
 // (Python, vad-sidecar/). Stateless-over-the-wire by design: Silero's real
 // ONNX export takes state as an explicit input/output, so the caller
 // (Gateway) owns per-speaker state and passes it with every call — this
@@ -8,7 +8,7 @@ syntax = "proto3";
 
 package vadsidecar;
 
-option go_package = "agent-harness/workflows/internal/vadpb";
+option go_package = "agent-harness/gateway/internal/vadpb";
 
 service VAD {
   // Classify scores one 512-sample window at 16kHz (32ms) — Silero's

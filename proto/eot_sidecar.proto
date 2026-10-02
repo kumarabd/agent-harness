@@ -17,7 +17,7 @@ syntax = "proto3";
 
 package eotsidecar;
 
-option go_package = "agent-harness/workflows/internal/eotpb";
+option go_package = "agent-harness/gateway/internal/eotpb";
 
 service EOT {
   // Predict scores one utterance-so-far window and returns the model's
