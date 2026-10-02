@@ -38,6 +38,15 @@ var toolActivityOptions = map[string]toolTiming{
 		HeartbeatTimeout:    10 * time.Second,
 		StartToCloseTimeout: 5 * time.Minute,
 	},
+	// load_skill: agent-brain's own synthesis (merging a recurring task
+	// against procedural/reflective memory) may genuinely run longer than a
+	// plain recall/reflect round trip — recall/reflect themselves need no
+	// entry here (they fit defaultToolTiming's 30s fine), but this one gets
+	// real headroom rather than risking a spurious timeout on real content.
+	"load_skill": {
+		HeartbeatTimeout:    10 * time.Second,
+		StartToCloseTimeout: 2 * time.Minute,
+	},
 }
 
 // defaultToolTiming is today's existing local-demo tuning (see the comment

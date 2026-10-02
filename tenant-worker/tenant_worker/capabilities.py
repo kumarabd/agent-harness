@@ -57,6 +57,7 @@ class TimingProfile:
 HEAVY = TimingProfile(3.0, 10.0, 300.0)     # shell_exec / merge_subagent_output — cancellable subprocess / large PV merge
 NETWORK = TimingProfile(5.0, 15.0, 30.0)    # agent-brain / mcp-hub / Temporal-client round-trips
 LOCAL = TimingProfile(5.0, 15.0, 15.0)      # lcm_* — a Postgres read against this tenant's own DB
+SYNTHESIS = TimingProfile(10.0, 20.0, 120.0)  # load_skill — agent-brain's own merge may genuinely run longer than a plain recall/reflect round trip
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,11 @@ _STATIC_CAPABILITIES: list[Capability] = [
     # Notes Log.
     Capability("recall", Layer.COGNITION, _MAIN, handler_ref="recall", meta=True),
     Capability("reflect", Layer.COGNITION, _MAIN, handler_ref="reflect"),
+    # A memory-sourced, synthesized procedure for a recognized recurring task
+    # — docs/components/memory-slot.md's "Resolved: load_skill". Ordinary
+    # model-volitional tool, not a pipeline stage; meta=True to match every
+    # other PROVISIONING-bulleted capability.
+    Capability("load_skill", Layer.COGNITION, _MAIN, handler_ref="load_skill", meta=True, timing=SYNTHESIS),
     Capability("discover_tools", Layer.INTERFACE, _MAIN, handler_ref="discover_tools", meta=True),
     # call_tool is internal-only since the 2026-09-04 per-task-resolution
     # revision (tool-registry.md, "Resolved: Three-Layer Tool Taxonomy") —

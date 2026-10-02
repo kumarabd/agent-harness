@@ -411,6 +411,46 @@ async def reflect(arguments: dict, ctx: ToolContext) -> dict:
     )
 
 
+async def load_skill(arguments: dict, ctx: ToolContext) -> dict:
+    """Loads a synthesized, ready-to-execute procedure for a recognized,
+    recurring task from agent-brain's own procedural/reflective memory —
+    preferences and past learnings already folded in by agent-brain itself,
+    not reconciled here. Model passes `task`/`reason`; bank_id injected here,
+    same convention as recall/reflect.
+
+    Deliberately an ordinary model-volitional tool, not a pipeline stage and
+    not a peeled meta-tool: the result folds back as an ordinary observation
+    like any other tool call, and the model retains full judgment over
+    whether/how to follow what comes back — this is not a script to execute
+    blindly, see the tool's own schema description (llm.py).
+
+    Wraps agent-brain's `memory_load_skill` MCP tool — not shipped on the
+    agent-brain side yet as of this writing. No special-case error handling
+    here: AgentBrainNotConfiguredError/AgentBrainCallError propagate exactly
+    like they already do for recall/reflect, and the generic ToolCall
+    activity error path already turns that into an ordinary failed-tool
+    observation — this is how it degrades gracefully both when agent-brain
+    isn't configured and when this specific capability hasn't landed there
+    yet.
+
+    `tool_refs`, if present, are staged into turn_retrieval via
+    _persist_discovered exactly like search_tools already does for
+    discover_tools' own results — same shape ({server, tool, description,
+    input_schema}), so the same mint_resolved path (capabilities.py) turns
+    them into directly-callable schemas on the model's NEXT step. A
+    reference to a tool that's since gone stale isn't specially validated
+    here — it just fails normally at dispatch time, same as any other bad
+    tool call, surfacing as an ordinary observation the model can route
+    around (e.g. by calling discover_tools fresh)."""
+    result = await agent_brain.call_retain_tool(
+        "memory_load_skill",
+        {"bank_id": agent_brain.retain_bank_id(), "task": arguments["task"], "reason": arguments["reason"]},
+    )
+    if result.get("tool_refs"):
+        await _persist_discovered(ctx, result["tool_refs"])
+    return result
+
+
 async def discover_tools(query: str, top_k: int = 5) -> list[dict]:
     """The core of search_tools, ctx-free so both the model-facing tool
     handler below AND the request pipeline's ToolDiscover activity
@@ -621,6 +661,7 @@ _HANDLERS: dict[str, Any] = {
     "merge_subagent_output": merge_subagent_output,
     "recall": recall,
     "reflect": reflect,
+    "load_skill": load_skill,
     "discover_tools": search_tools,
     "call_tool": call_tool,
     "lcm_grep": lcm_grep,

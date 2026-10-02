@@ -115,6 +115,10 @@ DEFAULT_SYSTEM_PROMPT = (
     "- recall — pull relevant context about the user, people, or past decisions from long-term "
     "memory (reflect for a synthesized answer about one specific person or thing, "
     "rather than a raw result list).\n"
+    "- load_skill — load a synthesized procedure for a recognized, recurring task, with your "
+    "preferences already folded in; treat it as a strong starting point and still use your own "
+    "judgment — never a script to follow blindly. Only for genuinely recurring, multi-step work, "
+    "not a simple question.\n"
     "- discover_tools — find a tool that isn't already offered; a match becomes callable by its "
     "own name on your NEXT step, not the response that found it.\n"
     "- spawn_subagent — delegate a self-contained slice of work to its own focused turn.\n"
@@ -326,6 +330,31 @@ _STATIC_TOOLS_SCHEMA = [
                     "query": {"type": "string", "description": "The question to answer about this entity."},
                 },
                 "required": ["entity_name", "query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": (
+                "Load a synthesized, ready-to-execute procedure for a recognized, recurring kind "
+                "of task — preferences and past learnings already folded in. Returns candidate "
+                "steps and tool references; treat them as a strong starting point, not a script — "
+                "confirm referenced tools are still current and adapt to what's actually in front "
+                "of you. Only call this for a genuinely recurring, multi-step kind of task — never "
+                "for a simple question or a one-off lookup."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "What you're trying to accomplish."},
+                    "reason": {
+                        "type": "string",
+                        "description": "The specific recurring pattern this matches — why this is a known procedure, not a one-off.",
+                    },
+                },
+                "required": ["task", "reason"],
             },
         },
     },

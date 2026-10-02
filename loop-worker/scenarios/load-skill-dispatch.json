@@ -1,0 +1,21 @@
+{
+  "_comment": "Fully fixture-scripted (no real LLM call, no setup.sql) -- exercises load_skill's real dispatch path (docs/components/memory-slot.md, 'Resolved: load_skill'). A scripted response's tool_calls still dispatch for REAL (fixtures only script the model's own text/tool_calls, never the handler), so tools.load_skill's real handler runs and calls agent_brain.call_retain_tool('memory_load_skill', ...). agent-brain doesn't implement memory_load_skill yet, so this call is expected to fail cleanly today -- either AgentBrainNotConfiguredError (AGENT_BRAIN_RETAIN_BASE_URL unset) or AgentBrainCallError (configured, but the backend tool doesn't exist) -- and the turn should still complete normally afterward, the same as any other failed tool call ever does; that degrade-gracefully behavior is exactly what this scenario checks. Once agent-brain ships memory_load_skill for real, this scenario should gain a companion exercising the success path (tool_refs present, persisted into turn_retrieval, and a follow-up step calling one of them by name -- same shape as resolved-tool-dispatch.json) -- not written yet since there's nothing real to script against until that backend tool exists.",
+  "message": {
+    "role": "user",
+    "content": "Set up my usual morning briefing routine."
+  },
+  "scripted_model_responses": [
+    {
+      "content": "This looks like something I've done before in a specific way -- let me load the known procedure.",
+      "tool_calls": [
+        { "name": "load_skill", "is_subagent": false, "arguments": { "task": "assemble and send the user's morning briefing", "reason": "the user has a recurring morning-briefing routine" } }
+      ],
+      "usage": { "input_tokens": 40, "output_tokens": 18 }
+    },
+    {
+      "content": "I wasn't able to load a known procedure for this right now, so I'll work through it directly.",
+      "tool_calls": [],
+      "usage": { "input_tokens": 60, "output_tokens": 18 }
+    }
+  ]
+}

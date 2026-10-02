@@ -87,6 +87,7 @@ SCENARIOS=(
   parallel-subagents
   real-assembly
   resolved-tool-dispatch
+  load-skill-dispatch
   blocked-terminal
   no-progress-guard
   ceiling-raise
