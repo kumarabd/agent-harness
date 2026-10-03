@@ -18,6 +18,7 @@ type Tenant struct {
 	Slug           string
 	GatewayPort    int
 	AgentBrainPort int
+	MapsEnginePort int
 }
 
 func (t Tenant) Namespace() string { return t.Slug }
@@ -45,6 +46,13 @@ func (t Tenant) AgentBrainBaseURL() string {
 // tenant's mcp-hub subchart fullnameOverride (agent-harness-tenant/values.yaml).
 func (t Tenant) McpHubBaseURL() string {
 	return fmt.Sprintf("http://tools.%s.svc.cluster.local:8000", t.Namespace())
+}
+
+// MapsEngineBaseURL — the tenant's own maps-engine (journeys, garage, route planning), a plain Service
+// named "maps-engine" in the tenant's namespace. maps-engine does no token verification of its own:
+// it trusts headerVerifiedUser and must be reachable only from this router (NetworkPolicy).
+func (t Tenant) MapsEngineBaseURL() string {
+	return fmt.Sprintf("http://maps-engine.%s.svc.cluster.local:%d", t.Namespace(), t.MapsEnginePort)
 }
 
 func TenantForSub(sub string, gatewayPort, agentBrainPort int) Tenant {

@@ -1,0 +1,19 @@
+{{- if .Values.mapsEngine.enabled -}}
+# Named "maps-engine" (no tenant prefix by convention): the router's Tenant.MapsEngineBaseURL() builds
+# http://maps-engine.<tenant-namespace>.svc.cluster.local:<port>. Only the HTTP API is exposed — the
+# embedded MCP listener on its second port is deliberately not published.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "maps-engine") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "maps-engine") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "maps-engine") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.mapsEngine.port }}
+      targetPort: http
+{{- end }}
