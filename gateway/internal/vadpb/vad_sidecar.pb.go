@@ -171,7 +171,7 @@ const file_vad_sidecar_proto_rawDesc = "" +
 	"\x05state\x18\x02 \x01(\fR\x05state\x12\x18\n" +
 	"\acontext\x18\x03 \x01(\fR\acontext2L\n" +
 	"\x03VAD\x12E\n" +
-	"\bClassify\x12\x1b.vadsidecar.ClassifyRequest\x1a\x1c.vadsidecar.ClassifyResponseB(Z&agent-harness/gateway/internal/vadpbb\x06proto3"
+	"\bClassify\x12\x1b.vadsidecar.ClassifyRequest\x1a\x1c.vadsidecar.ClassifyResponseB&Z$agent-harness/gateway/internal/vadpbb\x06proto3"
 
 var (
 	file_vad_sidecar_proto_rawDescOnce sync.Once

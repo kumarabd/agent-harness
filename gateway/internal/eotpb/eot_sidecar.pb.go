@@ -148,7 +148,7 @@ const file_proto_eot_sidecar_proto_rawDesc = "" +
 	"\x0fPredictResponse\x12 \n" +
 	"\vprobability\x18\x01 \x01(\x02R\vprobability2I\n" +
 	"\x03EOT\x12B\n" +
-	"\aPredict\x12\x1a.eotsidecar.PredictRequest\x1a\x1b.eotsidecar.PredictResponseB(Z&agent-harness/gateway/internal/eotpbb\x06proto3"
+	"\aPredict\x12\x1a.eotsidecar.PredictRequest\x1a\x1b.eotsidecar.PredictResponseB&Z$agent-harness/gateway/internal/eotpbb\x06proto3"
 
 var (
 	file_proto_eot_sidecar_proto_rawDescOnce sync.Once
