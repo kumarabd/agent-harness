@@ -1,0 +1,25 @@
+{{- if and .Values.mapsEngine.enabled .Values.mapsEngine.networkPolicy.enabled -}}
+# maps-engine trusts the router's X-Nighthawk-Verified-User header, so it must be reachable from nowhere else.
+# Only the router's namespace may connect, and only to the HTTP port (not the embedded MCP listener).
+# Requires a CNI that enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "maps-engine") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "maps-engine") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "maps-engine") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.mapsEngine.networkPolicy.routerNamespace | quote }}
+      ports:
+        - port: {{ .Values.mapsEngine.port }}
+          protocol: TCP
+{{- end }}

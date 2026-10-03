@@ -56,6 +56,8 @@ func main() {
 		envIntOrDefault("TENANT_AGENT_BRAIN_PORT", 8080),
 	)
 
+	srv.WithMapsEnginePort(envIntOrDefault("TENANT_MAPS_ENGINE_PORT", 8080))
+
 	// Self-serve tenant onboarding (docs/components/gateway/web.md's Phase
 	// 2, onboarding.go) — genuinely optional: a router deployed without the
 	// automation worker wired up (TEMPORAL_ADDRESS unset) simply doesn't

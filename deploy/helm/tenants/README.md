@@ -64,3 +64,28 @@ insert into. The moment this tenant's own namespace/Gateway/agent-brain
 exist, the shared router already resolves any request from that tenant's
 Clerk user id straight to it (docs/components/gateway/web.md's
 "Resolved: Convention-Based Tenant Identity, No Database").
+
+## maps-engine (journeys, garage, place search, route planning)
+
+Every tenant gets its own `maps-engine` by default, with nothing to add to a tenant file:
+
+- **Database:** a separate `mapsengine` database (own role, TimescaleDB enabled) inside the tenant's own Postgres,
+  created by the post-install/upgrade hook. Its password is derived from `postgresql.auth.postgresPassword`, so a
+  tenant must set that (every onboarded or hand-written tenant already does).
+- **Owner:** pinned to `agentBrain.ownerUserID`, so it refuses every other user.
+- **Keys:** the platform-wide Google (Places/Routes/Weather) and Open Charge Map keys are set in
+  `agent-harness-tenant/values.yaml` under `mapsEngine`, and apply to every tenant.
+- **Access:** only through the shared router at `/maps/`; a NetworkPolicy blocks everything else.
+
+Existing tenants pick it up on their next upgrade (`helm upgrade --install ...` as above). To opt a tenant out or
+override something, add to its file:
+
+```yaml
+mapsEngine:
+  enabled: false            # opt out
+  # googleMapsApiKey: ...   # tenant-specific key
+  # image: { tag: sha-1a2b3c4 }
+  # imagePullSecrets: [{ name: ghcr-pull }]   # only if the GHCR package is private
+```
+
+The app's `ROUTER_BASE_URL` is the router's public URL.

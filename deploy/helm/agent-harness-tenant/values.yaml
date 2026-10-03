@@ -682,3 +682,44 @@ tenantVolume:
   # it. The file's own content is not a Helm value — edited directly on the
   # PV at runtime, starts empty (missing file) until someone writes one.
   configSubPath: "config"
+
+# -- maps-engine: each tenant's own journeys / garage / place search / route planning service (the maps-engine repo).
+# ON for every tenant by default. One instance per tenant, reached ONLY through the shared router at /maps/ — it
+# trusts the router's verified-user header instead of verifying tokens itself, so the NetworkPolicy below is part of
+# its auth boundary, not decoration. Set `enabled: false` in a tenant file to opt a tenant out.
+mapsEngine:
+  enabled: true
+  image:
+    repository: "ghcr.io/realnighthawk/maps-engine"
+    # -- Pin to a published sha-… tag for a reproducible rollout; "latest" follows main.
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  # -- Exactly one replica: the live-update WebSocket hub is process-local. Raise only after moving it to a shared bus.
+  replicaCount: 1
+  port: 8080
+  # -- Pull secrets for the maps-engine image (it is published to GHCR, not this cluster's usual registry). Leave empty
+  # when the package is public. Example: [{ name: ghcr-pull }].
+  imagePullSecrets: []
+  postgres:
+    # -- Leave empty (the default): maps-engine gets its OWN database, "mapsengine", with its own role, inside this
+    # tenant's Postgres (templates/postgres-init-roles-hook.yaml creates both and enables TimescaleDB in it). The role's
+    # password is then derived from postgresql.auth.postgresPassword, so nothing extra to configure per tenant.
+    password: ""
+  # -- Platform-wide provider keys (Places search, Routes, Weather; Open Charge Map for EV stops), shared by every
+  # tenant and never sent to a client. Hardcoded here on purpose so every tenant gets them; restrict both keys to
+  # their APIs in the provider consoles. A tenant file may override either.
+  googleMapsApiKey: "AIzaSyDUvX2hV6RYLJKpg15EMvs0P1tljjxHA8o"
+  ocmApiKey: "1fdbe615-4166-4239-b31b-98214a62f9ae"
+  # -- Empty = the tenant's own agentBrain.ownerUserID (the Clerk user who owns the tenant), so maps-engine refuses
+  # every other user even if a request is somehow misrouted.
+  ownerSub: ""
+  networkPolicy:
+    enabled: true
+    # -- Namespace the shared router runs in (the only caller allowed to reach maps-engine).
+    routerNamespace: "agent-harness-shared"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi

@@ -1,4 +1,4 @@
-{{- if or .Values.agentBrain.enabled .Values.mcpHub.enabled -}}
+{{- if or .Values.agentBrain.enabled .Values.mcpHub.enabled .Values.mapsEngine.enabled -}}
 {{- if and .Values.agentBrain.enabled (not .Values.agentBrain.postgres.password) }}
 {{- fail "agentBrain.postgres.password is required when agentBrain.enabled=true." }}
 {{- end }}
@@ -36,25 +36,22 @@ spec:
           # install/upgrade.
           imagePullPolicy: {{ .Values.postgresql.image.pullPolicy | default "IfNotPresent" }}
           env:
-            {{- if .Values.agentBrain.enabled }}
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
                   name: "{{ include "agent-harness.postgresqlName" . }}"
                   key: postgres-password
+            {{- if .Values.agentBrain.enabled }}
             - name: AGENTBRAIN_USER_PASSWORD
               value: {{ .Values.agentBrain.postgres.password | quote }}
             {{- end }}
             {{- if .Values.mcpHub.enabled }}
-            {{- if not .Values.agentBrain.enabled }}
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: "{{ include "agent-harness.postgresqlName" . }}"
-                  key: postgres-password
-            {{- end }}
             - name: MCPHUB_USER_PASSWORD
               value: {{ .Values.mcpHub.postgres.password | quote }}
+            {{- end }}
+            {{- if .Values.mapsEngine.enabled }}
+            - name: MAPSENGINE_USER_PASSWORD
+              value: {{ include "agent-harness.mapsEnginePassword" . | quote }}
             {{- end }}
           command:
             - /bin/bash
@@ -90,6 +87,20 @@ spec:
               WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mcphub') \gexec
               \connect mcphub
               CREATE EXTENSION IF NOT EXISTS vector;
+              \connect postgres
+              {{- end }}
+              {{- if .Values.mapsEngine.enabled }}
+              DO \$\$
+              BEGIN
+                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'mapsengine') THEN
+                  EXECUTE 'CREATE ROLE mapsengine WITH LOGIN PASSWORD ''$(printf '%s' "$MAPSENGINE_USER_PASSWORD" | sed "s/'/''/g")''';
+                END IF;
+              END
+              \$\$;
+              SELECT 'CREATE DATABASE mapsengine OWNER mapsengine'
+              WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mapsengine') \gexec
+              \connect mapsengine
+              CREATE EXTENSION IF NOT EXISTS timescaledb;
               {{- end }}
               SQL
 {{- end }}

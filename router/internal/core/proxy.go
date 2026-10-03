@@ -84,6 +84,7 @@ type Server struct {
 
 	gatewayPort    int
 	agentBrainPort int
+	mapsEnginePort int
 
 	// Self-serve tenant onboarding (onboarding.go, docs/components/gateway/
 	// web.md's Phase 2) — nil-able: a router deployed without automation
@@ -94,7 +95,16 @@ type Server struct {
 }
 
 func New(clerkCfg clerkauth.Config, gatewayPort, agentBrainPort int) *Server {
-	return &Server{clerkCfg: clerkCfg, gatewayPort: gatewayPort, agentBrainPort: agentBrainPort}
+	return &Server{clerkCfg: clerkCfg, gatewayPort: gatewayPort, agentBrainPort: agentBrainPort, mapsEnginePort: defaultMapsEnginePort}
+}
+
+// defaultMapsEnginePort is maps-engine's own default HTTP port (server.port in its config).
+const defaultMapsEnginePort = 8080
+
+// WithMapsEnginePort overrides the port the tenant's maps-engine Service listens on.
+func (s *Server) WithMapsEnginePort(port int) *Server {
+	s.mapsEnginePort = port
+	return s
 }
 
 // WithOnboarding enables /onboard (onboarding.go) — a separate step from
@@ -108,7 +118,9 @@ func (s *Server) WithOnboarding(temporal temporalclient.Client, automationTaskQu
 }
 
 func (s *Server) tenant(sub string) Tenant {
-	return TenantForSub(sub, s.gatewayPort, s.agentBrainPort)
+	t := TenantForSub(sub, s.gatewayPort, s.agentBrainPort)
+	t.MapsEnginePort = s.mapsEnginePort
+	return t
 }
 
 // Handler builds the router's full HTTP handler: /gateway/, /brain/, and
@@ -130,6 +142,10 @@ func (s *Server) Handler() http.Handler {
 	// translation has to happen server-side, so it's the router's own
 	// handler, registered before the generic prefix (Go's ServeMux picks
 	// the more specific pattern regardless of registration order).
+	// maps-engine (journeys, garage, planning): /maps/api/v1/... reaches the tenant's /api/v1/... with the
+	// verified identity stamped on, same as the routes above. WebSocket upgrades (/maps/api/v1/fleet/live)
+	// authenticate through handleProxy's token-query fallback.
+	mux.HandleFunc("/maps/", s.handleProxy("/maps", func(t Tenant) string { return t.MapsEngineBaseURL() }))
 	mux.HandleFunc("POST /connections/{backend}/authorize", s.handleAuthorize)
 	mux.HandleFunc("/connections/", s.handleProxy("/connections", func(t Tenant) string { return t.McpHubBaseURL() }))
 	// OAuth providers redirect back here with no Clerk bearer token at all —

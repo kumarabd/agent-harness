@@ -121,3 +121,23 @@ app.kubernetes.io/component: {{ .component }}
 {{ include "agent-harness.labels" .context }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
+
+{{/*
+maps-engine's database password. Explicit mapsEngine.postgres.password wins; otherwise it is derived from the tenant's
+Postgres password, so it is stable across upgrades (the init-roles hook creates the role once and never changes its
+password) and needs no per-tenant configuration. Used by both the Secret and the hook, so they cannot disagree.
+*/}}
+{{- define "agent-harness.mapsEnginePassword" -}}
+{{- if .Values.mapsEngine.postgres.password -}}
+{{- .Values.mapsEngine.postgres.password -}}
+{{- else if .Values.postgresql.auth.postgresPassword -}}
+{{- printf "%s:maps-engine-db" .Values.postgresql.auth.postgresPassword | sha256sum | trunc 40 -}}
+{{- else -}}
+{{- fail "maps-engine needs a database password: set postgresql.auth.postgresPassword (the maps database password is derived from it) or mapsEngine.postgres.password, or set mapsEngine.enabled=false for this tenant." -}}
+{{- end -}}
+{{- end -}}
+
+{{/* The one user maps-engine serves: mapsEngine.ownerSub, else the tenant's own agentBrain.ownerUserID. */}}
+{{- define "agent-harness.mapsEngineOwner" -}}
+{{- .Values.mapsEngine.ownerSub | default .Values.agentBrain.ownerUserID -}}
+{{- end -}}

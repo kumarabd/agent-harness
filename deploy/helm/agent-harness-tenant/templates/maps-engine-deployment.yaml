@@ -1,0 +1,56 @@
+{{- if .Values.mapsEngine.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "maps-engine") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "maps-engine") | nindent 4 }}
+spec:
+  replicas: {{ .Values.mapsEngine.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "maps-engine") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "maps-engine") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "agent-harness.resourceName" (dict "context" . "name" "tenant") }}
+      # Never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      {{- with .Values.mapsEngine.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: maps-engine
+          image: "{{ .Values.mapsEngine.image.repository }}:{{ .Values.mapsEngine.image.tag }}"
+          imagePullPolicy: {{ .Values.mapsEngine.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.mapsEngine.port }}
+          envFrom:
+            - secretRef:
+                name: {{ include "agent-harness.resourceName" (dict "context" . "name" "maps-engine") }}
+          env:
+            - name: MAPS_ENGINE_HTTP_PORT
+              value: {{ .Values.mapsEngine.port | quote }}
+            # Behind the router every request carries the verified user; refuse any that does not.
+            - name: MAPS_ENGINE_REQUIRE_VERIFIED_USER
+              value: "true"
+            {{- with include "agent-harness.mapsEngineOwner" . }}
+            - name: MAPS_ENGINE_OWNER_SUB
+              value: {{ . | quote }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+          resources:
+            {{- toYaml .Values.mapsEngine.resources | nindent 12 }}
+{{- end }}
