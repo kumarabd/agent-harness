@@ -1,0 +1,18 @@
+{{- if (include "agent-harness.financeEngineEnabled" .) -}}
+# Named "finance-engine" (no tenant prefix by convention): the router's Tenant.FinanceEngineBaseURL() builds
+# http://finance-engine.<tenant-namespace>.svc.cluster.local:<port>.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "finance-engine") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "finance-engine") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "finance-engine") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.financeEngine.port }}
+      targetPort: http
+{{- end }}

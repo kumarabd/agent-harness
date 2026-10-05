@@ -1,0 +1,60 @@
+{{- if (include "agent-harness.financeEngineEnabled" .) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "finance-engine") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "finance-engine") | nindent 4 }}
+spec:
+  replicas: {{ .Values.financeEngine.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "finance-engine") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "finance-engine") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "agent-harness.resourceName" (dict "context" . "name" "tenant") }}
+      # Never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      {{- with .Values.financeEngine.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: finance-engine
+          image: "{{ .Values.financeEngine.image.repository }}:{{ .Values.financeEngine.image.tag }}"
+          imagePullPolicy: {{ .Values.financeEngine.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.financeEngine.port }}
+          envFrom:
+            - secretRef:
+                name: {{ include "agent-harness.resourceName" (dict "context" . "name" "finance-engine") }}
+          env:
+            - name: LISTEN_ADDR
+              value: {{ printf "0.0.0.0:%d" (int .Values.financeEngine.port) | quote }}
+            # Browser callers (agent-web) arrive with an Origin; native apps send none. The engine's cross-origin guard
+            # rejects state-changing browser requests from origins not listed here.
+            - name: TRUSTED_ORIGINS
+              value: {{ join "," (.Values.financeEngine.trustedOrigins | default list) | quote }}
+            # DEV_VERIFIED_USER is deliberately never set: behind the router every request must carry the verified user.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.financeEngine.resources | nindent 12 }}
+{{- end }}

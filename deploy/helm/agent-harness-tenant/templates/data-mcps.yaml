@@ -1,0 +1,92 @@
+{{- range $name := list "finance" "health" }}
+{{- if (include "agent-harness.dataMcpEnabled" (dict "context" $ "name" $name)) }}
+{{- $cfg := index $.Values.dataMcps $name }}
+{{- $comp := printf "%s-mcp" $name }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "agent-harness.resourceName" (dict "context" $ "name" $comp) }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" $ "component" $comp) | nindent 4 }}
+type: Opaque
+stringData:
+  # Role/database "{{ $name }}" is created by postgres-init-roles-hook.yaml; the service creates its tables itself.
+  DATABASE_URL: {{ printf "postgresql://%s:%s@%s:5432/%s" $name (include "agent-harness.dataMcpPassword" (dict "context" $ "name" $name) | urlquery) (include "agent-harness.postgresqlName" $) $name | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" $ "component" $comp) }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" $ "component" $comp) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" $ "component" $comp) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" $ "component" $comp) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "agent-harness.resourceName" (dict "context" $ "name" "tenant") }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: {{ $comp }}
+          image: "{{ $cfg.image.repository }}:{{ $cfg.image.tag }}"
+          imagePullPolicy: {{ $cfg.image.pullPolicy }}
+          envFrom:
+            - secretRef:
+                name: {{ include "agent-harness.resourceName" (dict "context" $ "name" $comp) }}
+          env:
+            - name: PORT
+              value: {{ $.Values.dataMcps.port | quote }}
+          ports:
+            - name: http
+              containerPort: {{ $.Values.dataMcps.port }}
+          resources:
+            {{- toYaml $.Values.dataMcps.resources | nindent 12 }}
+---
+# Bare name on purpose: mcp-hub's catalog URL is http://{{ $comp }}:{{ $.Values.dataMcps.port }}/mcp.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" $ "component" $comp) }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" $ "component" $comp) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "agent-harness.componentSelectorLabels" (dict "context" $ "component" $comp) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $.Values.dataMcps.port }}
+      targetPort: http
+---
+# The MCP endpoint does no auth of its own: only this tenant's mcp-hub may connect.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" $ "component" $comp) }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" $ "component" $comp) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" $ "component" $comp) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "agent-harness.mcpHubName" $ | quote }}
+      ports:
+        - port: {{ $.Values.dataMcps.port }}
+          protocol: TCP
+{{- end }}
+{{- end }}

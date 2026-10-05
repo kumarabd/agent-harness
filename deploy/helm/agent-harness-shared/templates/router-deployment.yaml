@@ -46,6 +46,9 @@ spec:
             # Each tenant's own maps-engine Service (agent-harness-tenant's mapsEngine.port), reached at /maps/.
             - name: TENANT_MAPS_ENGINE_PORT
               value: "8080"
+            # Each tenant's own finance-engine Service (agent-harness-tenant's financeEngine.port), reached at /finance/.
+            - name: TENANT_FINANCE_ENGINE_PORT
+              value: "8091"
             # Same non-secret JWKS-only verification as agent-harness-tenant's
             # gateway.web.clerkJwksUrl/clerkIssuer — see that chart's own
             # comment for the full reasoning (no Clerk secret key anywhere).

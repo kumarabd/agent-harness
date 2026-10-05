@@ -72,6 +72,11 @@ var errMissingToken = errors.New("missing bearer token")
 // never merged: a caller cannot set its own identity by sending this header.
 const headerVerifiedUser = "X-Nighthawk-Verified-User"
 
+// headerVerifiedActor is read by finance-engine as the "who did this" stamp in its audit log. This router only ever
+// asserts the user (above), never a separate actor, so a client-supplied copy is always removed: otherwise a caller
+// could write any name it liked into its own audit history.
+const headerVerifiedActor = "X-Nighthawk-Verified-Actor"
+
 // tenantSlugPattern mirrors automation/activities/
 // validate.go's own — used here only to validate an UNAUTHENTICATED path
 // parameter (connectionCallback's tenant slug, embedded in an OAuth
@@ -82,9 +87,10 @@ var tenantSlugPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{1,38}[a-z0-9])?$
 type Server struct {
 	clerkCfg clerkauth.Config
 
-	gatewayPort    int
-	agentBrainPort int
-	mapsEnginePort int
+	gatewayPort       int
+	agentBrainPort    int
+	mapsEnginePort    int
+	financeEnginePort int
 
 	// Self-serve tenant onboarding (onboarding.go, docs/components/gateway/
 	// web.md's Phase 2) — nil-able: a router deployed without automation
@@ -95,7 +101,7 @@ type Server struct {
 }
 
 func New(clerkCfg clerkauth.Config, gatewayPort, agentBrainPort int) *Server {
-	return &Server{clerkCfg: clerkCfg, gatewayPort: gatewayPort, agentBrainPort: agentBrainPort, mapsEnginePort: defaultMapsEnginePort}
+	return &Server{clerkCfg: clerkCfg, gatewayPort: gatewayPort, agentBrainPort: agentBrainPort, mapsEnginePort: defaultMapsEnginePort, financeEnginePort: defaultFinanceEnginePort}
 }
 
 // defaultMapsEnginePort is maps-engine's own default HTTP port (server.port in its config).
@@ -104,6 +110,15 @@ const defaultMapsEnginePort = 8080
 // WithMapsEnginePort overrides the port the tenant's maps-engine Service listens on.
 func (s *Server) WithMapsEnginePort(port int) *Server {
 	s.mapsEnginePort = port
+	return s
+}
+
+// defaultFinanceEnginePort is finance-engine's own default listen port (LISTEN_ADDR in its config).
+const defaultFinanceEnginePort = 8091
+
+// WithFinanceEnginePort overrides the port the tenant's finance-engine Service listens on.
+func (s *Server) WithFinanceEnginePort(port int) *Server {
+	s.financeEnginePort = port
 	return s
 }
 
@@ -120,6 +135,7 @@ func (s *Server) WithOnboarding(temporal temporalclient.Client, automationTaskQu
 func (s *Server) tenant(sub string) Tenant {
 	t := TenantForSub(sub, s.gatewayPort, s.agentBrainPort)
 	t.MapsEnginePort = s.mapsEnginePort
+	t.FinanceEnginePort = s.financeEnginePort
 	return t
 }
 
@@ -146,6 +162,9 @@ func (s *Server) Handler() http.Handler {
 	// verified identity stamped on, same as the routes above. WebSocket upgrades (/maps/api/v1/fleet/live)
 	// authenticate through handleProxy's token-query fallback.
 	mux.HandleFunc("/maps/", s.handleProxy("/maps", func(t Tenant) string { return t.MapsEngineBaseURL() }))
+	// finance-engine (spends, categories, insights): /finance/api/v1/... reaches the tenant's /api/v1/... with the
+	// verified identity stamped on. Native clients (Treasure for iOS and Android) and agent-web call it here.
+	mux.HandleFunc("/finance/", s.handleProxy("/finance", func(t Tenant) string { return t.FinanceEngineBaseURL() }))
 	mux.HandleFunc("POST /connections/{backend}/authorize", s.handleAuthorize)
 	mux.HandleFunc("/connections/", s.handleProxy("/connections", func(t Tenant) string { return t.McpHubBaseURL() }))
 	// OAuth providers redirect back here with no Clerk bearer token at all —
@@ -289,6 +308,7 @@ func (s *Server) handleProxy(prefix string, target func(Tenant) string) http.Han
 			// router's own added assertion, always overwritten here
 			// regardless of anything the caller sent.
 			req.Header.Set(headerVerifiedUser, sub)
+			req.Header.Del(headerVerifiedActor)
 		}
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			var dnsErr *net.DNSError

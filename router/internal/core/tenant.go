@@ -15,10 +15,11 @@ import (
 // actually been provisioned yet (that's inferred from whether the proxied
 // request actually connects — see proxy.go's ErrorHandler).
 type Tenant struct {
-	Slug           string
-	GatewayPort    int
-	AgentBrainPort int
-	MapsEnginePort int
+	Slug              string
+	GatewayPort       int
+	AgentBrainPort    int
+	MapsEnginePort    int
+	FinanceEnginePort int
 }
 
 func (t Tenant) Namespace() string { return t.Slug }
@@ -53,6 +54,13 @@ func (t Tenant) McpHubBaseURL() string {
 // it trusts headerVerifiedUser and must be reachable only from this router (NetworkPolicy).
 func (t Tenant) MapsEngineBaseURL() string {
 	return fmt.Sprintf("http://maps-engine.%s.svc.cluster.local:%d", t.Namespace(), t.MapsEnginePort)
+}
+
+// FinanceEngineBaseURL — the tenant's own finance-engine (spends, categories, insights; the finance-engine repo), a
+// plain Service named "finance-engine" in the tenant's namespace. Like maps-engine it does no token verification of
+// its own: it trusts headerVerifiedUser and must be reachable only from this router (NetworkPolicy).
+func (t Tenant) FinanceEngineBaseURL() string {
+	return fmt.Sprintf("http://finance-engine.%s.svc.cluster.local:%d", t.Namespace(), t.FinanceEnginePort)
 }
 
 func TenantForSub(sub string, gatewayPort, agentBrainPort int) Tenant {

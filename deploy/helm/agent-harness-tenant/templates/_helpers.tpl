@@ -154,3 +154,52 @@ release's values and ignores this chart's new defaults); say so instead of crash
 true
 {{- end -}}
 {{- end -}}
+
+{{/*
+finance-mcp / health-mcp (values: dataMcps). Safe against a release whose values predate the block
+(`--reuse-values`): a missing block just means "off" here instead of a nil-pointer crash.
+*/}}
+{{- define "agent-harness.dataMcpEnabled" -}}
+{{- $m := (.context.Values.dataMcps | default dict) -}}
+{{- if and (hasKey $m .name) (index $m .name).enabled -}}true{{- end -}}
+{{- end -}}
+
+{{- define "agent-harness.anyDataMcp" -}}
+{{- if or (include "agent-harness.dataMcpEnabled" (dict "context" . "name" "finance")) (include "agent-harness.dataMcpEnabled" (dict "context" . "name" "health")) -}}true{{- end -}}
+{{- end -}}
+
+{{/* Role/database password: explicit dataMcps.<name>.dbPassword, else derived from the Postgres admin password. Used by the Secret and the hook. */}}
+{{- define "agent-harness.dataMcpPassword" -}}
+{{- $cfg := index .context.Values.dataMcps .name -}}
+{{- if $cfg.dbPassword -}}
+{{- $cfg.dbPassword -}}
+{{- else if .context.Values.postgresql.auth.postgresPassword -}}
+{{- printf "%s:%s-db" .context.Values.postgresql.auth.postgresPassword .name | sha256sum | trunc 40 -}}
+{{- else -}}
+{{- fail (printf "%s-mcp needs a database password: set postgresql.auth.postgresPassword or dataMcps.%s.dbPassword, or set dataMcps.%s.enabled=false." .name .name .name) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Is finance-engine (the Go service behind /finance/) on for this release? Safe against a release whose values predate the
+block (`--reuse-values`): a missing block just means "off". Distinct from dataMcps.finance, the older finance-mcp.
+*/}}
+{{- define "agent-harness.financeEngineEnabled" -}}
+{{- $m := (.Values.financeEngine | default dict) -}}
+{{- if $m.enabled -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+finance-engine's database password. Explicit financeEngine.postgres.password wins; otherwise it is derived from the
+tenant's Postgres password, so it is stable across upgrades (the init-roles hook creates the role once and never changes
+its password). Used by both the Secret and the hook, so they cannot disagree.
+*/}}
+{{- define "agent-harness.financeEnginePassword" -}}
+{{- if .Values.financeEngine.postgres.password -}}
+{{- .Values.financeEngine.postgres.password -}}
+{{- else if .Values.postgresql.auth.postgresPassword -}}
+{{- printf "%s:finance-engine-db" .Values.postgresql.auth.postgresPassword | sha256sum | trunc 40 -}}
+{{- else -}}
+{{- fail "finance-engine needs a database password: set postgresql.auth.postgresPassword (the finance-engine database password is derived from it) or financeEngine.postgres.password, or set financeEngine.enabled=false for this tenant." -}}
+{{- end -}}
+{{- end -}}
