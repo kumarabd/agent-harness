@@ -183,6 +183,10 @@ type ModelCallInput struct {
 	// see there. Also set directly (without a TurnInput) by turn.go's local
 	// post-Deliver-failure recovery round.
 	OfferDeliveryTools bool `json:"offer_delivery_tools,omitempty"`
+	// WrapUpReason — set only on the final ModelCall turn.go runs when the loop was stopped by a ceiling
+	// (max_retries / max_iterations / budget_exhausted) instead of finishing: no tools are offered and the model is
+	// told to explain, in plain words, what happened. Without it such a turn ended "completed" with no message.
+	WrapUpReason string `json:"wrap_up_reason,omitempty"`
 }
 
 // ToolCallRef is one tool call minted by ModelCall — name/ID/dispatch-kind

@@ -177,7 +177,9 @@ def schema_for(
 # directly-callable schemas instead of a prompt hint. Capped conservatively:
 # some mcp-hub input_schema blobs are large enough that binding all of
 # discover_tools's top_k=10 would cost more than the old hint block did.
-MAX_RESOLVED = 5
+# 8, not 5, since discovered tools now carry across a session's turns (prompt._staged_tool_rows): a finance session
+# touches ~9 distinct tools (~800 chars of schema each), while a Notion one is far heavier (~2.7k avg, 18k max).
+MAX_RESOLVED = 8
 
 _NAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
 
@@ -214,6 +216,11 @@ def mint_resolved(rows: "list[tuple[str, dict | None]]") -> list[Capability]:
             continue
         server, tool, schema = metadata.get("server"), metadata.get("tool"), metadata.get("input_schema")
         if not server or not tool or not isinstance(schema, dict):
+            continue
+        # shell-hub hits ({server: "shell", tool: "shell_exec"}) are invoked through the real shell_exec capability,
+        # never minted: a resolved cap routes through mcp-hub's call_tool, which has no "shell" server — and it would
+        # shadow the real shell_exec by name ("Unknown server: shell" on every shell call after a shell hit).
+        if server == "shell":
             continue
         name = _mint_name(server, tool, taken)
         taken.add(name)

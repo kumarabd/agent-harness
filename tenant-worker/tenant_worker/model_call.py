@@ -44,6 +44,41 @@ logger = logging.getLogger(__name__)
 MODEL_CALL_CHUNK_SIGNAL = "ModelCallChunk"
 
 
+_WRAP_UP_REASONS = {
+    "max_retries": "too many of this turn's tool calls failed",
+    "max_iterations": "this turn used up its step limit",
+    "budget_exhausted": "this turn used up its token budget",
+}
+
+
+def _wrap_up_instruction(reason: str) -> str:
+    return (
+        f"[harness notice] This turn is being stopped because {_WRAP_UP_REASONS.get(reason, reason)}. "
+        "Do not call any more tools. Reply to the user now, in plain words: what you were trying to do, "
+        "which steps failed and the key error, what (if anything) did get done, and what they can try next."
+    )
+
+
+async def _wrap_up_fallback(conn, turn_id: str, reason: str) -> str:
+    """Deterministic text for a wrap-up call whose model produced nothing — built from the turn's own last failed
+    tool call, so the user still learns that, and why, the turn stopped."""
+    row = await conn.fetchrow(
+        "SELECT tool_name, result FROM tool_calls WHERE parent_id = $1 AND status = 'error' ORDER BY started_at DESC LIMIT 1",
+        turn_id,
+    )
+    text = f"I had to stop before finishing: {_WRAP_UP_REASONS.get(reason, reason)}."
+    if row is not None:
+        try:
+            result = json.loads(row["result"]) if row["result"] else {}
+        except (TypeError, ValueError):
+            result = {}
+        error = str(result.get("error", "")) if isinstance(result, dict) else ""
+        text += f" The last failure was `{row['tool_name']}`" + (f": {error[:300]}" if error else ".")
+    if not text.endswith((".", "!", "?")):
+        text += "."
+    return text + " Tell me how you'd like to proceed, or ask me to try again."
+
+
 class ModelCallActivity:
     """Bound-method activity so the Postgres pool and Temporal client
     (both created once in tenant_worker.py) are injected per-process
@@ -187,6 +222,9 @@ class ModelCallActivity:
                     resolved=resolved,
                     offer_delivery_tools=input.offer_delivery_tools,
                 )
+                if input.wrap_up_reason:
+                    tools_schema = []
+                    conversation = [*conversation, {"role": "user", "content": _wrap_up_instruction(input.wrap_up_reason)}]
 
                 # docs/components/budget-guardrails.md, "Resolved: Metrics Export" —
                 # real provider round-trip time only; the fixture path above isn't
@@ -239,6 +277,11 @@ class ModelCallActivity:
                     )
                 histogram.record(time.monotonic() - started)
                 content, raw_tool_calls, usage = real.content, real.raw_tool_calls, real.usage
+                if input.wrap_up_reason:
+                    raw_tool_calls = []  # tools weren't offered; a model that emits one anyway is ignored
+                    if not content.strip():
+                        # The one place a silent turn is never acceptable — say what happened ourselves.
+                        content = await _wrap_up_fallback(conn, input.turn_id, input.wrap_up_reason)
                 # docs/components/turn-pipeline.md — the model authors these via
                 # the peeled report_status meta-tool. Empty status ⇒ it didn't
                 # call report_status this step; the default below (done iff no

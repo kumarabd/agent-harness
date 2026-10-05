@@ -156,7 +156,7 @@ true
 {{- end -}}
 
 {{/*
-finance-mcp / health-mcp (values: dataMcps). Safe against a release whose values predate the block
+health-mcp (values: dataMcps). Safe against a release whose values predate the block
 (`--reuse-values`): a missing block just means "off" here instead of a nil-pointer crash.
 */}}
 {{- define "agent-harness.dataMcpEnabled" -}}
@@ -165,7 +165,7 @@ finance-mcp / health-mcp (values: dataMcps). Safe against a release whose values
 {{- end -}}
 
 {{- define "agent-harness.anyDataMcp" -}}
-{{- if or (include "agent-harness.dataMcpEnabled" (dict "context" . "name" "finance")) (include "agent-harness.dataMcpEnabled" (dict "context" . "name" "health")) -}}true{{- end -}}
+{{- if (include "agent-harness.dataMcpEnabled" (dict "context" . "name" "health")) -}}true{{- end -}}
 {{- end -}}
 
 {{/* Role/database password: explicit dataMcps.<name>.dbPassword, else derived from the Postgres admin password. Used by the Secret and the hook. */}}
@@ -182,7 +182,7 @@ finance-mcp / health-mcp (values: dataMcps). Safe against a release whose values
 
 {{/*
 Is finance-engine (the Go service behind /finance/) on for this release? Safe against a release whose values predate the
-block (`--reuse-values`): a missing block just means "off". Distinct from dataMcps.finance, the older finance-mcp.
+block (`--reuse-values`): a missing block just means "off".
 */}}
 {{- define "agent-harness.financeEngineEnabled" -}}
 {{- $m := (.Values.financeEngine | default dict) -}}

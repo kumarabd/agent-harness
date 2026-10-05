@@ -204,3 +204,34 @@ func TestTurnWorkflow_ReturnsUnprocessedSignalsAfterModelFailure(t *testing.T) {
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, []string{"m1", "m2"}, []string{result.UnprocessedMessages[0].Message.ClientMsgID, result.UnprocessedMessages[1].Message.ClientMsgID})
 }
+
+// A turn stopped by a ceiling used to end "completed" in silence; it must now make one final tool-less ModelCall
+// carrying the stop reason, so the user is told what happened.
+func TestRunReasonActLoop_MaxRetries_RunsWrapUpModelCall(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	env.RegisterWorkflow(testReasoningTurnWorkflow)
+	mockTurnInfra(env)
+
+	var wrapUps []string
+	calls := 0
+	env.RegisterActivityWithOptions(func(_ context.Context, in types.ModelCallInput) (types.ModelCallOutput, error) {
+		if in.WrapUpReason != "" {
+			wrapUps = append(wrapUps, in.WrapUpReason)
+			return types.ModelCallOutput{Status: "done", HasContent: true}, nil
+		}
+		calls++
+		return types.ModelCallOutput{Status: "working", ToolCalls: []types.ToolCallRef{{ToolCallID: "t1:act:" + string(rune('a'+calls)), ToolName: "failing_tool"}}}, nil
+	}, activity.RegisterOptions{Name: "ModelCall"})
+	env.RegisterActivityWithOptions(func(_ context.Context, _ types.ToolCallInput) (types.ToolCallOutput, error) {
+		return types.ToolCallOutput{Status: "error"}, nil
+	}, activity.RegisterOptions{Name: "ToolCall"})
+
+	env.ExecuteWorkflow(testReasoningTurnWorkflow, "session")
+
+	require.NoError(t, env.GetWorkflowError())
+	var result RunReasonActLoopResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "max_retries", result.StopReason)
+	require.Equal(t, []string{"max_retries"}, wrapUps)
+}

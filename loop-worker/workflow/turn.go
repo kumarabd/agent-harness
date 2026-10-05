@@ -1549,6 +1549,22 @@ loop:
 		dispatchSubagentManifests(ctx, subagentIDs)
 	}
 
+	// A ceiling stop used to end the turn "completed" with whatever the last step left behind — often nothing, so the
+	// user got silence after a run of failed tool calls. One final tool-less ModelCall explains what happened (and
+	// model_call.py writes a deterministic message if the model produces nothing); if even that fails, fail the turn
+	// loudly instead of ending quietly.
+	if stopReason == "max_retries" || stopReason == "max_iterations" || stopReason == "budget_exhausted" {
+		var wrapOut types.ModelCallOutput
+		wao := workflow.ActivityOptions{StartToCloseTimeout: activityTimeoutTierA, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 3}}
+		wctx := workflow.WithActivityOptions(ctx, wao)
+		wrapInput := types.ModelCallInput{TurnID: in.TurnID, ContextSeq: contextSeq, HintModality: hintModality, HintTier: hintTier, WrapUpReason: stopReason}
+		if err := workflow.ExecuteActivity(wctx, "ModelCall", wrapInput).Get(wctx, &wrapOut); err != nil {
+			tr, ferr := failTurn(ctx, in.TurnID, in.SessionKey, in.ConnectionID, in.ParentType, err, in.Interrupts)
+			return RunReasonActLoopResult{TurnID: in.TurnID, StopReason: "error", InterruptedDuringDelivery: tr.InterruptedDuringDelivery}, ferr
+		}
+		contextSeq++
+	}
+
 	metrics.Counter("turn_iterations_total").Inc(int64(iterations))
 	metrics.Counter("turn_retries_total").Inc(int64(retries))
 	metrics.WithTags(map[string]string{"stop_reason": stopReason}).Counter("turn_stop_reason_total").Inc(1)

@@ -76,13 +76,33 @@ def _scratchpad_text(turn_id: str) -> str | None:
     return (_SCRATCHPAD_HEADER + content) if content else None
 
 
+# How many recent discover_tools rows (across this session's turns) to consider carrying forward. Only
+# capabilities.MAX_RESOLVED distinct tools survive minting; this just bounds the scan.
+_CARRY_FORWARD_ROWS = 60
+
+
 async def _staged_tool_rows(conn, turn_id: str) -> list[tuple[str, dict]]:
-    """`discover_tools`'s staged `(content, metadata)` rows for this turn —
-    `metadata` carries {server, tool, input_schema} (jsonb; asyncpg returns it
-    as text)."""
+    """`discover_tools`'s staged `(content, metadata)` rows for this session — `metadata` carries
+    {server, tool, input_schema} (jsonb; asyncpg returns it as text).
+
+    Spans the session's recent turns, not just this one: the conversation history still shows the model calling
+    a discovered tool (e.g. `categories_create`) directly in earlier turns, so it repeats that on a fresh turn —
+    which used to fail with "unknown tool" because discovery was scoped to a single turn. Oldest-first (this turn's
+    own discovery last, so it outranks carried-over tools when mint_resolved keeps the last MAX_RESOLVED), and a
+    {server, tool} discovered more than once keeps only its latest row."""
+    session_prefix = ids.session_key_of(turn_id) + ":turn:"
     rows = await conn.fetch(
-        "SELECT content, metadata FROM turn_retrieval "
-        "WHERE owner_id = $1 AND kind = 'tool' ORDER BY seq",
-        turn_id,
+        "SELECT content, metadata FROM ("
+        "  SELECT content, metadata, created_at, seq FROM turn_retrieval "
+        "  WHERE kind = 'tool' AND starts_with(owner_id, $1) "
+        "  ORDER BY created_at DESC, seq DESC LIMIT $2"
+        ") recent ORDER BY created_at, seq",
+        session_prefix, _CARRY_FORWARD_ROWS,
     )
-    return [(r["content"], json.loads(r["metadata"]) if r["metadata"] else {}) for r in rows]
+    latest: dict[tuple, tuple[str, dict]] = {}
+    for r in rows:
+        metadata = json.loads(r["metadata"]) if r["metadata"] else {}
+        key = (metadata.get("server"), metadata.get("tool"))
+        latest.pop(key, None)  # re-insert so a repeat moves to the end (most recent)
+        latest[key] = (r["content"], metadata)
+    return list(latest.values())

@@ -107,7 +107,11 @@ class ToolCallActivity:
             spec = TOOL_REGISTRY.get(tool_name)
             if spec is None:
                 logger.warning("ToolCall: unknown tool %r for %s", tool_name, input.tool_call_id)
-                return await self._finish_error(input.tool_call_id, f"unknown tool: {tool_name}")
+                return await self._finish_error(
+                    input.tool_call_id,
+                    f"unknown tool: {tool_name} — it is not offered on this turn. Call discover_tools to find and "
+                    "load it, then call it by the name discover_tools returns.",
+                )
             handler = spec.handler
             handler_arguments = arguments
 

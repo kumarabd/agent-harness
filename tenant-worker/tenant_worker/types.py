@@ -63,6 +63,8 @@ class ModelCallInput:
     # Delivery-in-the-loop — offers deliver_reply/deliver_attachment for this
     # one call: turn.go's bounded post-Deliver-failure recovery round.
     offer_delivery_tools: bool = False
+    # Final wrap-up call after a ceiling stop (see shared/types ModelCallInput.WrapUpReason): no tools, explain.
+    wrap_up_reason: str = ""
 
 
 @dataclass

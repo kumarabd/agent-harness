@@ -57,7 +57,7 @@ spec:
             - name: FINANCEENGINE_USER_PASSWORD
               value: {{ include "agent-harness.financeEnginePassword" . | quote }}
             {{- end }}
-            {{- range $n := list "finance" "health" }}
+            {{- range $n := list "health" }}
             {{- if (include "agent-harness.dataMcpEnabled" (dict "context" $ "name" $n)) }}
             - name: {{ upper $n }}_USER_PASSWORD
               value: {{ include "agent-harness.dataMcpPassword" (dict "context" $ "name" $n) | quote }}
@@ -128,7 +128,7 @@ spec:
               CREATE EXTENSION IF NOT EXISTS vector;
               \connect postgres
               {{- end }}
-              {{- range $n := list "finance" "health" }}
+              {{- range $n := list "health" }}
               {{- if (include "agent-harness.dataMcpEnabled" (dict "context" $ "name" $n)) }}
               DO \$\$
               BEGIN

@@ -1,6 +1,7 @@
 {{- if and (include "agent-harness.financeEngineEnabled" .) .Values.financeEngine.networkPolicy.enabled -}}
-# finance-engine trusts the router's X-Nighthawk-Verified-User header, so it must be reachable from nowhere else.
-# Only the shared router's pods may connect. The router is matched by its pod labels (agent-harness-shared's router
+# finance-engine trusts the X-Nighthawk-Verified-User header. Only the shared router and this tenant's mcp-hub
+# may connect; the mcp-hub connection supplies this tenant's owner ID. The router is matched by its pod labels
+# (agent-harness-shared's router
 # Deployment), in the namespace named by financeEngine.networkPolicy.routerNamespace, or in any namespace when that
 # is left empty. Requires a CNI that enforces NetworkPolicy.
 apiVersion: networking.k8s.io/v1
@@ -31,4 +32,13 @@ spec:
       ports:
         - port: {{ .Values.financeEngine.port }}
           protocol: TCP
+    {{- if .Values.mcpHub.enabled }}
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "agent-harness.mcpHubName" . | quote }}
+      ports:
+        - port: {{ .Values.financeEngine.port }}
+          protocol: TCP
+    {{- end }}
 {{- end }}

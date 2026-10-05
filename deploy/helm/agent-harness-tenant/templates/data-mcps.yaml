@@ -1,4 +1,4 @@
-{{- range $name := list "finance" "health" }}
+{{- range $name := list "health" }}
 {{- if (include "agent-harness.dataMcpEnabled" (dict "context" $ "name" $name)) }}
 {{- $cfg := index $.Values.dataMcps $name }}
 {{- $comp := printf "%s-mcp" $name }}

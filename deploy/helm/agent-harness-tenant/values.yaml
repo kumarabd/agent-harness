@@ -295,7 +295,7 @@ postgresql:
     persistence:
       size: "10Gi"
     # -- Postgres' stock max_connections is far too low for what shares this server: agent-brain, mcp-hub,
-    # maps-engine, finance-mcp, health-mcp and the base role each keep their own pool. At 25 the mcp-hub could not
+    # maps-engine, finance-engine, health-mcp and the base role each keep their own pool. At 25 the mcp-hub could not
     # start ("remaining connection slots are reserved for roles with the SUPERUSER attribute").
     extendedConfiguration: |-
       max_connections = 100
@@ -733,19 +733,9 @@ mapsEngine:
     limits:
       memory: 512Mi
 
-# -- finance-mcp / health-mcp: each tenant's OWN finance and health MCP servers (the infra repo's finance-mcp and
-# health-mcp), each with its own empty database + role in this tenant's Postgres (created by
-# templates/postgres-init-roles-hook.yaml; the services create their tables on first connect). ON for every tenant by
-# default, so a tenant never shares data with anyone — the old single instance in `bots` held one person's data.
-# Services are named bare "finance-mcp" / "health-mcp" so mcp-hub's catalog URL (http://finance-mcp:8080/mcp)
-# resolves in the tenant's own namespace. Reachable only from this tenant's mcp-hub (NetworkPolicy). Set
-# `dataMcps.<name>.enabled: false` in a tenant file to opt out.
+# -- health-mcp: each tenant's own health MCP server and database. Finance is served by financeEngine below.
+# The health service is reachable only from this tenant's mcp-hub (NetworkPolicy).
 dataMcps:
-  finance:
-    enabled: true
-    image: { repository: "ghcr.io/realnighthawk/infra/finance-mcp", tag: "latest", pullPolicy: IfNotPresent }
-    # -- Leave empty: derived from postgresql.auth.postgresPassword (same scheme as mapsEngine.postgres.password).
-    dbPassword: ""
   health:
     enabled: true
     image: { repository: "ghcr.io/realnighthawk/infra/health-mcp", tag: "latest", pullPolicy: IfNotPresent }
@@ -756,12 +746,10 @@ dataMcps:
     limits: { memory: 256Mi }
 
 # -- finance-engine: each tenant's own spending ledger (the finance-engine repo): spends, categories, tags, merchants,
-# insights, and the API behind the Treasure iOS/Android apps. One instance per tenant, reached ONLY through the shared
-# router at /finance/ — it trusts the router's verified-user header instead of verifying tokens itself, so the
-# NetworkPolicy below is part of its auth boundary. Its data lives in its OWN database ("financeengine", with
-# TimescaleDB and pgvector) inside this tenant's Postgres, separate from the older finance-mcp's "finance" database.
-# OFF by default: the image must be published first (see the finance-engine repo's docker-publish workflow). Turn it on
-# in a tenant file with `financeEngine: { enabled: true }`.
+# insights, and the API behind the Treasure iOS/Android apps. One instance per tenant, reached through the shared
+# router at /finance/ and through this tenant's mcp-hub at /mcp. Both supply the verified-user header, so the
+# NetworkPolicy below is part of its auth boundary. Data lives in its own "financeengine" database (TimescaleDB
+# and pgvector). The former finance-mcp's "finance" database is preserved for explicit migration.
 financeEngine:
   enabled: true
   image:
@@ -779,12 +767,15 @@ financeEngine:
     # -- Leave empty (the default): derived from postgresql.auth.postgresPassword (same scheme as mapsEngine.postgres.password).
     password: ""
   # -- Browser origins allowed to make state-changing calls through the router (agent-web). Native apps send no Origin
-  # and need no entry. Exact origins only, e.g. ["https://agent.nighthawklabs.org"].
-  trustedOrigins: []
+  # and need no entry. Exact origins, or one "https://*.domain.tld" wildcard per entry (any subdomain, no port; needs a finance-engine
+  # build that has internal/transport/origins.go — older images treat the "*" literally and match nothing). EVERY browser call is a POST (/operations/<name>), so with
+  # this empty finance-engine answers each one with 403 "cross-origin request detected". Defaults to every
+  # nighthawklabs.org subdomain, which covers agent-web (the automation worker's WEB_ORIGIN).
+  trustedOrigins: ["https://*.nighthawklabs.org"]
   networkPolicy:
     enabled: true
-    # -- Namespace the shared router (the only caller allowed to reach finance-engine) runs in. Empty matches the
-    # router's pods by label in ANY namespace; set it to pin the policy to exactly that namespace.
+    # -- Namespace where the shared router runs. Empty matches router pods by label in any namespace.
+    # This tenant's mcp-hub is also allowed to reach finance-engine in the tenant namespace.
     routerNamespace: ""
   resources:
     requests:
