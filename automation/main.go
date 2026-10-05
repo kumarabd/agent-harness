@@ -119,6 +119,8 @@ func main() {
 	taskQueue := envOrDefault("TEMPORAL_TASK_QUEUE", "system")
 	w := worker.New(temporalClient, taskQueue, worker.Options{})
 	w.RegisterWorkflow(automationworkflow.TenantOnboardingWorkflow)
+	w.RegisterWorkflow(automationworkflow.TenantLLMUpdateWorkflow)
+	w.RegisterWorkflow(automationworkflow.TenantLLMReadWorkflow)
 	w.RegisterActivity(a)
 
 	log.Printf("automation worker starting: temporal=%s task_queue=%s", a.TemporalAddress, taskQueue)

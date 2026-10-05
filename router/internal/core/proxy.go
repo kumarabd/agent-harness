@@ -157,6 +157,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	if s.temporal != nil {
 		s.registerOnboarding(mux)
+		s.registerLLM(mux)
 	}
 	return corsMiddleware(corsConfigFromEnv(), mux)
 }
