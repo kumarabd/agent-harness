@@ -1,4 +1,4 @@
-{{- if .Values.mapsEngine.enabled -}}
+{{- if (include "agent-harness.mapsEngineEnabled" .) -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,12 +29,16 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.mapsEngine.port }}
+            - name: mcp
+              containerPort: {{ .Values.mapsEngine.mcpPort }}
           envFrom:
             - secretRef:
                 name: {{ include "agent-harness.resourceName" (dict "context" . "name" "maps-engine") }}
           env:
             - name: MAPS_ENGINE_HTTP_PORT
               value: {{ .Values.mapsEngine.port | quote }}
+            - name: MAPS_ENGINE_MCP_PORT
+              value: {{ .Values.mapsEngine.mcpPort | quote }}
             # Behind the router every request carries the verified user; refuse any that does not.
             - name: MAPS_ENGINE_REQUIRE_VERIFIED_USER
               value: "true"

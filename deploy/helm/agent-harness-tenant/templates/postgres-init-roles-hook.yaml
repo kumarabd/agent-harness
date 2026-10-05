@@ -1,4 +1,4 @@
-{{- if or .Values.agentBrain.enabled .Values.mcpHub.enabled .Values.mapsEngine.enabled -}}
+{{- if or .Values.agentBrain.enabled .Values.mcpHub.enabled (include "agent-harness.mapsEngineEnabled" .) -}}
 {{- if and .Values.agentBrain.enabled (not .Values.agentBrain.postgres.password) }}
 {{- fail "agentBrain.postgres.password is required when agentBrain.enabled=true." }}
 {{- end }}
@@ -49,7 +49,7 @@ spec:
             - name: MCPHUB_USER_PASSWORD
               value: {{ .Values.mcpHub.postgres.password | quote }}
             {{- end }}
-            {{- if .Values.mapsEngine.enabled }}
+            {{- if (include "agent-harness.mapsEngineEnabled" .) }}
             - name: MAPSENGINE_USER_PASSWORD
               value: {{ include "agent-harness.mapsEnginePassword" . | quote }}
             {{- end }}
@@ -89,7 +89,7 @@ spec:
               CREATE EXTENSION IF NOT EXISTS vector;
               \connect postgres
               {{- end }}
-              {{- if .Values.mapsEngine.enabled }}
+              {{- if (include "agent-harness.mapsEngineEnabled" .) }}
               DO \$\$
               BEGIN
                 IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'mapsengine') THEN

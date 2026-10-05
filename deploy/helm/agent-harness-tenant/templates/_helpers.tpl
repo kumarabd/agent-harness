@@ -141,3 +141,16 @@ password) and needs no per-tenant configuration. Used by both the Secret and the
 {{- define "agent-harness.mapsEngineOwner" -}}
 {{- .Values.mapsEngine.ownerSub | default .Values.agentBrain.ownerUserID -}}
 {{- end -}}
+
+{{/*
+Is maps-engine on for this release? Every maps-engine template asks here instead of reading .Values.mapsEngine
+directly. When the whole block is missing, the release was upgraded with `--reuse-values` (which reuses the OLD
+release's values and ignores this chart's new defaults); say so instead of crashing with a nil pointer.
+*/}}
+{{- define "agent-harness.mapsEngineEnabled" -}}
+{{- if not .Values.mapsEngine -}}
+{{- fail "the mapsEngine values are missing. This usually means `helm upgrade --reuse-values`, which keeps the old release's values and ignores this chart's new defaults. Re-run without --reuse-values (for example `helm upgrade --install <slug> deploy/helm/agent-harness-tenant -n <slug> -f deploy/helm/tenants/<slug>.yaml`), or use --reset-then-reuse-values, or add a mapsEngine block (or `mapsEngine: {enabled: false}`) to the values you pass." -}}
+{{- else if .Values.mapsEngine.enabled -}}
+true
+{{- end -}}
+{{- end -}}

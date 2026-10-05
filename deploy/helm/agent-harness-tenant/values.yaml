@@ -697,6 +697,8 @@ mapsEngine:
   # -- Exactly one replica: the live-update WebSocket hub is process-local. Raise only after moving it to a shared bus.
   replicaCount: 1
   port: 8080
+  # -- Embedded MCP (Streamable HTTP) listener, reached only by this tenant's own mcp-hub (see networkPolicy).
+  mcpPort: 8090
   # -- Pull secrets for the maps-engine image (it is published to GHCR, not this cluster's usual registry). Leave empty
   # when the package is public. Example: [{ name: ghcr-pull }].
   imagePullSecrets: []
@@ -715,8 +717,10 @@ mapsEngine:
   ownerSub: ""
   networkPolicy:
     enabled: true
-    # -- Namespace the shared router runs in (the only caller allowed to reach maps-engine).
-    routerNamespace: "agent-harness-shared"
+    # -- Namespace the shared router (the only caller allowed to reach maps-engine) runs in. Empty (the default)
+    # matches the router's pods by label in ANY namespace, which works wherever the shared chart was installed; set it
+    # to that release's namespace to pin the policy to exactly that namespace.
+    routerNamespace: ""
   resources:
     requests:
       cpu: 50m

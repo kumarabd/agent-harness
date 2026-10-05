@@ -15,13 +15,22 @@ package core
 
 import (
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 )
 
+// wildcardOrigin is a "https://*.example.org" entry: any host that is a subdomain (one level or several) of example.org
+// on that scheme. The bare apex (example.org itself) is not matched; list it separately if needed.
+type wildcardOrigin struct {
+	scheme string
+	suffix string // ".example.org"
+}
+
 type corsConfig struct {
-	allowAll bool
-	allowed  map[string]struct{}
+	allowAll  bool
+	allowed   map[string]struct{}
+	wildcards []wildcardOrigin
 }
 
 // corsConfigFromEnv reads ROUTER_ALLOWED_ORIGINS — comma-separated exact
@@ -41,6 +50,12 @@ func corsConfigFromEnv() corsConfig {
 			cfg.allowAll = true
 			continue
 		}
+		// "https://*.nighthawklabs.org": a scheme, then "*." and a plain host (no port, path or further wildcards).
+		if scheme, host, ok := strings.Cut(origin, "://"); ok && scheme != "" && strings.HasPrefix(host, "*.") &&
+			len(host) > 2 && !strings.ContainsAny(host[2:], "*/:@?#") {
+			cfg.wildcards = append(cfg.wildcards, wildcardOrigin{scheme: scheme, suffix: strings.ToLower(host[1:])})
+			continue
+		}
 		cfg.allowed[origin] = struct{}{}
 	}
 	return cfg
@@ -50,8 +65,26 @@ func (c corsConfig) allows(origin string) bool {
 	if c.allowAll {
 		return true
 	}
-	_, ok := c.allowed[origin]
-	return ok
+	if _, ok := c.allowed[origin]; ok {
+		return true
+	}
+	if len(c.wildcards) == 0 {
+		return false
+	}
+	// An Origin is scheme://host[:port] and nothing else; anything more is not an origin, so it matches nothing.
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") ||
+		u.RawQuery != "" || u.Fragment != "" || u.Port() != "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, w := range c.wildcards {
+		// The suffix starts with a dot, so "evilnighthawklabs.org" and "nighthawklabs.org.evil.com" do not match.
+		if u.Scheme == w.scheme && len(host) > len(w.suffix) && strings.HasSuffix(host, w.suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // corsMiddleware sets CORS headers for an allowed Origin and short-circuits

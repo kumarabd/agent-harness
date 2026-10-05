@@ -1,6 +1,8 @@
-{{- if and .Values.mapsEngine.enabled .Values.mapsEngine.networkPolicy.enabled -}}
+{{- if and (include "agent-harness.mapsEngineEnabled" .) .Values.mapsEngine.networkPolicy.enabled -}}
 # maps-engine trusts the router's X-Nighthawk-Verified-User header, so it must be reachable from nowhere else.
-# Only the router's namespace may connect, and only to the HTTP port (not the embedded MCP listener).
+# Only the shared router's pods may connect, and only to the HTTP port (not the embedded MCP listener). The router
+# is matched by its pod labels (agent-harness-shared's router Deployment), in the namespace named by
+# mapsEngine.networkPolicy.routerNamespace, or in any namespace when that is left empty.
 # Requires a CNI that enforces NetworkPolicy.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -16,10 +18,26 @@ spec:
     - Ingress
   ingress:
     - from:
+        # One list item holding both selectors means "router pods, in those namespaces" (AND, not OR).
         - namespaceSelector:
+            {{- if .Values.mapsEngine.networkPolicy.routerNamespace }}
             matchLabels:
               kubernetes.io/metadata.name: {{ .Values.mapsEngine.networkPolicy.routerNamespace | quote }}
+            {{- else }} {}
+            {{- end }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-harness
+              app.kubernetes.io/component: router
       ports:
         - port: {{ .Values.mapsEngine.port }}
+          protocol: TCP
+    # This tenant's own mcp-hub (same namespace) — the MCP port only; it does no user auth, so nothing else may reach it.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "agent-harness.mcpHubName" . | quote }}
+      ports:
+        - port: {{ .Values.mapsEngine.mcpPort }}
           protocol: TCP
 {{- end }}

@@ -1,7 +1,7 @@
-{{- if .Values.mapsEngine.enabled -}}
+{{- if (include "agent-harness.mapsEngineEnabled" .) -}}
 # Named "maps-engine" (no tenant prefix by convention): the router's Tenant.MapsEngineBaseURL() builds
-# http://maps-engine.<tenant-namespace>.svc.cluster.local:<port>. Only the HTTP API is exposed — the
-# embedded MCP listener on its second port is deliberately not published.
+# http://maps-engine.<tenant-namespace>.svc.cluster.local:<port>. The MCP listener (second port) is
+# published too, but the NetworkPolicy lets only this tenant's own mcp-hub reach it.
 apiVersion: v1
 kind: Service
 metadata:
@@ -16,4 +16,7 @@ spec:
     - name: http
       port: {{ .Values.mapsEngine.port }}
       targetPort: http
+    - name: mcp
+      port: {{ .Values.mapsEngine.mcpPort }}
+      targetPort: mcp
 {{- end }}

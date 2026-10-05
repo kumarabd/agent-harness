@@ -129,8 +129,12 @@ router:
   # core/cors.go). Set to agent-web's own public origin (scheme+host, no
   # path, e.g. "https://app.example.com") — or "*" to allow any origin, not
   # recommended once this handles real tenant traffic. Comma-separated if
-  # more than one.
-  allowedOrigins: ["https://mission-control.nighthawklabs.org"]
+  # more than one. An entry may be a subdomain wildcard, "https://*.example.org"
+  # (any subdomain of example.org on https, at any depth; not the bare apex, not
+  # another scheme or a port). The router's CORS check honours it; the gateway's
+  # WebSocket origin check, which gets this same list, only does exact matches and
+  # ignores a wildcard entry.
+  allowedOrigins: ["https://mission-control.nighthawklabs.org", "https://*.nighthawklabs.org"]
   # -- Exposes this router outside the cluster — the browser calls it
   # directly now (see publicURL's own comment), so unlike loop-worker or
   # tenant-worker this can't stay purely internal-cluster-DNS once
