@@ -28,8 +28,16 @@ func (a *Activities) ValidateRequest(ctx context.Context, in TenantOnboardingInp
 	if !tenantSlugPattern.MatchString(in.TenantSlug) {
 		return fmt.Errorf("tenant slug %q is not a valid Kubernetes namespace / Helm release name", in.TenantSlug)
 	}
+	// No tiers means "use the platform's defaults" (the tenant chart's own llm.tiers). That is only a real choice when the
+	// chart ships a configured model; otherwise say so plainly rather than create a workspace with no working model.
 	if len(in.LLMTiers) == 0 {
-		return fmt.Errorf("at least one LLM tier (fast/medium/expert) is required")
+		defaults, err := chartDefaultTiers(a.ChartDir)
+		if err != nil {
+			return err
+		}
+		if len(defaults) == 0 {
+			return fmt.Errorf("no models were provided and the platform has no default model configured (llm.tiers in the tenant chart)")
+		}
 	}
 	for tier, cfg := range in.LLMTiers {
 		if tier != "fast" && tier != "medium" && tier != "expert" {

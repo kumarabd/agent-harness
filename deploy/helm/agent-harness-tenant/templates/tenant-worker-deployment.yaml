@@ -13,7 +13,7 @@
 {{- if not (has $t.provider $known) }}
 {{- fail (printf "llm.tiers.%s.provider=%q is not supported — must be one of \"openai\" or \"anthropic\"." $tier $t.provider) }}
 {{- end }}
-{{- if not $t.apiKey }}
+{{- if not (include "agent-harness.llmTierApiKey" (dict "root" $ "tier" $t)) }}
 {{- fail (printf "llm.tiers.%s.apiKey is required when llm.tiers.%s.model is set — every configured tier owns its own credential." $tier $tier) }}
 {{- end }}
 {{- if and (eq $t.provider "openai") (not $t.baseURL) }}

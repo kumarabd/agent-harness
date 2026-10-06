@@ -56,7 +56,7 @@ func (a *Activities) readStagedSecret(ctx context.Context, requestID string) (ma
 // like the agent-brain.llm/.temporal one below can be caught by a unit test
 // instead of only by manually cross-referencing every field against a real
 // tenant's working values.yaml — which is how both were actually found.
-func buildTenantValues(ref PublicRef, clerkIssuer, webOrigin, routerPublicURL, temporalAddress, tenantTemporalNamespace string, secrets map[string]string) (map[string]any, error) {
+func buildTenantValues(ref PublicRef, clerkIssuer, webOrigin, routerPublicURL, temporalAddress, tenantTemporalNamespace string, secrets map[string]string, chartDefaults map[string]LLMTier) (map[string]any, error) {
 	var llmTiers map[string]LLMTier
 	if err := json.Unmarshal([]byte(secrets[keyLLMTiersJSON]), &llmTiers); err != nil {
 		return nil, fmt.Errorf("decode staged llm tiers: %w", err)
@@ -107,6 +107,12 @@ func buildTenantValues(ref PublicRef, clerkIssuer, webOrigin, routerPublicURL, t
 	// treated as a medium-tier consumer") — falls back to whichever tier
 	// actually exists if the requester didn't configure a medium one
 	// (ValidateRequest only guarantees at least one tier, not which).
+	// With no tiers from the requester, the chart's own defaults are the models: llm.tiers is left out of the override so they
+	// apply, and agent-brain's retain model is read from those same defaults.
+	usingChartDefaults := len(llmTiers) == 0
+	if usingChartDefaults {
+		llmTiers = chartDefaults
+	}
 	retainTier, hasMedium := llmTiers["medium"]
 	if !hasMedium {
 		// llmTiers is guaranteed non-empty by ValidateRequest, so this always
@@ -182,10 +188,7 @@ func buildTenantValues(ref PublicRef, clerkIssuer, webOrigin, routerPublicURL, t
 			"web":     map[string]any{"clerkIssuer": clerkIssuer, "allowedOrigins": webOrigin},
 			"discord": map[string]any{"bots": discordBots},
 		},
-		"llm": map[string]any{
-			"enabled": true,
-			"tiers":   tiers,
-		},
+		"llm": llmValues(tiers, usingChartDefaults),
 		"postgresql": map[string]any{
 			"auth": map[string]any{
 				"postgresPassword": secrets[keyPostgresPassword],
@@ -211,6 +214,16 @@ func buildTenantValues(ref PublicRef, clerkIssuer, webOrigin, routerPublicURL, t
 	}, nil
 }
 
+// llmValues is the tenant's llm override: always enabled, with the requester's tiers only when they brought some (otherwise
+// the chart's own default tiers stand).
+func llmValues(tiers map[string]any, usingChartDefaults bool) map[string]any {
+	out := map[string]any{"enabled": true}
+	if !usingChartDefaults {
+		out["tiers"] = tiers
+	}
+	return out
+}
+
 // HelmInstallTenant runs `helm upgrade --install` against the
 // agent-harness-tenant chart baked into this worker's own image
 // (a.ChartDir) — the exact command sequence deploy/helm/tenants/README.md
@@ -223,7 +236,12 @@ func (a *Activities) HelmInstallTenant(ctx context.Context, ref PublicRef) error
 		return err
 	}
 
-	values, err := buildTenantValues(ref, a.ClerkIssuer, a.WebOrigin, a.RouterPublicURL, a.TemporalAddress, a.TenantTemporalNamespace, secrets)
+	// Only needed when the requester brought no models of their own.
+	chartDefaults, err := chartDefaultTiers(a.ChartDir)
+	if err != nil {
+		return err
+	}
+	values, err := buildTenantValues(ref, a.ClerkIssuer, a.WebOrigin, a.RouterPublicURL, a.TemporalAddress, a.TenantTemporalNamespace, secrets, chartDefaults)
 	if err != nil {
 		return err
 	}

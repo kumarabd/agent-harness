@@ -203,3 +203,8 @@ its password). Used by both the Secret and the hook, so they cannot disagree.
 {{- fail "finance-engine needs a database password: set postgresql.auth.postgresPassword (the finance-engine database password is derived from it) or financeEngine.postgres.password, or set financeEngine.enabled=false for this tenant." -}}
 {{- end -}}
 {{- end -}}
+
+{{/* A tier's API key: its own, else the platform's shared litellm key (the same one every tenant already uses for embeddings), so the chart's default model needs no committed credential. Usage: include "agent-harness.llmTierApiKey" (dict "root" $ "tier" $t) */}}
+{{- define "agent-harness.llmTierApiKey" -}}
+{{- default (index .root.Values "agent-brain").secret.litellmAPIKey .tier.apiKey -}}
+{{- end }}

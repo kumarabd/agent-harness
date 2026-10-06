@@ -414,40 +414,51 @@ llm:
   # means no cost data for that rate, not free — budget-guardrails.md's
   # cost-based metrics stay honestly absent until a real number is filled
   # in, same as an unset context-window falls back rather than guessing.
+  #
+  # DEFAULTS: `medium` below is the platform's own default model, what a workspace gets when onboarding is not given models
+  # of its own (the Treasure app's "Treasure's models"). The automation worker leaves llm.tiers out of that tenant's values
+  # so these apply, and overrides only the tiers a requester brings themselves. apiKey left empty falls back to the platform's
+  # shared litellm key (agent-brain.secret.litellmAPIKey, also used for embeddings), so no model key is committed here. Set
+  # `model` to a chat model registered on the litellm proxy; while it is blank there is no default and onboarding without
+  # your own models is refused with a clear message.
   tiers:
-    fast:
-      provider: ""
-      model: ""
-      apiKey: ""
-      baseURL: ""
-      maxTokens: 4096
-      contextWindow: 0
-      costPerMillionTokens:
-        input: ""
-        output: ""
-        cachedInput: ""
-    medium:
-      provider: ""
-      model: ""
-      apiKey: ""
-      baseURL: ""
-      maxTokens: 4096
-      contextWindow: 0
-      costPerMillionTokens:
-        input: ""
-        output: ""
-        cachedInput: ""
     expert:
-      provider: ""
-      model: ""
-      apiKey: ""
-      baseURL: ""
-      maxTokens: 4096
-      contextWindow: 0
+      apiKey: R0bxGbBXS22Xq9Z69GhMBA_2a_10_rlpGMXKbPSCCJLzdrSfp4u/eDUfYsO0/uj6sYSbS8H5XqLkepUkmq
+      baseURL: https://api.inference.crusoecloud.com/v1
+      contextWindow: "1000000"
       costPerMillionTokens:
-        input: ""
-        output: ""
-        cachedInput: ""
+        cachedInput: 0.15
+        input: 1.74
+        output: 3.48
+      model: deepseek-ai/DeepSeek-V4-Pro
+      provider: openai
+    fast:
+      apiKey: sk-change-this-to-a-secure-key
+      baseURL: http://litellm-service.core.svc:4000
+      contextWindow: "4096"
+      costPerMillionTokens:
+        cachedInput: 0.14
+        input: 0.14
+        output: 0.4
+      model: local-model
+      provider: openai
+    medium:
+      apiKey: R0bxGbBXS22Xq9Z69GhMBA_2a_10_rlpGMXKbPSCCJLzdrSfp4u/eDUfYsO0/uj6sYSbS8H5XqLkepUkmq
+      baseURL: https://api.inference.crusoecloud.com/v1
+      # Switched from Qwen/Qwen3-235B-A22B-Instruct-2507 (2026-09-14) — that model
+      # started 404ing as model_not_found on the Crusoe endpoint (self-healed via
+      # escalate-on-retry to another tier each time, but added latency to every
+      # medium-tier call). contextWindow/costPerMillionTokens updated to match
+      # DeepSeek-V4-Pro's real values (same as the expert tier below, which already
+      # uses this model) — leaving the old Qwen-based numbers here would have
+      # under-reported context capacity and misreported real spend.
+      contextWindow: "1000000"
+      costPerMillionTokens:
+        cachedInput: 0.15
+        input: 1.74
+        output: 3.48
+      model: deepseek-ai/DeepSeek-V4-Pro
+      provider: openai
 
 # -- agent-brain (hippocampus) subchart itself — components/memory-slot.md's
 # memory backend, a real dependency published to
