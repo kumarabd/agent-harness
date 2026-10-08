@@ -160,15 +160,14 @@ def _trigger_spec(arguments: dict) -> tuple[ScheduleSpec, str, bool]:
     raise ValueError("arm_wake needs one of: 'at' (ISO-8601), 'cron' (UTC), or 'every_seconds'")
 
 
-async def _arm_event_wake(ctx: "ToolContext", name: str, why: str, on_event) -> dict:
+async def _arm_event_wake(ctx: "ToolContext", name: str, objective: str, on_event) -> dict:
     """Arm a watch: pair one of an engine's events with this session.
 
-    **No objective is taken from the agent here, on purpose.** What wakes the session
-    is the notice the engine raises, which describes what actually happened and is the
-    only thing that knows; the agent's contribution was naming *which* event matters,
-    and that is the `event_key`. A time wake needs an objective because nothing else
-    knows why it was armed — an event watch does not, and storing one would be storing
-    a field nothing ever reads.
+    The objective is the agent's, exactly as for a time wake, and it is the *more*
+    important of the two halves: an event often only says that something happened,
+    and what to do about it is the armer's standing instruction — sent now because
+    the engine raising the notice cannot possibly know it. The notice supplies the
+    other half, what actually happened, and the two reach the same turn together.
     """
     event_key = (on_event.get("event_key") if isinstance(on_event, dict) else str(on_event)) or ""
     event_key = event_key.strip()
@@ -181,29 +180,27 @@ async def _arm_event_wake(ctx: "ToolContext", name: str, why: str, on_event) -> 
     scope = _scope(ctx)
     wake_id = f"{_WATCH_PREFIX}{scope}:{name}"
     try:
-        await mcp_hub.arm_subscription(wake_id=wake_id, event_key=event_key, invoke_id=scope)
+        await mcp_hub.arm_subscription(
+            wake_id=wake_id, event_key=event_key, invoke_id=scope, objective=objective
+        )
     except (mcp_hub.McpHubNotConfiguredError, mcp_hub.McpHubCallError) as exc:
         # Surfaced, never swallowed: an arm the agent believes succeeded but which
         # registered nothing is an alert that silently never arrives.
         raise ValueError(f"could not arm the watch: {exc}") from exc
 
     logger.info("arm_wake: watching %s as %s", event_key, wake_id)
-    return {"wake_id": wake_id, "armed": True, "on_event": event_key, "why": why}
+    return {"wake_id": wake_id, "armed": True, "on_event": event_key, "objective": objective}
 
 
 async def arm_wake(arguments: dict, ctx: "ToolContext") -> dict:
     name = _name(arguments)
+    objective = (arguments.get("objective") or "").strip()
+    if not objective:
+        raise ValueError("arm_wake requires a non-empty 'objective' — what you should do when you wake")
     why = (arguments.get("why") or "").strip()
 
     if arguments.get("on_event") is not None:
-        return await _arm_event_wake(ctx, name, why, arguments["on_event"])
-
-    objective = (arguments.get("objective") or "").strip()
-    if not objective:
-        raise ValueError(
-            "arm_wake requires a non-empty 'objective' — what you should do when you wake — "
-            "unless you arm an on_event watch, where the engine's own notice says it"
-        )
+        return await _arm_event_wake(ctx, name, objective, arguments["on_event"])
 
     scope = _scope(ctx)
     spec, cadence, one_shot = _trigger_spec(arguments)
@@ -312,6 +309,7 @@ async def list_wakes(arguments: dict, ctx: "ToolContext") -> dict:
                 "state": "armed",
                 "cadence": f"when {subscription['event_key']} fires",
                 "on_event": subscription["event_key"],
+                "objective": subscription.get("objective", ""),
             })
     return {"wakes": out, "note": note} if note else {"wakes": out}
 
@@ -330,6 +328,10 @@ async def inspect_wake(arguments: dict, ctx: "ToolContext") -> dict:
                     "state": "armed",
                     "cadence": f"when {subscription['event_key']} fires",
                     "on_event": subscription["event_key"],
+                    "objective": subscription.get("objective", ""),
+                    # Empty for a watch on purpose: the engine's notice fills the
+                    # why slot when it fires, so there is no armer-authored one.
+                    "why": "",
                 }
         return {"wake_id": wake_id, "state": "unknown", "note": "no such event watch"}
     return await _describe(_client(ctx), wake_id)
@@ -338,16 +340,27 @@ async def inspect_wake(arguments: dict, ctx: "ToolContext") -> dict:
 async def revise_wake(arguments: dict, ctx: "ToolContext") -> dict:
     wake_id = _own_id(ctx, arguments["wake_id"])
     if wake_id.startswith(_WATCH_PREFIX):
-        # Checked before the "nothing to revise" guard, so a watch gets the reason
-        # rather than a complaint about missing fields it could never have supplied.
-        # There is nothing here to revise: a watch has no cadence, and its objective
-        # comes from the engine afresh each time. Watching something else is a
-        # different event_key, which is a different watch, not an edit to this one.
-        return {
-            "wake_id": wake_id,
-            "revised": False,
-            "note": "an event watch has no cadence or objective to revise — cancel it and arm a new one",
-        }
+        # A watch revises the two things it has: what it should do (objective) and
+        # what it is listening for (event_key). Everything else a time wake can
+        # change — cadence, pause — a watch does not have, and the guard below names
+        # those rather than accepting one and ignoring it.
+        on_event = arguments.get("on_event")
+        event_key = (on_event or {}).get("event_key") if isinstance(on_event, dict) else None
+        objective = arguments.get("objective")
+        if event_key is None and objective is None:
+            raise ValueError(
+                "revising a watch needs a new 'objective' or a new 'on_event'. It has no cadence, "
+                "and 'why' is filled by the engine's notice when it fires."
+            )
+        try:
+            revised = await mcp_hub.revise_subscription(
+                wake_id,
+                event_key=event_key.strip() if isinstance(event_key, str) else None,
+                objective=objective.strip() if isinstance(objective, str) else None,
+            )
+        except (mcp_hub.McpHubNotConfiguredError, mcp_hub.McpHubCallError) as exc:
+            return {"wake_id": wake_id, "revised": False, "note": str(exc)}
+        return {"wake_id": wake_id, "revised": revised}
     if not any(k in arguments for k in ("at", "cron", "every_seconds", "objective", "why", "paused")):
         raise ValueError("revise_wake needs at least one of at / cron / every_seconds / objective / why / paused")
     handle = _client(ctx).get_schedule_handle(wake_id)

@@ -94,8 +94,15 @@ async def _request(method: str, path: str, **kwargs: Any) -> httpx.Response:
         raise McpHubCallError(f"{method} {path}: {exc}") from exc
 
 
-async def arm_subscription(wake_id: str, event_key: str, invoke_id: str) -> dict[str, Any]:
-    """Register what an `event_key` should wake.
+async def arm_subscription(
+    wake_id: str, event_key: str, invoke_id: str, objective: str
+) -> dict[str, Any]:
+    """Register what an `event_key` should wake, and what to say about it.
+
+    `objective` is the agent's own standing instruction, sent ahead of time because
+    the engine that raises the notice cannot know it — the notice says what happened,
+    and only the armer can say what it wanted done about it. mcp-hub stores it
+    verbatim and hands it back with the wake.
 
     Called *before* anything subscribes to the underlying event, so a notice can
     never arrive before something can route it. In practice that ordering is now
@@ -105,7 +112,12 @@ async def arm_subscription(wake_id: str, event_key: str, invoke_id: str) -> dict
     response = await _request(
         "POST",
         "/api/subscriptions",
-        json={"wake_id": wake_id, "event_key": event_key, "invoke_id": invoke_id},
+        json={
+            "wake_id": wake_id,
+            "event_key": event_key,
+            "invoke_id": invoke_id,
+            "objective": objective,
+        },
     )
     if response.status_code >= 400:
         raise McpHubCallError(f"arm_subscription: HTTP {response.status_code} {response.text.strip()[:200]}")
@@ -117,6 +129,30 @@ async def list_subscriptions() -> list[dict[str, Any]]:
     if response.status_code >= 400:
         raise McpHubCallError(f"list_subscriptions: HTTP {response.status_code}")
     return response.json().get("items", [])
+
+
+async def revise_subscription(
+    wake_id: str, event_key: str | None = None, objective: str | None = None
+) -> bool:
+    """Change a watch's objective, or re-point it at a different event.
+
+    None means "leave alone" rather than "clear", so rewording an objective cannot
+    silently stop the watch watching what it was armed for. False means nothing was
+    armed under that id.
+    """
+    body: dict[str, Any] = {}
+    if event_key is not None:
+        body["event_key"] = event_key
+    if objective is not None:
+        body["objective"] = objective
+    if not body:
+        return False
+    response = await _request("PUT", f"/api/subscriptions/{quote(wake_id, safe='')}", json=body)
+    if response.status_code == 404:
+        return False
+    if response.status_code >= 400:
+        raise McpHubCallError(f"revise_subscription: HTTP {response.status_code}")
+    return True
 
 
 async def cancel_subscription(wake_id: str) -> bool:
