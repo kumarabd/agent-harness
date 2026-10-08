@@ -21,7 +21,7 @@ import logging
 import os
 
 from temporalio import activity
-from temporalio.common import WorkflowIDConflictPolicy
+from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
 from .types import WakeSessionInput
 
@@ -51,11 +51,21 @@ class WakeSessionActivity:
         # This is what makes "the session may or may not be running" a non-issue:
         # the primitive covers both, and an active turn gets the wake folded in
         # by the coordinator's own Wake handler.
+        #
+        # ALLOW_DUPLICATE is not decoration. The two policies here cover disjoint
+        # cases and neither substitutes for the other: id_conflict_policy applies
+        # while an execution is RUNNING, id_reuse_policy when the previous one has
+        # CLOSED. The coordinator exits cleanly on idle TTL (coordinator.go's
+        # `return nil`), and Temporal's default ALLOW_DUPLICATE_FAILED_ONLY reuses
+        # an id only if the last run FAILED — so without this line the common case,
+        # waking a session that has gone idle, is refused outright. The starter CLI
+        # sets it for the same reason (cmd/starter/main.go).
         await self._client.start_workflow(
             _COORDINATOR_WORKFLOW,
             {"session_key": input.session_key, "tenant_slug": self._tenant_slug},
             id=input.session_key,
             task_queue=self._task_queue,
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             start_signal=_WAKE_SIGNAL,
             start_signal_args=[
