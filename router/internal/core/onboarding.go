@@ -91,9 +91,10 @@ func (s *Server) handleSubmitOnboarding(w http.ResponseWriter, r *http.Request) 
 
 	workflowID := workflowIDForSlug(tenantSlug)
 	opts := client.StartWorkflowOptions{
-		ID:                    workflowID,
-		TaskQueue:             s.automationTaskQueue,
-		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+		ID:        workflowID,
+		TaskQueue: s.automationTaskQueue,
+		// Retry failed setup, but never rerun successful setup and rotate its credentials.
+		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY,
 	}
 	// "start" is never actually handled by the workflow — SignalWithStart's
 	// real job here is "start it if it isn't running yet"; if it's already
@@ -102,7 +103,8 @@ func (s *Server) handleSubmitOnboarding(w http.ResponseWriter, r *http.Request) 
 	// (nothing, since it's already going).
 	_, err = s.temporal.SignalWithStartWorkflow(r.Context(), workflowID, "start", nil, opts,
 		automationworkflow.TenantOnboardingWorkflow, input)
-	if err != nil {
+	var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
+	if err != nil && !errors.As(err, &alreadyStarted) {
 		writeJSONError(w, http.StatusInternalServerError, "failed to start onboarding workflow")
 		return
 	}

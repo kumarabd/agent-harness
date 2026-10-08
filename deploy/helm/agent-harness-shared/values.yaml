@@ -111,8 +111,8 @@ router:
   # As of the single-shared-Clerk-project migration (docs/components/
   # gateway/web.md), this is the ONE issuer every tenant's own Gateway/
   # agent-brain now verify against too, not a separate value per tenant.
-  clerkJwksUrl: "https://primary-jay-21.clerk.accounts.dev/.well-known/jwks.json"
-  clerkIssuer: "https://primary-jay-21.clerk.accounts.dev"
+  clerkJwksUrl: "https://clerk.nighthawklabs.org/.well-known/jwks.json"
+  clerkIssuer: "https://clerk.nighthawklabs.org"
   # -- REQUIRED when agentWeb.enabled=true (web-deployment.yaml's own `fail`
   # guard) — 2026-09-24: the router's real public URL (e.g.
   # "https://api.example.com"), not its in-cluster Service name. Consumed by
