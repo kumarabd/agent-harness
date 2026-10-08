@@ -10,6 +10,15 @@ WORKDIR /src
 # source changes. go.work isn't copied here — loop-worker/go.mod's own
 # `replace agent-harness/shared => ../shared` resolves the one cross-module
 # dependency this image needs without requiring the whole workspace.
+#
+# Because of that, loop-worker/go.sum has to be self-sufficient — and a
+# workspace build will NOT tell you when it isn't. go.work.sum supplies the
+# entries this file is missing, so `go build ./...` passes locally while the
+# image dies with "missing go.sum entry needed to verify package ... is
+# provided by exactly one module". That is exactly how the genproto break
+# reached a real export. After touching go.mod/go.sum, verify with the build
+# this file actually runs, not the workspace one:
+#   (cd loop-worker && GOWORK=off CGO_ENABLED=0 GOOS=linux go build ./cmd/loop-worker)
 COPY shared/go.mod shared/go.sum ./shared/
 COPY loop-worker/go.mod loop-worker/go.sum ./loop-worker/
 RUN cd loop-worker && go mod download
