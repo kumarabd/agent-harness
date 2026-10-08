@@ -30,30 +30,49 @@ engine write  ──▶  detect (same transaction)  ──▶  record (own table
                                                     agent turn
 ```
 
-### Why in-cluster, not through mcp-hub
+### mcp-hub owns the routing
 
-`proactivity.md` said mcp-hub owns the public webhook hop. That is still right for
-**external providers pushing at you** (a calendar webhook), and it stays deferred.
-It is *not* needed for engine-raised events: engines and the gateway sit in the
-same tenant namespace, so an engine POSTs to
-`http://gateway.<ns>.svc.cluster.local:8090/events` and nothing is exposed
-publicly at all. Fewer moving parts, no unauthenticated ingress, no mcp-hub
-change. mcp-hub becomes relevant only when a third party needs to reach us.
+**Corrected 2026-10-08.** This section previously argued for an in-cluster POST
+straight to the gateway. That was wrong on two counts. mcp-hub owns and manages
+the external engines, so the harness must not hold a direct line to them — and an
+engine must not need to know the harness exists at all. Engines are connections;
+mcp-hub is the boundary in both directions.
 
-### The callback token
+The engine therefore emits **domain facts only**:
 
-`base64(session_key | expiry) + HMAC-SHA256`, secret from the environment.
+```
+POST <mcp-hub>/events
+{ "event_key": "budget:<id>|2026-10", "objective": "...", "event_id": "<dedupe>" }
+```
 
-- The engine stores it **verbatim and opaquely** — it never parses or trusts it,
-  only echoes it back. `finance.budgets.callback_token` already does this.
-- The gateway verifies it and reads the session key out, so **the harness needs no
-  mapping table** and the engine never learns what a session is.
-- Revocation needs no revocable token: cancelling deletes the engine's row, so no
-  further callbacks arrive.
-- Minting lives in `tenant-worker`'s `arm_wake` (Python, event path); verification
-  lives in the gateway (Go). Cross-language, hand-mirrored — the same tolerated
-  duplication as `types.go`/`types.py`. The format must be documented in one place
-  and asserted by tests on both sides.
+No session, no callback URL, no credential, no awareness that anything is
+listening. mcp-hub holds `event_key -> session_key` in its own `subscriptions`
+table and forwards to the harness:
+
+```
+POST <harness>/events          (in-cluster; mcp-hub is the only caller)
+{ "session_key": "...", "objective": "...", "wake_id": "<mcp-hub row id>" }
+```
+
+This is the shape the agent's `arm_wake` path registers, and the same idiom
+mcp-hub already uses for cross-boundary routing — `oauth_tokens` stores opaque,
+expiry-checked, `compare_digest`-compared tokens for exactly this reason, and a
+subscription is another such row.
+
+Three consequences worth stating:
+
+1. **No callback token.** An earlier draft signed the session key into a token the
+   engine stored. That is gone: the engine persists nothing it cannot use, and
+   `finance.budgets.callback_token` goes away before it is ever read. The engine
+   never holds a credential whose only purpose is to talk to us.
+2. **The harness ingress is mcp-hub-only**, which NetworkPolicy can state — a far
+   smaller trust surface than "any engine in the namespace may POST a
+   wake-anyone request". The direct-to-gateway design was worse than it looked:
+   the router proxies `/gateway/*` and strips the prefix, so
+   `POST <router>/gateway/events` would have reached such a route **publicly and
+   unauthenticated**, letting anyone wake any session with a chosen prompt.
+3. **The engine stays ignorant of sessions** — the original principle, and the
+   thing the direct design quietly broke.
 
 ### Delivery, concretely
 
