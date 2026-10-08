@@ -7,16 +7,17 @@
 >
 > Built: the finance side's detection (`finance-engine` `b6eeb22`) and the whole
 > mcp-hub half of the delivery path — `/events`, the `subscriptions` table, and the
-> wake itself (`infra` `a30a6ae`). Remaining: the per-engine delivery workers, the
+> wake itself (`infra` `810ec9e`). Remaining: the per-engine delivery workers, the
 > maps arrival hook, and wiring `arm_wake(on_event=...)` so that anything actually
 > arms a subscription.
 
 ### The shape, in one line
 
 An engine notices something about its own data **when the data lands**, records
-it, and POSTs it to mcp-hub; mcp-hub turns it into a wake; the agent decides
-what, if anything, to say. The engine never talks to Temporal and never learns a
-session key; mcp-hub never learns what a budget is.
+it, and POSTs it to mcp-hub; mcp-hub invokes the id that event is registered
+against; the agent decides what, if anything, to say. The engine never talks to
+Temporal and never learns a session key; mcp-hub never learns what a budget is,
+nor what the id it invokes means.
 
 ```
 engine write  ──▶  detect (same transaction)  ──▶  record (own table)
@@ -25,13 +26,10 @@ engine write  ──▶  detect (same transaction)  ──▶  record (own table
                                                         ▼
                     POST <mcp-hub>/events  { event_key, objective, event_id }
                                                         │
-                              subscriptions: event_key → session_key
+                              subscriptions: event_key → invoke_id  (opaque)
                                                         ▼
-                    start WakeWorkflow   id = wake:<event_key>:<event_id>
-                                                        │
-                                          WakeSession ──┤ (existing activity)
-                                                        ▼
-                            SignalWithStart Coordinator (Wake)
+                    SignalWithStart invoke_id
+                              (workflow type + signal name from config)
                                                         │
                                                     agent turn
 ```
@@ -52,18 +50,28 @@ POST <mcp-hub>/events
 ```
 
 No session, no callback URL, no credential, no awareness that anything is
-listening. mcp-hub holds `event_key -> session_key` in its own `subscriptions`
-table and **signals the session itself** — no harness ingress exists at all:
+listening. mcp-hub holds `event_key -> invoke_id` in its own `subscriptions` table,
+where `invoke_id` is **opaque** — minted by the arming side, stored and reused
+verbatim, never parsed, resolved or branched on. Even the workflow type and signal
+name are configuration rather than constants, so mcp-hub's source contains no
+vocabulary for sessions, schedules or coordinators at all:
 
 ```
-mcp-hub ──▶ Temporal   start_workflow(WakeWorkflow, id="wake:<event_key>:<event_id>")
-                             └─▶ WakeSession activity ─▶ SignalWithStart Coordinator (Wake)
+mcp-hub ──▶ Temporal   SignalWithStart(invoke_id, <configured signal>)
+                                                        │
+                                                    agent turn
 ```
 
-mcp-hub starts the *same* `WakeWorkflow` a Temporal Schedule starts, rather than
-replicating `WakeSessionActivity`'s SignalWithStart itself. One wake path, two
-triggers, and the coordinator handoff stays in the one place that already gets it
-right.
+SignalWithStart rather than Signal because what is invoked may not be running, and
+an event arriving while it is stopped still has to land; if it *is* running, the
+signal is delivered into it and whatever handles it continues from there — which is
+what turns an event into a turn. One mechanism covers both, so "the session may or
+may not be running" never has to be reasoned about at this layer.
+
+**The harness mints the id at arm time.** `arm_wake(on_event=...)` decides what a
+wake means — today, the coordinator's own workflow id — and hands mcp-hub that id
+and nothing else. The coupling runs one way: mcp-hub knows there is *an id*; the
+harness decides what it is, and can change that decision without touching mcp-hub.
 
 This is the shape the agent's `arm_wake` path registers, and the same idiom
 mcp-hub already uses for cross-boundary routing — `oauth_tokens` stores opaque,
@@ -84,11 +92,12 @@ Three consequences worth stating:
    than mitigated: mcp-hub already sits inside the tenant and already holds the
    engines' credentials, so it needs no new trust relationship to do this.
 
-   **Dedupe is now Temporal's, not a table's.** The wake workflow id is derived
-   from the event id, so a retried event cannot wake twice — `REJECT_DUPLICATE` on
-   a completed id and `USE_EXISTING` on a running one are both no-ops. This is the
-   one piece of the earlier plan that claimed Temporal could not absorb the work;
-   it can, once the id is the event id.
+   **Dedupe is a row here, not Temporal's.** Because the invoked id belongs to the
+   arming side, it is shared by every event that target will ever receive — so
+   Temporal cannot distinguish a retry from a new event. `event_deliveries` is the
+   idempotency table instead, written only *after* an invoke succeeds, so a crash in
+   between leaves the retry able to re-deliver. A missed alert is worse than a
+   repeated one.
 3. **The engine stays ignorant of sessions** — the original principle, and the
    thing the direct design quietly broke.
 
@@ -109,9 +118,9 @@ Three consequences worth stating:
 4. **Never log bodies.** Provider and engine payloads can carry credentials;
    mcp-hub's own rule, and it applies here.
 
-mcp-hub side: a `subscriptions` table (`event_key -> session_key`, expiry-checked
-the way `oauth_tokens` already is) plus `start_workflow` against the tenant's
-Temporal, with the coordinator handoff left to `WakeWorkflow`. `turns.initiated_by`
+mcp-hub side: a `subscriptions` table (`event_key -> invoke_id`, expiry-checked the
+way `oauth_tokens` already is) plus a SignalWithStart against the tenant's Temporal
+using the arming side's id. `turns.initiated_by`
 reads `wake:<event_key>:<event_id>`.
 
 ### Use case 1 — finance budgets (detection built)
@@ -170,16 +179,13 @@ without any of that.
 ### Ordering
 
 1. ~~**mcp-hub's `/events` route + `subscriptions` table.**~~ **DONE** (`infra`
-   `a30a6ae`; mcp-hub's 142 tests green). A known `event_key` wakes the subscribed
-   session, an unknown one is a 404, a replayed event id returns 202 `duplicate`
-   having woken nothing a second time, and an expired subscription is ignored —
-   expiry decided in SQL and tested against a real Postgres, so the clock the test
-   runs on cannot make a stale row look live. mcp-hub starts the harness's own
-   `WakeWorkflow` with **no** reuse or conflict policy set, because Temporal's
-   defaults already dedupe a completed or running id while still retrying a failed
-   one. `USE_EXISTING` is deliberately absent: it returns the running execution's
-   handle rather than raising, so a duplicate-while-running would be reported as a
-   wake that never happened.
+   `810ec9e`; mcp-hub's 142 tests green). A known `event_key` invokes the id
+   registered against it, an unknown one is a 404, a replayed event id returns 202
+   `duplicate` having invoked nothing a second time, and an expired subscription is
+   ignored — expiry decided in SQL and tested against a real Postgres, so the clock
+   the test runs on cannot make a stale row look live. The id is opaque and the
+   workflow type and signal name are configuration, so mcp-hub names no session, no
+   schedule and no coordinator anywhere.
 2. **finance delivery worker.** Smallest possible proof of the whole path, because
    detection is already done and a crossing can be produced by writing a spend.
 3. **maps arrival** — the `trips_api.go` hook, the preference, the delivery worker
