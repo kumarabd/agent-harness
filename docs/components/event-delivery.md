@@ -26,10 +26,10 @@ engine write  ──▶  detect (same transaction)  ──▶  record (own table
                                                         ▼
                     POST <mcp-hub>/events  { event_key, objective, event_id }
                                                         │
-                              subscriptions: event_key → session_key
+                              subscriptions: event_key → invoke_id  (opaque)
                                                         ▼
                     SignalWithStart CoordinatorWorkflow
-                            id = session_key, signal = Wake
+                            id = invoke_id,   signal = Wake
                                                         │
                                     coordinator folds it in as a turn
 ```
@@ -50,11 +50,11 @@ POST <mcp-hub>/events
 ```
 
 No session, no callback URL, no credential, no awareness that anything is
-listening. mcp-hub holds `event_key -> session_key` in its own `subscriptions`
-table and signals that session:
+listening. mcp-hub holds `event_key -> invoke_id` in its own `subscriptions` table
+and signals that id:
 
 ```
-mcp-hub ──▶ Temporal   SignalWithStart(CoordinatorWorkflow, id=session_key,
+mcp-hub ──▶ Temporal   SignalWithStart(CoordinatorWorkflow, id=invoke_id,
                                        signal=Wake, payload=WakePayload)
                                                         │
                                     coordinator folds it in as a turn
@@ -68,10 +68,11 @@ coordinator handles the two as siblings, starting a proactive turn when nothing 
 running (`initiated_by` reading `wake:<id>`) and folding the objective into the live
 turn when one is.
 
-**The arming side supplies the session.** `arm_wake(on_event=...)` decides which
-session an event belongs to and hands mcp-hub that key; mcp-hub never derives it.
-So what mcp-hub owns is routing — *this event belongs to that session* — and nothing
-else.
+**The arming side supplies the id.** `arm_wake(on_event=...)` decides what a wake
+should reach and hands mcp-hub that id; mcp-hub never derives it and never
+interprets it. Today the harness sets it to a session's coordinator — but that is
+the harness's decision, not a fact mcp-hub holds, so it is stored as an opaque
+`invoke_id` rather than named after what it happens to contain.
 
 This is the shape the agent's `arm_wake` path registers, and the same idiom
 mcp-hub already uses for cross-boundary routing — `oauth_tokens` stores opaque,
@@ -118,7 +119,7 @@ Three consequences worth stating:
 4. **Never log bodies.** Provider and engine payloads can carry credentials;
    mcp-hub's own rule, and it applies here.
 
-mcp-hub side: a `subscriptions` table (`event_key -> session_key`, expiry-checked
+mcp-hub side: a `subscriptions` table (`event_key -> invoke_id`, expiry-checked
 the way `oauth_tokens` already is) plus the same SignalWithStart the gateway makes,
 on the `Wake` channel. `turns.initiated_by`
 reads `wake:<event_key>:<event_id>`.
