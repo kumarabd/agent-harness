@@ -203,6 +203,14 @@ def _try_csv(text: str) -> dict | None:
     except csv.Error:
         return None
 
+    # Sniffer will happily nominate a letter. Plain multi-line prose
+    # ("single_column\nvalue_one\nvalue_two") sniffs as delimiter="u", which splits
+    # every line into two "columns" and sails straight past the two-column check
+    # below — so the disqualifier has to come first. No real delimiter is
+    # alphanumeric; the ones that occur are comma, tab, semicolon, pipe, colon, space.
+    if dialect.delimiter.isalnum():
+        return None
+
     try:
         reader = csv.reader(io.StringIO(text), dialect=dialect)
         rows = list(reader)

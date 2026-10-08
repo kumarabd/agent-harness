@@ -27,9 +27,23 @@ dependencies = [
     "zvec>=0.6,<1",
 ]
 
+[project.optional-dependencies]
+# Same dev extra as the family's other Python services (infra/mcp-hub,
+# infra/finance-mcp, infra/health-mcp). No testcontainers: this suite covers what is
+# reachable without a database, so it needs nothing a plain interpreter cannot do.
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["tenant_worker*"]
+
+[tool.pytest.ini_options]
+# Matches the family (infra/mcp-hub). Every async test still carries an explicit
+# @pytest.mark.asyncio anyway — belt-and-braces, and what mcp-hub does.
+asyncio_mode = "auto"

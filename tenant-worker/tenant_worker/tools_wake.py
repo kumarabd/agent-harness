@@ -152,8 +152,13 @@ def _trigger_spec(arguments: dict) -> tuple[ScheduleSpec, str, bool]:
         )
     if cron:
         return ScheduleSpec(cron_expressions=[cron]), f"cron {cron} (UTC)", False
-    if every:
-        seconds = float(every)
+    # `is not None`, not truthiness: 0 and "" are falsy, and treating them as absent
+    # would answer a model that DID supply an interval with "you supplied none".
+    if every is not None and every != "":
+        try:
+            seconds = float(every)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"'every_seconds' must be a number: {every!r}") from exc
         if seconds <= 0:
             raise ValueError("'every_seconds' must be positive")
         return ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(seconds=seconds))]), f"every {seconds:g}s", False
