@@ -52,7 +52,7 @@ HTTP alongside everything else it exposes — no new transport, no endpoint, no
 credential, no awareness that anything is listening:
 
 ```
-events_pending  ->  { items: [ { event_key, event_id, objective, why } ] }
+events_pending  ->  { items: [ { event_key, event_id, detail } ] }
 events_ack      <-  { event_ids: [ ... ] }
 ```
 
@@ -60,6 +60,20 @@ That pair is the *only* thing named for a mechanism rather than a use case in ei
 engine, and deliberately so: mcp-hub finds it by name on every connection and calls
 it blind, which is what lets one delivery loop serve budget crossings and map
 arrivals without knowing what either is.
+
+**A notice says what happened; it never says what to do about it.** An engine cannot
+know what the person wanted done, and often the event is only the nudge while the
+objective is the work — so the objective is supplied when the watch is armed and
+travels with the subscription, and the two meet in the same turn:
+
+| slot | author | content |
+| --- | --- | --- |
+| `objective` | whoever armed the watch | the standing instruction |
+| `why` | the engine's notice | what just happened |
+
+That is the same split a time wake has, where both slots come from the armer because
+nothing else knows either. mcp-hub maps two opaque strings onto two fields and reads
+neither, the same thing it does with `wake_id`.
 
 mcp-hub holds `event_key -> invoke_id` in its own `subscriptions` table and signals
 that id:
@@ -76,7 +90,7 @@ bound to one session and every turn reaches it as a Temporal signal — the gate
 signals a user message in on `NewMessage`, and a wake is the same call on `Wake`.
 The only difference is who is speaking: with an event, it is the agent. The
 coordinator handles the two as siblings, starting a proactive turn when nothing is
-running (`initiated_by` reading `wake:<id>`) and folding the objective into the live
+running (`initiated_by` reading `wake:<id>`) and folding the note into the live
 turn when one is.
 
 **The arming side supplies the id.** `arm_wake(on_event=...)` decides what a wake
@@ -225,18 +239,12 @@ without any of that.
 
 ### Open questions
 
-- **How does the agent learn an `event_key`?** It reads one. `budget_status` and
-  `budgets_list` now return `event_key` alongside each budget, so the agent passes
-  what the engine publishes instead of assembling a key from an id and a guessed
-  format — and both come from one definition (`budgetEventKey`), so the key published
-  can never drift from the key raised. A future engine has to do the same, and that
-  is the real cost of the contract: not the two operations, but the obligation to
-  publish the keys they will raise.
-- **A watch cannot be revised.** It has no cadence, and its objective comes from the
-  engine afresh each time, so watching something else is a different `event_key`
-  rather than an edit. `revise` says exactly that instead of pretending. If that
-  proves annoying, the fix is a stored event_key the harness can update — which is
-  one column, not a redesign.
+- **What an engine owes the contract.** Two operations, and — less obviously — the
+  keys it will raise. An engine that does not publish them leaves the agent guessing
+  a string format: `budget_status` and `budgets_list` return `event_key` per budget,
+  derived from the same `budgetEventKey` the contract raises, so what is published
+  cannot drift from what is raised. That obligation, not the two operations, is the
+  real cost of joining, and the maps work inherits it.
 - **What an arrival briefing costs.** One wake per drive end could be a lot of
   messages. The agent decides whether to speak, and `recall` holds "stop doing
   this" corrections, but a per-day cap may be needed and is not designed.
