@@ -38,7 +38,7 @@ temporal:
   # exactly.
   namespace: "agents"
   # -- The shared workflow-task queue every tenant's own Gateway starts
-  # CoordinatorWorkflow/TurnWorkflow on, and Python starts IntentionWorkflow
+  # CoordinatorWorkflow/TurnWorkflow on, and Python starts WakeWorkflow
   # on — fixed, never tenant-specific (that's a separate concern, each
   # tenant's own TEMPORAL_TASK_QUEUE in agent-harness-tenant). Must match
   # every tenant's own TEMPORAL_WORKFLOW_TASK_QUEUE exactly.

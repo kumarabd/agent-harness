@@ -13,8 +13,6 @@
 // in Postgres, read/written by the activity implementations directly.
 package types
 
-import "time"
-
 // Usage mirrors a model call's token accounting, used by the turn workflow's
 // inline token/cost budget check (components/temporal-workflow.md, Resolved:
 // Stop-Condition Default Values). Numbers, not content — stays workflow-visible.
@@ -101,9 +99,9 @@ type TurnInput struct {
 	// target task queue deterministically (deliver:{platform}:{connection_id}).
 	ConnectionID string `json:"connection_id,omitempty"`
 	// InitiatedBy — docs/components/proactivity.md. Provenance of the turn:
-	// "user" (a real inbound message — the default), "intn:<id>" (an
-	// IntentionWorkflow fired and the coordinator woke), or "plan" (a
-	// planning / checkpoint turn under a PlanWorkflow). Threaded straight
+	// "user" (a real inbound message — the default), "wake:<id>" (a wake fired
+	// and the coordinator woke), or "plan" (a planning / checkpoint turn under
+	// a PlanWorkflow). Threaded straight
 	// through to the InsertMessage call that creates the turns row. Empty is
 	// treated as "user".
 	InitiatedBy string `json:"initiated_by,omitempty"`
@@ -154,16 +152,16 @@ type SignalPayload struct {
 	Message Message `json:"message"`
 }
 
-// WakePayload is what a fired IntentionWorkflow's FireIntention activity sends
-// to the session CoordinatorWorkflow via the Wake signal
-// (docs/components/proactivity.md, "The fire path"). No content beyond a short
-// objective + reason; the coordinator synthesises the turn's seed message from
-// it. IntentionID is the firing IntentionWorkflow's id, recorded as the turn's
-// initiated_by ("intn:<IntentionID>").
+// WakePayload is what a WakeWorkflow's WakeSession activity sends to the session
+// CoordinatorWorkflow via the Wake signal (docs/components/proactivity.md, "The
+// fire path"). No content beyond a short objective plus reason; the coordinator
+// synthesises the turn's seed message from it. WakeID is what woke the session —
+// a Temporal Schedule id for a time wake, a subscription id for an event wake —
+// recorded as the turn's initiated_by ("wake:<WakeID>").
 type WakePayload struct {
-	IntentionID string `json:"intention_id"`
-	Objective   string `json:"objective"`
-	Why         string `json:"why,omitempty"`
+	WakeID    string `json:"wake_id"`
+	Objective string `json:"objective"`
+	Why       string `json:"why,omitempty"`
 }
 
 // ModelCallInput is ModelCall's only input — no content. ModelCall reads
@@ -406,77 +404,29 @@ type UserInputRequestWorkflowOutput struct {
 	ToolCallOutput *ToolCallOutput `json:"tool_call_output,omitempty"`
 }
 
-// --- docs/components/proactivity.md — intentions ---
+// --- docs/components/proactivity.md — waking ---
 
-// IntentionInput is IntentionWorkflow's input, and its own ContinueAsNew
-// carry-forward. The workflow id is IntentionID ("intn:<user>:<slug>"). A
-// calendar-recurring intention is a Temporal Schedule that starts one of these
-// per firing (Kind "time"), so the workflow itself only ever runs one of:
-// "time"/"deadline" (one-shot), "condition"/"state"/"event" (poll loop),
-// "inactivity" (idle timer restarted by a `reset` signal).
-type IntentionInput struct {
-	IntentionID string `json:"intention_id"`
-	SessionKey  string `json:"session_key"` // whose CoordinatorWorkflow the fire wakes
-	// TenantSlug — see TurnInput's own doc comment. Set by whoever starts
-	// this workflow (tools_intention.py's create_intention / a recurring
-	// Schedule tick) — carried through ContinueAsNew automatically since
-	// it's part of input, never re-derived.
+// WakeInput is WakeWorkflow's input. A Temporal Schedule's action starts one of
+// these per firing; the workflow's whole body is a single WakeSession call, so a
+// wake costs a short-lived execution with a handful of history events — not a
+// durable per-commitment workflow, and nothing to bound with ContinueAsNew.
+type WakeInput struct {
+	WakeID     string `json:"wake_id"`
+	SessionKey string `json:"session_key"` // whose CoordinatorWorkflow the wake wakes
+	// TenantSlug — see TurnInput's own doc comment. Set by whoever creates the
+	// Schedule (tools_wake.py's arm_wake), never re-derived.
 	TenantSlug string `json:"tenant_slug"`
 	Objective  string `json:"objective"`
 	Why        string `json:"why,omitempty"`
-	Kind       string `json:"kind"`
-
-	FireAt     time.Time     `json:"fire_at,omitempty"`     // one-shot: absolute wall-clock
-	Probe      *ProbeSpec    `json:"probe,omitempty"`       // poll kinds
-	PollEvery  time.Duration `json:"poll_every,omitempty"`  // poll kinds
-	ExpiresAt  time.Time     `json:"expires_at,omitempty"`  // poll kinds: give up unfired
-	IdleFor    time.Duration `json:"idle_for,omitempty"`    // inactivity
-	FiredCount int           `json:"fired_count,omitempty"` // carried across ContinueAsNew
 }
 
-// ProbeSpec is what a poll-kind intention checks each cycle: run `Tool` (a
-// call_tool "server/tool", or a builtin name) with `Args`, then judge `Predicate`
-// (natural language) against the result.
-type ProbeSpec struct {
-	Tool      string         `json:"tool"`
-	Args      map[string]any `json:"args,omitempty"`
-	Predicate string         `json:"predicate"`
-}
-
-// IntentionReviseSignal — the `revise` signal payload. Only set fields apply.
-type IntentionReviseSignal struct {
-	Objective string        `json:"objective,omitempty"`
-	Why       string        `json:"why,omitempty"`
-	FireAt    time.Time     `json:"fire_at,omitempty"`
-	PollEvery time.Duration `json:"poll_every,omitempty"`
-}
-
-// IntentionStatus is the `status` query result.
-type IntentionStatus struct {
-	IntentionID string `json:"intention_id"`
-	Objective   string `json:"objective"`
-	Kind        string `json:"kind"`
-	State       string `json:"state"` // "armed" | "firing" | "expired"
-	FiredCount  int    `json:"fired_count"`
-}
-
-// FireIntentionInput — FireIntention SignalWithStarts the session coordinator
-// with a WakePayload built from this.
-type FireIntentionInput struct {
-	IntentionID string `json:"intention_id"`
-	SessionKey  string `json:"session_key"`
-	Objective   string `json:"objective"`
-	Why         string `json:"why,omitempty"`
-}
-
-// CheckConditionInput / CheckConditionResult — CheckCondition runs a poll-kind
-// intention's probe and judges its predicate.
-type CheckConditionInput struct {
-	IntentionID string    `json:"intention_id"`
-	Probe       ProbeSpec `json:"probe"`
-}
-
-type CheckConditionResult struct {
-	Fired bool   `json:"fired"`
-	Note  string `json:"note,omitempty"`
+// WakeSessionInput — WakeSession SignalWithStarts the session coordinator with a
+// WakePayload built from this. One input for every source: a Schedule tick, an
+// event callback landing on the harness ingress, and the manual starter CLI all
+// converge here.
+type WakeSessionInput struct {
+	WakeID     string `json:"wake_id"`
+	SessionKey string `json:"session_key"`
+	Objective  string `json:"objective"`
+	Why        string `json:"why,omitempty"`
 }

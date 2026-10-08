@@ -17,7 +17,7 @@ type turnStartFrame struct {
 	Type        string `json:"type"` // "turn_start"
 	TurnSeq     int    `json:"turn_seq"`
 	TurnID      string `json:"turn_id"`
-	InitiatedBy string `json:"initiated_by,omitempty"` // "user" | "intn:<id>"
+	InitiatedBy string `json:"initiated_by,omitempty"` // "user" | "wake:<id>"
 }
 
 type messageFrame struct {

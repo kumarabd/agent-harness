@@ -11,14 +11,14 @@ import (
 	"strings"
 )
 
-// UserScopeOf returns the user-stable scope a standing intention keys on
+// UserScopeOf returns the user-stable scope a standing wake keys on
 // (docs/components/proactivity.md). A session_key is deliberately
 // channel/branch-scoped, not user-scoped (gateway core.SessionKeyFor) — for web
 // it embeds the user ("agent:main:web:user:<id>"); for a shared Discord channel
 // the channel is the best available scope. Stripping any per-branch
 // ":session:<id>" or per-thread ":thread:<id>" suffix gives a namespace shared
 // across a user's branches/threads, and the result is always itself a valid
-// canonical session_key — so it also names the session a fired intention wakes.
+// canonical session_key — so it also names the session a fired wake wakes.
 // Mirrored in tenant-worker/tenant_worker/ids.py (user_scope_of).
 func UserScopeOf(sessionKey string) string {
 	for _, marker := range []string{":session:", ":thread:"} {
@@ -29,10 +29,19 @@ func UserScopeOf(sessionKey string) string {
 	return sessionKey
 }
 
-// IntentionID builds an IntentionWorkflow's id: "intn:{scope}:{slug}", where
-// scope is UserScopeOf(session_key). Mirrored in tools_intention.py.
-func IntentionID(scope, slug string) string {
-	return fmt.Sprintf("intn:%s:%s", scope, slug)
+// WakeRef is what a wake records as its own identity: "{scope}:{slug}", where
+// scope is UserScopeOf(session_key). A fired wake stamps its turn's
+// initiated_by as "wake:" + WakeRef. Mirrored in tools_wake.py.
+func WakeRef(scope, slug string) string {
+	return fmt.Sprintf("%s:%s", scope, slug)
+}
+
+// WakeScheduleID builds a time wake's Temporal Schedule id:
+// "wake:{scope}:{slug}". The Schedule IS the record — listed, paused, retimed
+// and cancelled through Temporal's own schedule APIs — so there is no wakes
+// table to keep in sync with it.
+func WakeScheduleID(scope, slug string) string {
+	return "wake:" + WakeRef(scope, slug)
 }
 
 // TurnID builds a top-level turn's workflow ID: "{session_key}:turn:{turn_seq}".

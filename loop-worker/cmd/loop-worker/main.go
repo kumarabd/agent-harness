@@ -115,7 +115,7 @@ func run(ctx context.Context, address, namespace, taskQueue string, metricsHandl
 	w.RegisterWorkflow(wf.WriteMemoryWorkflow)
 	w.RegisterWorkflow(wf.CompressContextWorkflow)
 	w.RegisterWorkflow(wf.UserInputRequestWorkflow)
-	w.RegisterWorkflow(wf.IntentionWorkflow)
+	w.RegisterWorkflow(wf.WakeWorkflow)
 
 	log.Printf("loop worker starting: temporal=%q namespace=%q task_queue=%q", address, namespace, taskQueue)
 

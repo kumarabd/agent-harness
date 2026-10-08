@@ -91,7 +91,7 @@ from .compress_context import CompressContextActivity
 from .db import create_pool
 from .get_max_turn_seq import GetMaxTurnSeqActivity
 from .insert_message import InsertMessageActivity
-from .intention import CheckConditionActivity, FireIntentionActivity
+from .wake import WakeSessionActivity
 from .metrics import LATENCY_BUCKETS_SECONDS, SECONDS_LATENCY_METRICS
 from .model_call import ModelCallActivity
 from .persist import PersistActivity
@@ -192,8 +192,7 @@ async def main() -> None:
             SeedChildSessionContextActivity(pool).__call__,
             SubagentManifestActivity(pool).__call__,
             StatusPingActivity(pool).__call__,
-            FireIntentionActivity(pool, client).__call__,
-            CheckConditionActivity(pool).__call__,
+            WakeSessionActivity(pool, client).__call__,
         ],
     )
     logging.getLogger(__name__).info(

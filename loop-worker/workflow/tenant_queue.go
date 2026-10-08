@@ -7,25 +7,25 @@ import (
 
 // saTenantSlug — a Temporal Search Attribute (not a Postgres column) tagging
 // every tenant-scoped workflow execution (CoordinatorWorkflow, TurnWorkflow,
-// IntentionWorkflow, ...) with its owning tenant, so `temporal workflow
+// WakeWorkflow, ...) with its owning tenant, so `temporal workflow
 // list`/the Temporal Web UI can filter "show me tenant X's workflows"
 // directly — a real capability lost the moment every tenant started sharing
 // one Temporal namespace (2026-09-26) instead of getting its own (workflow
 // IDs themselves — session keys, turn IDs — don't embed the tenant slug
-// anywhere). Same pattern intention.go's own IntentionUser/IntentionKind/
-// IntentionState already use, and the same one-time deploy step: MUST be
+// anywhere). Same one-time deploy step as every other Search Attribute in this
+// project: MUST be
 // registered on the namespace before use (`temporal operator
 // search-attribute create --name TenantSlug --type Keyword --namespace
 // agents`) — see docs/components/multi-tenancy.md's search-attribute list.
 // Set via WithTenantTaskQueue below, not a separate call — best-effort
-// (errors swallowed, same tolerance intention.go's own upserts get): a
+// (errors swallowed): a
 // missing/unregistered attribute means ops loses a filtering convenience,
 // never a functional break.
 var saTenantSlug = temporal.NewSearchAttributeKeyKeyword("TenantSlug")
 
 // TenantActivityQueue returns the task queue a tenant's own tenant-worker
 // fleet polls for activities (ModelCall, ToolCall, InsertMessage, Persist,
-// WriteMemory, CompressContext, FireIntention, ...) —
+// WriteMemory, CompressContext, WakeSession, ...) —
 // docs/components/multi-tenancy.md's "Resolved: Shared Temporal Namespace,
 // Per-Tenant Task Queues" (2026-09-26). Every tenant now shares ONE Temporal
 // namespace (replacing one namespace per tenant), so this is the entire
@@ -47,7 +47,7 @@ func TenantActivityQueue(tenantSlug string) string {
 // travel together at every real call site. Call once, at the top of any
 // independently-started workflow entry point (CoordinatorWorkflow,
 // TurnWorkflow, WriteMemoryWorkflow, CompressContextWorkflow,
-// UserInputRequestWorkflow, IntentionWorkflow) — every
+// UserInputRequestWorkflow, WakeWorkflow) — every
 // plain Go function call made downstream within that SAME execution (the
 // reason-act loop, failTurn, notifyProgress, ...) inherits the queue-routing
 // half automatically, the same way workflow.WithActivityOptions' own
