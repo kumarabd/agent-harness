@@ -5,11 +5,10 @@
 > settled that a wake is a Temporal Schedule. This doc covers the *other* half:
 > events raised by an engine rather than by a clock.
 >
-> Built: the finance side's detection (`finance-engine` `b6eeb22`), its half of the
-> delivery contract (`finance-engine` `e8d9238`), and mcp-hub's per-connection
-> delivery loop (`infra` `4aa6155`). Remaining: the maps arrival hook and its half
-> of the contract, and wiring `arm_wake(on_event=...)` so that anything actually
-> arms a subscription.
+> Built end to end for finance: detection, the delivery contract, mcp-hub's
+> per-connection delivery loop, and `arm_wake(on_event=...)` to arm a watch.
+> Remaining: the maps arrival hook and its half of the contract, which is now a
+> copy of finance's rather than a design job.
 
 ### The shape, in one line
 
@@ -215,8 +214,10 @@ without any of that.
 2. **finance's half of the contract.** Smallest possible proof of the whole path, because
    detection is already done and a crossing can be produced by writing a spend.
 3. **maps arrival** — the `trips_api.go` hook, the preference, and the same
-   `events_pending`/`events_ack` pair finance now implements. mcp-hub needs no change:
-   its delivery loop finds the pair by name on any connection.
+   `events_pending`/`events_ack` pair finance now implements, publishing its own
+   `event_key` the way `budgetEventKey` does. mcp-hub needs no change at all: its
+   delivery loop finds the pair by name on any connection, and the harness already
+   arms a watch against whatever key an engine publishes.
 4. **Android budgets mirror** — models, fixtures and operation shapes all exist, so
    this is a mirror rather than a design job. Held for now.
 5. **Home strip** — `BudgetsModel.alerted` is already the hook; a small surface,
@@ -224,15 +225,18 @@ without any of that.
 
 ### Open questions
 
-- **Nothing arms a subscription yet.** `arm_wake(on_event=...)` still raises rather
-  than registering, and it is the only step left for finance. With delivery a pull
-  the arming step is small — the harness posts `{event_key, invoke_id}` to mcp-hub's
-  `/api/subscriptions` and the delivery loop collects the notice on its next tick —
-  but it needs the agent to name the `event_key`, which means the tool surface has
-  to offer something like "watch this budget" rather than a raw id. The ordering
-  worry that shaped an earlier draft is gone: an engine holds undelivered notices
-  until they are acked, so a subscription armed *after* a crossing still receives it
-  rather than losing it.
+- **How does the agent learn an `event_key`?** It reads one. `budget_status` and
+  `budgets_list` now return `event_key` alongside each budget, so the agent passes
+  what the engine publishes instead of assembling a key from an id and a guessed
+  format — and both come from one definition (`budgetEventKey`), so the key published
+  can never drift from the key raised. A future engine has to do the same, and that
+  is the real cost of the contract: not the two operations, but the obligation to
+  publish the keys they will raise.
+- **A watch cannot be revised.** It has no cadence, and its objective comes from the
+  engine afresh each time, so watching something else is a different `event_key`
+  rather than an edit. `revise` says exactly that instead of pretending. If that
+  proves annoying, the fix is a stored event_key the harness can update — which is
+  one column, not a redesign.
 - **What an arrival briefing costs.** One wake per drive end could be a lot of
   messages. The agent decides whether to speak, and `recall` holds "stop doing
   this" corrections, but a per-day cap may be needed and is not designed.
