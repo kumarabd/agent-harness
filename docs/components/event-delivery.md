@@ -26,12 +26,12 @@ engine write  ──▶  detect (same transaction)  ──▶  record (own table
                                                         ▼
                     POST <mcp-hub>/events  { event_key, objective, event_id }
                                                         │
-                              subscriptions: event_key → invoke_id  (opaque)
+                              subscriptions: event_key → session_key
                                                         ▼
-                    SignalWithStart invoke_id
-                              (workflow type + signal name from config)
+                    SignalWithStart CoordinatorWorkflow
+                            id = session_key, signal = Wake
                                                         │
-                                                    agent turn
+                                    coordinator folds it in as a turn
 ```
 
 ### mcp-hub owns the routing
@@ -50,28 +50,28 @@ POST <mcp-hub>/events
 ```
 
 No session, no callback URL, no credential, no awareness that anything is
-listening. mcp-hub holds `event_key -> invoke_id` in its own `subscriptions` table,
-where `invoke_id` is **opaque** — minted by the arming side, stored and reused
-verbatim, never parsed, resolved or branched on. Even the workflow type and signal
-name are configuration rather than constants, so mcp-hub's source contains no
-vocabulary for sessions, schedules or coordinators at all:
+listening. mcp-hub holds `event_key -> session_key` in its own `subscriptions`
+table and signals that session:
 
 ```
-mcp-hub ──▶ Temporal   SignalWithStart(invoke_id, <configured signal>)
+mcp-hub ──▶ Temporal   SignalWithStart(CoordinatorWorkflow, id=session_key,
+                                       signal=Wake, payload=WakePayload)
                                                         │
-                                                    agent turn
+                                    coordinator folds it in as a turn
 ```
 
-SignalWithStart rather than Signal because what is invoked may not be running, and
-an event arriving while it is stopped still has to land; if it *is* running, the
-signal is delivered into it and whatever handles it continues from there — which is
-what turns an event into a turn. One mechanism covers both, so "the session may or
-may not be running" never has to be reasoned about at this layer.
+**This is the ordinary turn flow, not a mechanism of its own.** The coordinator is
+bound to one session and every turn reaches it as a Temporal signal — the gateway
+signals a user message in on `NewMessage`, and a wake is the same call on `Wake`.
+The only difference is who is speaking: with an event, it is the agent. The
+coordinator handles the two as siblings, starting a proactive turn when nothing is
+running (`initiated_by` reading `wake:<id>`) and folding the objective into the live
+turn when one is.
 
-**The harness mints the id at arm time.** `arm_wake(on_event=...)` decides what a
-wake means — today, the coordinator's own workflow id — and hands mcp-hub that id
-and nothing else. The coupling runs one way: mcp-hub knows there is *an id*; the
-harness decides what it is, and can change that decision without touching mcp-hub.
+**The arming side supplies the session.** `arm_wake(on_event=...)` decides which
+session an event belongs to and hands mcp-hub that key; mcp-hub never derives it.
+So what mcp-hub owns is routing — *this event belongs to that session* — and nothing
+else.
 
 This is the shape the agent's `arm_wake` path registers, and the same idiom
 mcp-hub already uses for cross-boundary routing — `oauth_tokens` stores opaque,
@@ -118,9 +118,9 @@ Three consequences worth stating:
 4. **Never log bodies.** Provider and engine payloads can carry credentials;
    mcp-hub's own rule, and it applies here.
 
-mcp-hub side: a `subscriptions` table (`event_key -> invoke_id`, expiry-checked the
-way `oauth_tokens` already is) plus a SignalWithStart against the tenant's Temporal
-using the arming side's id. `turns.initiated_by`
+mcp-hub side: a `subscriptions` table (`event_key -> session_key`, expiry-checked
+the way `oauth_tokens` already is) plus the same SignalWithStart the gateway makes,
+on the `Wake` channel. `turns.initiated_by`
 reads `wake:<event_key>:<event_id>`.
 
 ### Use case 1 — finance budgets (detection built)
@@ -183,9 +183,15 @@ without any of that.
    registered against it, an unknown one is a 404, a replayed event id returns 202
    `duplicate` having invoked nothing a second time, and an expired subscription is
    ignored — expiry decided in SQL and tested against a real Postgres, so the clock
-   the test runs on cannot make a stale row look live. The id is opaque and the
-   workflow type and signal name are configuration, so mcp-hub names no session, no
-   schedule and no coordinator anywhere.
+   the test runs on cannot make a stale row look live.
+
+   **Waking needs `ALLOW_DUPLICATE`.** The two Temporal policies cover disjoint
+   cases — `id_conflict_policy` while an execution is running, `id_reuse_policy`
+   once it has closed — and the coordinator exits *cleanly* on idle TTL. Temporal's
+   default reuse policy allows an id back only if the previous run failed, so
+   without `ALLOW_DUPLICATE` the ordinary case, waking a session that has gone
+   idle, is refused. `cmd/starter/main.go` already set it for the chat path;
+   `WakeSession` did not, and now does (agent-harness `0fdd504`).
 2. **finance delivery worker.** Smallest possible proof of the whole path, because
    detection is already done and a crossing can be produced by writing a spend.
 3. **maps arrival** — the `trips_api.go` hook, the preference, the delivery worker
