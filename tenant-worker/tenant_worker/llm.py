@@ -437,20 +437,25 @@ _STATIC_TOOLS_SCHEMA = [
         "function": {
             "name": "arm_wake",
             "description": (
-                "Arm a wake: you get woken at that time with a fresh turn to decide whether and how "
-                "to act. This is for things that need YOUR judgment at the future moment — a weekly "
-                "review, checking on something and deciding what it means, following up on work in "
-                "progress.\n\n"
+                "Arm a wake: you get woken later with a fresh turn to decide whether and how to act. "
+                "This is for things that need YOUR judgment at the future moment — a weekly review, "
+                "checking on something and deciding what it means, following up on work in progress.\n\n"
                 "FIRST, decide whether you need this at all. If an external system should notify the "
                 "user at a time, use THAT system's own tool (a calendar reminder, a reminder app) — "
                 "those already do notifications properly, and this harness is not a notifier. Arm a "
                 "wake only when the future moment needs you to think.\n\n"
-                "Choosing a cadence: 'at' for one specific time, 'cron' (UTC) for calendar patterns "
-                "like weekdays, 'every_seconds' for a plain interval.\n\n"
-                "For anything you only need to CHECK rather than to reason about at length, prefer a "
-                "periodic wake and do the check with a tool call when you wake — that is how you watch "
-                "a condition. Do not arm a tight interval to wait for something rare; arm something "
-                "proportionate, and widen it if it keeps waking you for nothing.\n\n"
+                "TWO KINDS, and picking the right one matters:\n"
+                "- A TIME wake ('at', 'cron', 'every_seconds') wakes you at a clock time. It needs an "
+                "'objective', because nothing else knows why it was armed.\n"
+                "- An EVENT watch ('on_event') wakes you when something an engine notices actually "
+                "happens. Do NOT supply an objective for one — the engine's own notice says what "
+                "happened, and it is the only thing that knows.\n\n"
+                "PREFER A WATCH OVER POLLING. When the user says \"tell me when...\" and some engine "
+                "already raises that event, on_event means you are told when it happens instead of "
+                "waking on a timer to check and nearly always finding nothing. Reserve a periodic wake "
+                "for what nothing can tell you about — and then keep it proportionate: do not arm a "
+                "tight interval to wait for something rare, and widen it if it keeps waking you for "
+                "nothing.\n\n"
                 "The bar is high — arm one only when there's a real, lasting reason to. If the user "
                 "gave a vague time (\"tomorrow\", \"later\", \"in the morning\") with no specific hour, "
                 "don't invent one — call ask_user for the specific time first. A wrong guess is worse "
@@ -464,13 +469,26 @@ _STATIC_TOOLS_SCHEMA = [
                         "type": "string",
                         "description": "A short stable identity for this wake: lowercase letters, digits and dashes, e.g. \"weekly-review\" or \"check-deploy\". Reuse the same name to mean the same commitment; a second arm under a name that already exists is refused.",
                     },
-                    "objective": {"type": "string", "description": "What you're committing to, in the user's terms — this becomes the seed of the turn that wakes you."},
+                    "objective": {"type": "string", "description": "What you're committing to, in the user's terms — this becomes the seed of the turn that wakes you. Required for a time wake; leave it out entirely when you arm an on_event watch, where the engine's notice supplies it."},
                     "why": {"type": "string", "description": "Optional one line of context carried to the future turn."},
+                    "on_event": {
+                        "type": "object",
+                        "description": "Arm a watch instead of a timed wake: you are woken when this event fires, not at a clock time. Use it for \"tell me when...\" wherever an engine actually raises that event.",
+                        "properties": {
+                            "event_key": {"type": "string", "description": "What to watch, exactly as the engine that raises it names it — e.g. \"budget:8f14e45f\" to hear when a spending limit is crossed. Take it from the engine's own output (the operation that lists what you would be watching returns it); do not invent one, because a key nothing raises arms a watch that never fires."},
+                        },
+                        "required": ["event_key"],
+                    },
                     "at": {"type": "string", "description": "ISO-8601 timestamp for a one-shot wake. Compute this relative to the actual current date — check it first (e.g. via shell_exec); never assume or recall a date from memory. Only fill this in from a time the user actually gave or clearly implied — if they didn't give one, get it via ask_user first rather than defaulting to a guessed hour."},
                     "cron": {"type": "string", "description": "Cron expression, UTC — e.g. \"0 9 * * MON-FRI\". Use for calendar patterns."},
                     "every_seconds": {"type": "number", "description": "Fixed interval in seconds — a plain cadence, or the check interval for something you only need to look at."},
                 },
-                "required": ["name", "objective"],
+                "required": ["name"],
+                # Either an objective (a time wake, where nothing else knows why it
+                # was armed) or an on_event (a watch, where the engine's notice says
+                # it). In the schema rather than only in the handler, so the model
+                # sees the constraint instead of learning it from a rejection.
+                "anyOf": [{"required": ["objective"]}, {"required": ["on_event"]}],
             },
         },
     },
@@ -484,8 +502,9 @@ _STATIC_TOOLS_SCHEMA = [
         "function": {
             "name": "manage_wake",
             "description": (
-                "List, inspect, revise, or cancel the wakes you have armed. "
-                "list needs nothing else. inspect/revise/cancel need wake_id. "
+                "List, inspect, revise, or cancel the wakes you have armed — both time wakes and "
+                "event watches. list needs nothing else, and returns both kinds together. "
+                "inspect/revise/cancel need wake_id, exactly as list returned it. "
                 "Use list before arming something that might already exist, and to prune wakes "
                 "that are no longer worth waking for."
             ),
@@ -493,7 +512,7 @@ _STATIC_TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["list", "inspect", "revise", "cancel"]},
-                    "wake_id": {"type": "string", "description": "Required for every action except list."},
+                    "wake_id": {"type": "string", "description": "Required for every action except list — whatever list returned for it. Time wakes and event watches both take their own id here; you never need to know which kind it is."},
                     "objective": {"type": "string", "description": "revise: the new objective."},
                     "why": {"type": "string", "description": "revise: the new one-line context."},
                     "at": {"type": "string", "description": "revise: new ISO-8601 time for a one-shot wake."},

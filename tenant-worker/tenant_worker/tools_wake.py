@@ -22,13 +22,18 @@ discovered Calendar/Reminders tool has no resolution path. `schedule`, `reminder
 `Wake` is already this codebase's own vocabulary for waking a session
 (`WakeSignalName`, `WakeSessionActivity`); `arm` is nobody's.
 
+**Two kinds of wake, one verb.** A time wake is a Temporal Schedule
+(`wake:<scope>:<name>`); an event wake is a row in mcp-hub
+(`watch:<scope>:<name>`) that pairs an engine's `event_key` with this session. Both
+are addressed, listed and cancelled through `manage_wake` — the prefix says which
+store the wake lives in, so nothing has to guess. This is the one place two sources
+get unioned, and it is deliberate: to the agent a wake is a wake, however it is
+triggered.
+
 **What is deliberately NOT here:** any way to make an external system notify the
 *user* at a time. The agent already has those tools through mcp-hub connections
 and should use them — the harness is only needed to wake the agent's own
-reasoning. Event-based wakes (`on_event`) land with the harness ingress and
-mcp-hub's subscription API, so they are deliberately absent from the schema rather
-than offered and broken: a tool the model can call that cannot work is worse than
-a tool it cannot see.
+reasoning.
 """
 
 from __future__ import annotations
@@ -50,6 +55,7 @@ from temporalio.client import (
     ScheduleUpdate,
 )
 
+from . import mcp_hub
 from .ids import user_scope_of
 
 if TYPE_CHECKING:
@@ -67,6 +73,11 @@ _TENANT_SLUG = os.environ.get("TENANT_SLUG", "")
 # so `list` is an id-prefix filter over Temporal's own schedule list — no Search
 # Attributes (and so no namespace deploy step) are involved.
 _SCHED_PREFIX = "wake:"
+
+# Event wakes live in mcp-hub's subscriptions table, not in Temporal, so they get
+# their own prefix: `_own_id` can then check both without a lookup, and
+# inspect/cancel dispatch on the prefix instead of asking each store in turn.
+_WATCH_PREFIX = "watch:"
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,59}$")
 
@@ -97,8 +108,9 @@ def _name(arguments: dict) -> str:
 
 def _own_id(ctx: "ToolContext", wake_id: str) -> str:
     scope = _scope(ctx)
-    if str(wake_id).startswith(f"{_SCHED_PREFIX}{scope}:"):
-        return wake_id
+    for prefix in (_SCHED_PREFIX, _WATCH_PREFIX):
+        if str(wake_id).startswith(f"{prefix}{scope}:"):
+            return wake_id
     raise ValueError(f"wake {wake_id!r} does not belong to you")
 
 
@@ -148,20 +160,52 @@ def _trigger_spec(arguments: dict) -> tuple[ScheduleSpec, str, bool]:
     raise ValueError("arm_wake needs one of: 'at' (ISO-8601), 'cron' (UTC), or 'every_seconds'")
 
 
-async def arm_wake(arguments: dict, ctx: "ToolContext") -> dict:
-    objective = (arguments.get("objective") or "").strip()
-    if not objective:
-        raise ValueError("arm_wake requires a non-empty 'objective' — what you should do when you wake")
-    if arguments.get("on_event") is not None:
+async def _arm_event_wake(ctx: "ToolContext", name: str, why: str, on_event) -> dict:
+    """Arm a watch: pair one of an engine's events with this session.
+
+    **No objective is taken from the agent here, on purpose.** What wakes the session
+    is the notice the engine raises, which describes what actually happened and is the
+    only thing that knows; the agent's contribution was naming *which* event matters,
+    and that is the `event_key`. A time wake needs an objective because nothing else
+    knows why it was armed — an event watch does not, and storing one would be storing
+    a field nothing ever reads.
+    """
+    event_key = (on_event.get("event_key") if isinstance(on_event, dict) else str(on_event)) or ""
+    event_key = event_key.strip()
+    if not event_key:
         raise ValueError(
-            "on_event wakes are not available yet — the harness event ingress and mcp-hub's "
-            "subscription API are not built. To watch something today, arm a periodic wake and "
-            "check it with a tool call when you wake."
+            "on_event needs an 'event_key' — the thing to watch, exactly as the engine that "
+            "raises it names it"
         )
 
-    name = _name(arguments)
     scope = _scope(ctx)
+    wake_id = f"{_WATCH_PREFIX}{scope}:{name}"
+    try:
+        await mcp_hub.arm_subscription(wake_id=wake_id, event_key=event_key, invoke_id=scope)
+    except (mcp_hub.McpHubNotConfiguredError, mcp_hub.McpHubCallError) as exc:
+        # Surfaced, never swallowed: an arm the agent believes succeeded but which
+        # registered nothing is an alert that silently never arrives.
+        raise ValueError(f"could not arm the watch: {exc}") from exc
+
+    logger.info("arm_wake: watching %s as %s", event_key, wake_id)
+    return {"wake_id": wake_id, "armed": True, "on_event": event_key, "why": why}
+
+
+async def arm_wake(arguments: dict, ctx: "ToolContext") -> dict:
+    name = _name(arguments)
     why = (arguments.get("why") or "").strip()
+
+    if arguments.get("on_event") is not None:
+        return await _arm_event_wake(ctx, name, why, arguments["on_event"])
+
+    objective = (arguments.get("objective") or "").strip()
+    if not objective:
+        raise ValueError(
+            "arm_wake requires a non-empty 'objective' — what you should do when you wake — "
+            "unless you arm an on_event watch, where the engine's own notice says it"
+        )
+
+    scope = _scope(ctx)
     spec, cadence, one_shot = _trigger_spec(arguments)
 
     wake_id = f"{_SCHED_PREFIX}{scope}:{name}"
@@ -235,26 +279,77 @@ async def _describe(client, wake_id: str) -> dict:
 
 
 async def list_wakes(arguments: dict, ctx: "ToolContext") -> dict:
-    prefix = f"{_SCHED_PREFIX}{_scope(ctx)}:"
+    scope = _scope(ctx)
     client = _client(ctx)
     out: list[dict] = []
     # list_schedules is `async def` in temporalio — it must be awaited first to get
     # the ScheduleAsyncIterator, then iterated; `async for` directly on the
     # coroutine is a real bug, verified against the installed SDK (1.32.0).
     async for sched in await client.list_schedules():
-        if sched.id.startswith(prefix):
+        if sched.id.startswith(f"{_SCHED_PREFIX}{scope}:"):
             out.append(await _describe(client, sched.id))
-    return {"wakes": out}
+
+    # Event watches live in mcp-hub. This union is the one place the two stores meet,
+    # and it is deliberate: to the agent a wake is a wake, however it is triggered.
+    note = ""
+    try:
+        subscriptions = await mcp_hub.list_subscriptions()
+    except mcp_hub.McpHubNotConfiguredError:
+        # No hub configured means no event watch can exist for this tenant either, so
+        # the schedule list above is the whole truth rather than a silent gap.
+        subscriptions = []
+    except mcp_hub.McpHubCallError as exc:
+        # A hub that is down must not hide the time wakes above — but it must not read
+        # as "you have no watches" either, or the agent arms a duplicate of one it
+        # already has. So the list is returned, marked, rather than failed or faked.
+        subscriptions = []
+        note = f"event watches could not be read, so this list may be incomplete: {exc}"
+    for subscription in subscriptions:
+        wake_id = subscription.get("wake_id") or ""
+        if wake_id.startswith(f"{_WATCH_PREFIX}{scope}:"):
+            out.append({
+                "wake_id": wake_id,
+                "state": "armed",
+                "cadence": f"when {subscription['event_key']} fires",
+                "on_event": subscription["event_key"],
+            })
+    return {"wakes": out, "note": note} if note else {"wakes": out}
 
 
 async def inspect_wake(arguments: dict, ctx: "ToolContext") -> dict:
-    return await _describe(_client(ctx), _own_id(ctx, arguments["wake_id"]))
+    wake_id = _own_id(ctx, arguments["wake_id"])
+    if wake_id.startswith(_WATCH_PREFIX):
+        try:
+            subscriptions = await mcp_hub.list_subscriptions()
+        except (mcp_hub.McpHubNotConfiguredError, mcp_hub.McpHubCallError) as exc:
+            return {"wake_id": wake_id, "state": "unknown", "note": str(exc)}
+        for subscription in subscriptions:
+            if subscription.get("wake_id") == wake_id:
+                return {
+                    "wake_id": wake_id,
+                    "state": "armed",
+                    "cadence": f"when {subscription['event_key']} fires",
+                    "on_event": subscription["event_key"],
+                }
+        return {"wake_id": wake_id, "state": "unknown", "note": "no such event watch"}
+    return await _describe(_client(ctx), wake_id)
 
 
 async def revise_wake(arguments: dict, ctx: "ToolContext") -> dict:
+    wake_id = _own_id(ctx, arguments["wake_id"])
+    if wake_id.startswith(_WATCH_PREFIX):
+        # Checked before the "nothing to revise" guard, so a watch gets the reason
+        # rather than a complaint about missing fields it could never have supplied.
+        # There is nothing here to revise: a watch has no cadence, and its objective
+        # comes from the engine afresh each time. Watching something else is a
+        # different event_key, which is a different watch, not an edit to this one.
+        return {
+            "wake_id": wake_id,
+            "revised": False,
+            "note": "an event watch has no cadence or objective to revise — cancel it and arm a new one",
+        }
     if not any(k in arguments for k in ("at", "cron", "every_seconds", "objective", "why", "paused")):
         raise ValueError("revise_wake needs at least one of at / cron / every_seconds / objective / why / paused")
-    wake_id = _own_id(ctx, arguments["wake_id"])
     handle = _client(ctx).get_schedule_handle(wake_id)
     try:
         current = (await handle.describe()).schedule
@@ -293,6 +388,14 @@ async def revise_wake(arguments: dict, ctx: "ToolContext") -> dict:
 
 async def cancel_wake(arguments: dict, ctx: "ToolContext") -> dict:
     wake_id = _own_id(ctx, arguments["wake_id"])
+    if wake_id.startswith(_WATCH_PREFIX):
+        try:
+            cancelled = await mcp_hub.cancel_subscription(wake_id)
+        except (mcp_hub.McpHubNotConfiguredError, mcp_hub.McpHubCallError) as exc:
+            return {"wake_id": wake_id, "cancelled": False, "note": str(exc)}
+        # False here means nothing was armed under that id — a real answer, not a
+        # failure, and one the agent should not be told was a success.
+        return {"wake_id": wake_id, "cancelled": cancelled}
     try:
         await _client(ctx).get_schedule_handle(wake_id).delete()
     except Exception as exc:  # noqa: BLE001

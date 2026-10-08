@@ -17,6 +17,10 @@ dependencies = [
     # Official SDK, not a hand-rolled JSON-RPC/streamable-HTTP
     # session-handshake implementation.
     "mcp>=1.0,<3",
+    # mcp_hub.py's subscription calls reach mcp-hub's management API directly.
+    # httpx already arrives transitively via `mcp`, but it is imported here by name,
+    # so it is declared here by name.
+    "httpx>=0.27,<1",
     # docs/components/tool-registry.md, "Resolved: Native-Tool Discovery" —
     # shell_hub.py's in-process hybrid vector+FTS index. Verified real
     # (https://github.com/alibaba/zvec, Apache-2.0) before adopting.
