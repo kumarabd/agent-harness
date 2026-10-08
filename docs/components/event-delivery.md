@@ -5,9 +5,11 @@
 > settled that a wake is a Temporal Schedule. This doc covers the *other* half:
 > events raised by an engine rather than by a clock.
 >
-> Nothing here is built except the finance side's detection, which is committed
-> (`finance-engine` `b6eeb22`). The delivery path is the shared blocker for
-> everything else.
+> Built: the finance side's detection (`finance-engine` `b6eeb22`) and the whole
+> mcp-hub half of the delivery path — `/events`, the `subscriptions` table, and the
+> wake itself (`infra` `a30a6ae`). Remaining: the per-engine delivery workers, the
+> maps arrival hook, and wiring `arm_wake(on_event=...)` so that anything actually
+> arms a subscription.
 
 ### The shape, in one line
 
@@ -167,10 +169,17 @@ without any of that.
 
 ### Ordering
 
-1. **mcp-hub's `/events` route + `subscriptions` table.** Everything else is
-   blocked on it, and it is testable on its own in mcp-hub: a known `event_key`
-   wakes the right session, an unknown one is dropped, a replayed event id does not
-   wake twice, an expired subscription is ignored.
+1. ~~**mcp-hub's `/events` route + `subscriptions` table.**~~ **DONE** (`infra`
+   `a30a6ae`; mcp-hub's 142 tests green). A known `event_key` wakes the subscribed
+   session, an unknown one is a 404, a replayed event id returns 202 `duplicate`
+   having woken nothing a second time, and an expired subscription is ignored —
+   expiry decided in SQL and tested against a real Postgres, so the clock the test
+   runs on cannot make a stale row look live. mcp-hub starts the harness's own
+   `WakeWorkflow` with **no** reuse or conflict policy set, because Temporal's
+   defaults already dedupe a completed or running id while still retrying a failed
+   one. `USE_EXISTING` is deliberately absent: it returns the running execution's
+   handle rather than raising, so a duplicate-while-running would be reported as a
+   wake that never happened.
 2. **finance delivery worker.** Smallest possible proof of the whole path, because
    detection is already done and a crossing can be produced by writing a spend.
 3. **maps arrival** — the `trips_api.go` hook, the preference, the delivery worker
