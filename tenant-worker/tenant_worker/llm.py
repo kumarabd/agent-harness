@@ -143,7 +143,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "action is worse than one extra question. This doesn't mean interrogate every trivial choice: "
     "genuinely inconsequential defaults (matching the code style already in the file you're "
     "editing, say) are fine to just pick. If something is missing but not blocking what you're "
-    "doing right now, note it or call create_intention to follow up later.\n\n"
+    "doing right now, note it or arm a wake to follow up later.\n\n"
     "After using a tool, summarize the result in plain text for the user rather than leaving it "
     "as raw output. Any tool's result may come back as a claim-check reference instead of its "
     "usual shape — {\"claim_check_path\": <path>, \"size_bytes\": N, \"head\": ..., \"tail\": ..., "
@@ -429,78 +429,77 @@ _STATIC_TOOLS_SCHEMA = [
             },
         },
     },
-    # docs/components/proactivity.md — the agent's own standing intentions.
-    # Each is an IntentionWorkflow execution (no table); these tools start /
-    # signal / cancel / query it via the Temporal client (tools_intention.py).
+    # docs/components/proactivity.md — arming a wake. A time wake IS a Temporal
+    # Schedule (no table); these tools create / list / revise / cancel it through
+    # the Temporal client (tools_wake.py).
     {
         "type": "function",
         "function": {
-            "name": "create_intention",
+            "name": "arm_wake",
             "description": (
-                "Arm a standing intention — something you should keep watching for or doing on the "
-                "user's behalf, beyond this turn (\"remind me to leave 2h before my flight\", "
-                "\"tell me when the deploy goes green\", \"every weekday morning give me my priorities\"). "
-                "When it triggers, you get woken with a fresh turn to decide whether and how to act. "
-                "The bar is high — arm one only when there's a real, lasting reason to. If the user gave "
-                "a vague time (\"tomorrow\", \"later\", \"in the morning\") with no specific hour, don't "
-                "invent one — call ask_user for the specific time first. This arms a real commitment at "
-                "a time you picked, not one the user actually agreed to; a wrong guess is worse than "
-                "asking."
+                "Arm a wake: you get woken at that time with a fresh turn to decide whether and how "
+                "to act. This is for things that need YOUR judgment at the future moment — a weekly "
+                "review, checking on something and deciding what it means, following up on work in "
+                "progress.\n\n"
+                "FIRST, decide whether you need this at all. If an external system should notify the "
+                "user at a time, use THAT system's own tool (a calendar reminder, a reminder app) — "
+                "those already do notifications properly, and this harness is not a notifier. Arm a "
+                "wake only when the future moment needs you to think.\n\n"
+                "Choosing a cadence: 'at' for one specific time, 'cron' (UTC) for calendar patterns "
+                "like weekdays, 'every_seconds' for a plain interval.\n\n"
+                "For anything you only need to CHECK rather than to reason about at length, prefer a "
+                "periodic wake and do the check with a tool call when you wake — that is how you watch "
+                "a condition. Do not arm a tight interval to wait for something rare; arm something "
+                "proportionate, and widen it if it keeps waking you for nothing.\n\n"
+                "The bar is high — arm one only when there's a real, lasting reason to. If the user "
+                "gave a vague time (\"tomorrow\", \"later\", \"in the morning\") with no specific hour, "
+                "don't invent one — call ask_user for the specific time first. A wrong guess is worse "
+                "than asking. `name` is the wake's identity: choose it deliberately, because arming the "
+                "same name twice is refused rather than duplicated."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "objective": {"type": "string", "description": "What you're committing to, in the user's terms."},
-                    "why": {"type": "string", "description": "Optional one line of context carried to the future turn."},
-                    "kind": {
+                    "name": {
                         "type": "string",
-                        "enum": ["time", "deadline", "condition", "state", "event", "inactivity", "schedule"],
-                        "description": "time/deadline = fire once at fire_at; condition/state/event = poll a probe until it holds; inactivity = fire if the user goes quiet for idle_for_seconds; schedule = recurring, needs cron or every_seconds.",
+                        "description": "A short stable identity for this wake: lowercase letters, digits and dashes, e.g. \"weekly-review\" or \"check-deploy\". Reuse the same name to mean the same commitment; a second arm under a name that already exists is refused.",
                     },
-                    "fire_at": {"type": "string", "description": "ISO-8601 timestamp (kind=time/deadline). Compute this relative to the actual current date — check it first (e.g. via shell_exec); never assume or recall a date from memory. Only fill this in from a time the user actually gave or clearly implied — if they didn't give one, get it via ask_user first rather than defaulting to a guessed hour."},
-                    "idle_for_seconds": {"type": "number", "description": "Seconds of user silence before firing (kind=inactivity)."},
-                    "cron": {"type": "string", "description": "Cron expression, UTC (kind=schedule) — e.g. \"0 9 * * MON-FRI\"."},
-                    "every_seconds": {"type": "number", "description": "Fixed interval in seconds (kind=schedule), alternative to cron."},
-                    "poll_every_seconds": {"type": "number", "description": "Poll interval (kind=condition/state/event; default 300)."},
-                    "expires_at": {"type": "string", "description": "ISO-8601; give up unfired after this (poll kinds)."},
-                    "probe": {
-                        "type": "object",
-                        "description": "What to check each poll (kind=condition/state/event).",
-                        "properties": {
-                            "tool": {"type": "string", "description": "A call_tool \"server/tool\" to run."},
-                            "args": {"type": "object", "description": "Arguments for that tool."},
-                            "predicate": {"type": "string", "description": "Natural-language condition to judge against the result."},
-                        },
-                        "required": ["tool", "predicate"],
-                    },
+                    "objective": {"type": "string", "description": "What you're committing to, in the user's terms — this becomes the seed of the turn that wakes you."},
+                    "why": {"type": "string", "description": "Optional one line of context carried to the future turn."},
+                    "at": {"type": "string", "description": "ISO-8601 timestamp for a one-shot wake. Compute this relative to the actual current date — check it first (e.g. via shell_exec); never assume or recall a date from memory. Only fill this in from a time the user actually gave or clearly implied — if they didn't give one, get it via ask_user first rather than defaulting to a guessed hour."},
+                    "cron": {"type": "string", "description": "Cron expression, UTC — e.g. \"0 9 * * MON-FRI\". Use for calendar patterns."},
+                    "every_seconds": {"type": "number", "description": "Fixed interval in seconds — a plain cadence, or the check interval for something you only need to look at."},
                 },
-                "required": ["objective", "kind"],
+                "required": ["name", "objective"],
             },
         },
     },
     # docs/components/tool-registry.md, "Resolved: Three-Layer Tool Taxonomy"
-    # — the 5 CRUD operations on an armed intention (everything but create)
-    # collapsed into one dispatcher tool. These are operations on one
-    # construct, not 5 distinct intents, unlike e.g. memory_search vs.
-    # lcm_grep (different substrates, deliberately left separate).
+    # — the 4 CRUD operations on an armed wake (everything but arm) collapsed into
+    # one dispatcher tool. These are operations on one construct, not 4 distinct
+    # intents, unlike e.g. recall vs. lcm_grep (different substrates,
+    # deliberately left separate).
     {
         "type": "function",
         "function": {
-            "name": "manage_intention",
+            "name": "manage_wake",
             "description": (
-                "List, inspect, revise, snooze, or cancel your armed intentions. "
-                "list needs nothing else. inspect/revise/snooze/cancel need intention_id."
+                "List, inspect, revise, or cancel the wakes you have armed. "
+                "list needs nothing else. inspect/revise/cancel need wake_id. "
+                "Use list before arming something that might already exist, and to prune wakes "
+                "that are no longer worth waking for."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "inspect", "revise", "snooze", "cancel"]},
-                    "intention_id": {"type": "string", "description": "Required for every action except list."},
+                    "action": {"type": "string", "enum": ["list", "inspect", "revise", "cancel"]},
+                    "wake_id": {"type": "string", "description": "Required for every action except list."},
                     "objective": {"type": "string", "description": "revise: the new objective."},
                     "why": {"type": "string", "description": "revise: the new one-line context."},
-                    "fire_at": {"type": "string", "description": "revise: new ISO-8601 fire time."},
-                    "poll_every_seconds": {"type": "number", "description": "revise: new poll interval."},
-                    "by_seconds": {"type": "number", "description": "snooze: push the next fire out by this many seconds."},
+                    "at": {"type": "string", "description": "revise: new ISO-8601 time for a one-shot wake."},
+                    "cron": {"type": "string", "description": "revise: new cron expression (UTC)."},
+                    "every_seconds": {"type": "number", "description": "revise: new interval in seconds."},
+                    "paused": {"type": "boolean", "description": "revise: true to pause without cancelling, false to resume."},
                 },
                 "required": ["action"],
             },

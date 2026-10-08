@@ -47,6 +47,19 @@ var toolActivityOptions = map[string]toolTiming{
 		HeartbeatTimeout:    10 * time.Second,
 		StartToCloseTimeout: 2 * time.Minute,
 	},
+	// arm_wake / manage_wake: every call is a Temporal Schedule round trip
+	// (create / list / describe / update / delete), and arm_wake's event path
+	// also registers a subscription with mcp-hub — two network hops, neither
+	// local. Tier B, same reasoning as load_skill: real headroom rather than a
+	// spurious timeout on a legitimate call.
+	"arm_wake": {
+		HeartbeatTimeout:    10 * time.Second,
+		StartToCloseTimeout: 2 * time.Minute,
+	},
+	"manage_wake": {
+		HeartbeatTimeout:    10 * time.Second,
+		StartToCloseTimeout: 2 * time.Minute,
+	},
 }
 
 // defaultToolTiming is today's existing local-demo tuning (see the comment

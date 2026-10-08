@@ -175,7 +175,7 @@ class InsertMessageInput:
     parent_type: str = ""
     turn_seq: int | None = None
     # Provenance for the turns row, set only on the is_turn_start call
-    # (docs/components/proactivity.md): "" / "user" (default), "intn:<id>".
+    # (docs/components/proactivity.md): "" / "user" (default), "wake:<id>".
     initiated_by: str = ""
 
 
@@ -217,33 +217,18 @@ class UserInputResponse:
     free_text: str | None = None
 
 
-# --- docs/components/proactivity.md — intentions ---
+# --- docs/components/proactivity.md — waking ---
 
 
 @dataclass
-class ProbeSpec:
-    tool: str = ""
-    args: dict[str, Any] = field(default_factory=dict)
-    predicate: str = ""
+class WakeSessionInput:
+    """WakeSession SignalWithStarts the session coordinator's Wake handler.
 
+    One input for every source of a wake: a Temporal Schedule tick, an event
+    callback landing on the harness ingress, or the manual starter CLI.
+    """
 
-@dataclass
-class FireIntentionInput:
-    """FireIntention SignalWithStarts the session coordinator's Wake handler."""
-
-    intention_id: str = ""
+    wake_id: str = ""
     session_key: str = ""
     objective: str = ""
     why: str = ""
-
-
-@dataclass
-class CheckConditionInput:
-    intention_id: str = ""
-    probe: ProbeSpec = field(default_factory=ProbeSpec)
-
-
-@dataclass
-class CheckConditionResult:
-    fired: bool = False
-    note: str = ""

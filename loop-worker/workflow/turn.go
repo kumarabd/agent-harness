@@ -46,11 +46,12 @@ const CancelSignalName = "Cancel"
 // Workflow (unlike NewMessage/Cancel/Wake) — it has nothing to act on.
 const KeepAliveSignalName = "KeepAlive"
 
-// WakeSignalName — docs/components/proactivity.md, "The fire path". A fired
-// IntentionWorkflow's FireIntention activity sends this to the session
-// CoordinatorWorkflow (payload: types.WakePayload). The coordinator handles it
+// WakeSignalName — docs/components/proactivity.md, "The fire path". A wake —
+// a Temporal Schedule tick, or an event callback arriving on the harness
+// ingress — reaches the session CoordinatorWorkflow as this
+// (payload: types.WakePayload). The coordinator handles it
 // as a sibling of NewMessage: with no active turn it synthesises a seed message
-// and starts a proactive turn (initiated_by "intn:<id>"); with a turn already
+// and starts a proactive turn (initiated_by "wake:<id>"); with a turn already
 // active it folds the objective in as a follow-up so the live turn's model
 // decides placement.
 const WakeSignalName = "Wake"
@@ -1223,7 +1224,7 @@ loop:
 		// --- Stop / continue: two independent questions, decided separately.
 		//
 		// (1) Is there more work to do? Answered by ToolCalls alone, never by
-		// status — a real requested action (create_intention, ask_user, ...)
+		// status — a real requested action (arm_wake, ask_user, ...)
 		// is always dispatched, even if the same step also claimed "done" or
 		// "blocked". status is never trusted to discard pending work.
 		//

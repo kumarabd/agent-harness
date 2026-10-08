@@ -10,7 +10,7 @@ Everything the model can emit in a response falls into one of three layers:
                  (agent-brain), lcm_grep /
                  lcm_describe / lcm_expand (this session's history + compaction DAG).
   - CONTROL    — steering the constructs the agent lives inside: report_status
-                 (status + next_step), spawn_subagent (subagent tree), the intention tools.
+                 (status + next_step), spawn_subagent (subagent tree), the wake tools.
 
 This module is the single declarative source for *which* capabilities exist,
 *which turn kinds* (REASONING / SUBAGENT) expose each one, whether it is *peeled*
@@ -114,10 +114,12 @@ _STATIC_CAPABILITIES: list[Capability] = [
     # No handler_ref — turn.go dispatches a UserInputRequestWorkflow child and
     # parks the loop on it, same as spawn_subagent is a child workflow.
     Capability("ask_user", Layer.CONTROL, _MAIN, meta=True),
-    Capability("create_intention", Layer.CONTROL, _MAIN, handler_ref="create_intention"),
-    # 5 CRUD ops -> 1 dispatcher (list/inspect/revise/snooze/cancel) —
-    # tool-registry.md, "Resolved: Three-Layer Tool Taxonomy".
-    Capability("manage_intention", Layer.CONTROL, _MAIN, handler_ref="manage_intention"),
+    Capability("arm_wake", Layer.CONTROL, _MAIN, handler_ref="arm_wake"),
+    # 4 CRUD ops -> 1 dispatcher (list/inspect/revise/cancel) —
+    # tool-registry.md, "Resolved: Three-Layer Tool Taxonomy". Same consolidation
+    # the intention tools used; only the construct changed (a wake, not an
+    # intention) and the create/dispatch split survived it.
+    Capability("manage_wake", Layer.CONTROL, _MAIN, handler_ref="manage_wake"),
     Capability("lcm_grep", Layer.COGNITION, _MAIN, handler_ref="lcm_grep", timing=LOCAL),
     Capability("lcm_describe", Layer.COGNITION, _MAIN, handler_ref="lcm_describe", timing=LOCAL),
     Capability("lcm_expand", Layer.COGNITION, frozenset({TurnKind.SUBAGENT}), handler_ref="lcm_expand", timing=LOCAL),

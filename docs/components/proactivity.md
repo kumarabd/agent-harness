@@ -1,159 +1,113 @@
-# Component: Proactivity — Intentions
+# Component: Proactivity — Waking
 
-> STATUS: DESIGN v3 (2026-09-02). Supersedes v2 ("first-class hand-built
-> components"), rejected as a parallel mini-architecture.
+> STATUS: DESIGN v4 (2026-10-08). Supersedes v3 ("intentions"), which is
+> **removed**. v3 built user requests as one primitive — `IntentionWorkflow`, one
+> Temporal execution per intention, with the workflow's own state *being* the
+> record ("an intention is a workflow, not a row"). Four things were wrong with
+> it, and the build went with them:
 >
-> **BUILD — Phase 1 substrate: MERGED to `main` and deployed** (PR #1,
-> `41a92f8` — predates the turn-pipeline redesign below, so it's shipped
-> through every loop-worker deploy since). Corrected 2026-09-11: this used to
-> read "branch `proactivity-substrate`, NOT deployed" — that was stale.
-> - **1a** — `turns.initiated_by` (migration `020`); coordinator `Wake` signal →
->   proactive turn (`initiated_by="intn:<id>"`) or fold-in to the live turn;
->   `startSessionTurn` helper. (`episodes.initiated_by`, added by the same
->   migration, is moot — the `episodes` table itself was dropped in migration
->   `025` when episode-lifecycle was superseded, see below.)
-> - **1b-i** — `IntentionWorkflow` (loop-worker): `time`/`deadline` one-shot,
->   `condition`/`state`/`event` poll loop, `inactivity` idle timer;
->   `revise`/`snooze`/`reset` signals, `status` query; `FireIntention` activity
->   (SignalWithStart the coordinator). 5 workflow tests.
-> - **1b-ii** — 6 agent tools (`create` / `list` / `inspect` / `revise` /
->   `snooze` / `cancel_intention`) → handlers in `tools_intention.py` over
->   `ctx.temporal_client` (threaded into `ToolCallActivity`). No new activities.
->   **Consolidated to 2 model-facing tools 2026-09-04** (`create_intention` +
->   `manage_intention(action, …)`) — see "The agent's tools" below; the 5
->   handlers stay as `manage_intention`'s internal implementations.
-> - **1b-iii** — real `CheckCondition` (mcp-hub probe → fast-tier predicate
->   judge).
-> - **recurring** — `kind=schedule` (+ `cron` UTC / `every_seconds`) → a Temporal
->   Schedule (`intn-sched:<scope>:<slug>`) starting a one-shot
->   `IntentionWorkflow{kind:time}` per tick; `list` / `inspect` / `cancel` handle
->   schedule ids; `revise` / `snooze` don't apply (cancel + recreate).
+> 1. **The abstraction didn't cover its own cases.** Recurring intentions were
+>    Temporal *Schedules*, which are not workflow executions — so `list` needed
+>    two code paths (Search Attribute filter for workflows, id-prefix filter for
+>    schedules) and `revise`/`snooze` "don't apply" to schedules, returning a note
+>    instead of doing the thing.
+> 2. **Conditions were structurally expensive AND non-functional.**
+>    `CheckCondition` ran a tool probe **plus an LLM-judged natural-language
+>    predicate** every poll, so cost scaled with `intentions × frequency` to answer
+>    questions a comparison settles. It was also a stub: it always returned
+>    `fired=False`, so `condition`/`state`/`event` intentions *never fired at
+>    all* — v3's headline capability was dead code.
+> 3. **Identity was deferred, and it is the whole feature.** `intn:<user>:<slug>`
+>    with the slug derived from free text (a `re.findall` over the objective), and
+>    near-duplicate handling left as an open question. "Don't arm the same thing
+>    twice" is the thing users notice; a slug is a guess where a name is a
+>    decision.
+> 4. **Most of it was already solved.** A direct notification at 9am is a tool
+>    call to an external system the agent already reaches through mcp-hub
+>    connections. Only *waking the agent's own reasoning* needs the harness.
 >
-> **v1 deviations from this doc, deferred:**
-> - Intentions key on the **user-stable scope** (`ids.UserScopeOf` — session_key
->   with any `:session:`/`:thread:` suffix stripped): `intn:<scope>:<slug>`. For
->   web that scope is the user; for a shared Discord channel it's the channel
->   (the harness has no user primitive — `core.SessionKeyFor` is deliberately not
->   user-scoped). A fire wakes that scope's canonical session. `list_intentions`
->   filters `ListWorkflowExecutions` on the **`IntentionUser` Search Attribute**
->   (`IntentionWorkflow` upserts `IntentionUser` / `IntentionKind` /
->   `IntentionState` on start + every transition). Registering the three on the
->   namespace is a deploy step; an unregistered upsert is a harmless no-op, but
->   the `list` query against one fails and surfaces (no fallback). Schedules
->   aren't workflow executions, so they keep the `intn-sched:<scope>:` id-prefix
->   filter.
-> - The proactive seed is written **role=`user`, seq 0** — the turn's first
->   `ModelCall` reads it as the request (`coordinator.go`'s
->   `proactiveSeedText`); `initiated_by` carries the real provenance. (This
->   used to say "ClassifyRequest requires it" — ClassifyRequest no longer
->   exists, see `turn-pipeline.md`; the actual reason was always just "the
->   model needs something in seq 0 to read".)
-> - `cron` and any daily cadence run in the **execution engine's timezone**
->   (per-user timezone is deferred — 2026-09-02).
-> - **The genesis daily-review intention is NOT built, but has no blockers left:**
->   it's a plain `kind=schedule` intention (daily cron) that **the agent arms
->   itself** via `create_intention` when a routine makes sense (no auto-genesis —
->   the harness has no "onboard user" event and the bar for standing behaviour is
->   high). Its fired turn derives its own watermark — `MAX(turns.started_at)
->   WHERE initiated_by = 'intn:<scope>:daily-review'` — so "review everything
->   since I last reviewed" needs **no new table, column, or workflow kind**
->   (same "no watermark" stance as migration `011`). `importance` is computed by
->   the review turn from raw signals (`stop_reason`, correction counts, plan
->   outcomes), not stored.
-> - No suppression/dedup state on the intention beyond `fired_count`; the
->   deciding turn's judgment + `lcm` are the only guard so far.
->
+> Removed with v3: `IntentionWorkflow` + its 5 tests, `FireIntention`/
+> `CheckCondition` activities, `tools_intention.py`, the `IntentionUser`/
+> `IntentionKind`/`IntentionState` Search Attributes **and their namespace
+> registration deploy step**, and `IntentionInput`/`IntentionStatus`/`ProbeSpec`.
+> `turns.initiated_by` (migration `020`) stays; the provenance prefix is now
+> `wake:` rather than `intn:`.
+
 > Parent: [`../04-architecture-orchestrator-vision.md`](../04-architecture-orchestrator-vision.md).
-> Builds on `coordinator.go` / `turn.go`, [`turn-pipeline.md`](turn-pipeline.md)
-> (the model-steered reason-act loop every deciding turn runs — this doc's
-> `episode-lifecycle.md` / `request-pipeline/08-planning.md` / `lane-model.md`
-> links were removed 2026-09-11: all three docs were deleted when that
-> machinery was stripped, see turn-pipeline.md's own "Removed" section),
-> [`memory-slot.md`](memory-slot.md) (agent-brain = the belief/preference store).
+> Builds on `coordinator.go` / `turn.go`, [`turn-pipeline.md`](turn-pipeline.md),
+> [`memory-slot.md`](memory-slot.md) (agent-brain = the belief/preference store),
+> [`tool-registry.md`](tool-registry.md).
 
 ### The reframe
 
-**A proactive turn is the existing reason-act turn, started by a trigger the
-agent set for itself instead of by a user message.**
+**An intention was a noun the harness never needed. A wake is a verb it already
+knows how to perform.**
 
-Nothing downstream of "a message arrives at the `CoordinatorWorkflow`" changes —
-same `TurnWorkflow` reason-act loop (`turn-pipeline.md` — no classify, no lane
-fork, no plan workflow since the 2026-09-07…09 redesign), same `lcm` + memory,
-same delivery. The proactive turn's opening message is one the agent wrote to
-itself:
+The axis that matters is not "time-based vs condition-based" — it is **who acts at
+the future moment**:
 
-```
-[system, seq=0]  A travel email arrived: "Flight AA123 tomorrow delayed to 4:30pm."
-                 Standing intention: "Notify me about travel-related email."
-                 Decide whether and how to surface this now.
-```
+| the user asked for | who executes at T | mechanism |
+|---|---|---|
+| "remind me to pay bills on the 1st" | an external system | **that system's own tool** — the agent already has it |
+| "let me know when my weight drops below 70kg" | an external system watching its own data | same |
+| "every Sunday, review my week and tell me what to change" | **the agent's own reasoning** | a wake |
+| "check on this in three days and decide if it still matters" | **the agent's own reasoning** | a wake |
 
-The earlier vocabulary (situation, policy, proactive decision, suppression,
-feedback) collapses into machinery that already exists:
+No external system can wake *your* agent. That is the entire gap, and it is one
+`SignalWithStart` the harness already makes. Everything else is a notification,
+and notifications are a solved problem the agent reaches through connections.
 
-| concept | already is |
+**The cold reading of v3 is that a large part of it reimplemented a capability the
+agent already had, behind a new name.** This document keeps the part that was
+genuinely new — the wake — and deletes the rest.
+
+### The selection rule
+
+This is the whole design in one sentence, and it belongs in the prompt:
+
+> If an external system should act at T, use that system's tool.
+> If the agent should *think* at T, arm a wake.
+> If the agent should think when something changes, arm a watch.
+
+A **watch** is not a separate construct: it is a wake whose decider calls a tool to
+check something. The check is a tool call inside the turn it woke, so there is no
+poll-and-judge loop, no fast-tier judge, and no cost that scales with frequency —
+the agent widens its own interval when a watch proves noisy.
+
+### A wake is a Schedule, not a workflow to keep alive
+
+A time wake is a **Temporal Schedule**. The Schedule *is* the record: created,
+listed, described, retimed, paused, resumed and cancelled through Temporal's own
+schedule APIs, with calendar maths, catch-up windows and overlap policy already
+solved. **There is no wakes table**, and therefore nothing to keep in sync with
+one.
+
+| wake concept | Temporal-native realization |
 |---|---|
-| **Situation** — what's happening now | what every turn does: the model calls tools mid-loop to check live state. No `AssembleSituation` activity. |
-| **Policy** — when am I allowed to act | the model calling `recall` + its own judgment. agent-brain holds "no travel notifications", past "stop doing this" corrections, quiet hours. Not a rule engine. |
-| **Opportunity detection** | a **default intention** seeded at genesis: *"periodically review recent episodes for anything worth raising."* Not a subsystem. |
-| **Proactive decision** — act? | the deciding turn's own output: a message = act; ending silently (`no_tool_calls`, empty response) = suppress. No arbiter workflow. |
-| **Plan / Execute** | the wake is just a `seq=0` message into the same flat reason-act loop every turn runs (`turn-pipeline.md`) — no separate classify step or plan/lite fork exists to route through any more. |
-| **Suppression / cooldown** | the deciding turn's judgment (`lcm` shows what it already said) + the intention workflow's own state (it knows when it last fired). Not a cooldown subsystem. |
-| **Feedback / adaptation** | already built: "stop these" → agent-brain correction → future deciding turns retrieve it and stay quiet. Skip. |
+| identity | Schedule ID `wake:<scope>:<name>` — the agent supplies `name`, so dedup is a decision, not a slug guess |
+| cadence | `ScheduleSpec` — `cron_expressions` (UTC), `intervals`, or `start_at`/`end_at` |
+| one-shot | the same Schedule with `state.remaining_actions = 1` — one mechanism, one listing path |
+| "armed" / "paused" | `ScheduleState.paused` |
+| fire count / last fire / next fire | `ScheduleInfo.num_actions` / `recent_actions` / `next_action_times` |
+| the session it wakes | in the action's args, not a column |
+| overlap | `SchedulePolicy(overlap=SKIP)` — two wakes stacked on one session is never wanted |
 
-Research anchors still apply as *judgment* guidance, not as components: BDI
-(Bratman; Rao & Georgeff) — an intention persists until its trigger fires or the
-agent revises it, no re-scoring every pass; Horvitz "Principles of
-Mixed-Initiative Interaction" (1999) — initiate on expected utility minus
-interruption cost, with bounded deferral; Generative Agents (Park et al., 2023) —
-the daily review turn generates its own salient questions over recent episodes.
-
-### An intention is a workflow, not a row
-
-Each intention is one `IntentionWorkflow` execution. Temporal's own machinery
-*is* the state — there is **no `intentions` table** (same stance as "a database
-table is just redundant data").
-
-| intention concept | Temporal-native realization |
-|---|---|
-| identity | Workflow ID `intn:<user>:<slug>` — addressable, dedup, human-readable |
-| objective + trigger spec | workflow **input args**; changed via a `revise` signal |
-| "armed" | the workflow is **Running**, parked in a timer / poll loop / `Await` |
-| "last fired" + fire count | workflow state, exposed by a `status` **Query** — and in event history |
-| "satisfied" / one-shot done | the workflow **Completes** (`ExecutionStatus = Completed`) |
-| "cancelled" | Temporal **cancellation** (`Canceled`) |
-| "snoozed" | `snooze` signal extends the timer; still Running |
-| "paused" | `Await(unpaused)` — Running but parked |
-| list a user's intentions | `ListWorkflowExecutions` on Search Attribute `IntentionUser` (+ `IntentionKind`, `IntentionState`) — visibility **is** the registry |
-| recurring ("every weekday 9am") | a **Temporal Schedule** whose action starts a one-shot `IntentionWorkflow` per firing — Temporal owns the calendar math, catch-up, pause |
-| bounded history on a long-lived condition-watcher | `ContinueAsNew` per poll cycle |
-
-### Trigger types → Temporal mechanisms
-
-| trigger | mechanism |
-|---|---|
-| TIME `at 9am` | one-shot workflow: `workflow.Sleep(until)` → fire → complete |
-| DEADLINE `30 min before flight` | `Sleep(event_time − offset)`; `event_time` from a calendar `call_tool` at arm time, recomputed if a `revise` says it moved |
-| SCHEDULE `every weekday` | Temporal **Schedule** → one-shot `IntentionWorkflow` per occurrence |
-| CONDITION `stock < X` | loop: `Sleep(poll)` → `CheckCondition` activity → met ? fire : `ContinueAsNew` |
-| STATE CHANGE `calendar becomes free` | same loop; `CheckCondition` diffs against last-seen state held in **workflow state** |
-| INACTIVITY `no reply for 2 days` | timer = 2d; the coordinator sends a `reset` signal on any user activity, restarting it; fires only if the timer ever completes |
-| EVENT `email arrives` | poll variant for v1 (`Sleep(5m)` → `CheckForNewEmail`); push later = gateway webhook → `signal` the workflow |
-
-`CheckCondition` is one generic activity: it runs the intention's declared probe
-(`{tool, args}` through the existing tool-dispatch path) and compares the result
-to the intention's declared predicate / threshold / last-seen value.
+A Schedule's action starts **`WakeWorkflow`** — a workflow whose entire body is one
+`WakeSession` activity call and a completion. It carries no state, takes no signals
+and answers no queries, so a wake costs a handful of history events rather than a
+durable per-commitment execution, and there is nothing to bound with
+`ContinueAsNew`.
 
 ### The fire path
 
 ```
-IntentionWorkflow trigger fires
+Schedule tick (or an event, later)
    │
-   ▼  FireIntention activity
-SignalWithStart CoordinatorWorkflow(<user's session>)  { objective, why, intention_id }
-   │
+   ▼  WakeWorkflow → WakeSession activity
+SignalWithStart CoordinatorWorkflow(<session>)  { wake_id, objective, why }
+   │     WorkflowIDConflictPolicy.USE_EXISTING — running or not is not a question
    ▼  Coordinator's Wake handler (sibling of NewMessage in the existing selector)
-starts a TurnWorkflow, seed = the synthesized system message, initiated_by = "intn:<id>"
+starts a TurnWorkflow, seed = the synthesized system message, initiated_by = "wake:<id>"
    │
    ├─ a turn is already active  ──▶  fold in: SignalExternalWorkflow into it
    │                                 { pending_mention, why } — the active turn's
@@ -164,114 +118,113 @@ starts a TurnWorkflow, seed = the synthesized system message, initiated_by = "in
                            output to the session's gateway channel
 ```
 
-The deciding turn is a **normal turn**: the model calls `recall`
-(preferences, "stop doing this" corrections, quiet hours — the "policy") and
-other tools (the "situation" check) as it judges it needs to, then it either
-**produces a message** (act, delivered) or **ends silently**
-(suppress). `FireIntention` gets the turn's outcome back; an `IntentionWorkflow`
-that is suppressed N times in a row self-cancels and writes a belief
-(*"user doesn't want X"*).
+**"The session may be running, or terminated" is not a special case** — it is what
+`SignalWithStart` does, and it is what `loop-worker/cmd/starter` has always done.
+Barge-in was already built.
 
-Global "don't fire three at once" falls out for free: simultaneous fires all
-`SignalWithStart` the same per-session coordinator, which already serializes
-turns, so each deciding turn sees in `lcm` what the last one just said.
+The deciding turn is a **normal turn**: the model calls `recall` (preferences,
+"stop doing this" corrections, quiet hours — the "policy") and other tools (the
+"situation" check) as it judges it needs to, then it either **produces a message**
+(act, delivered) or **ends silently** (suppress).
 
-### What's actually new
+### Event wakes — designed, not built
 
-1. **`IntentionWorkflow`** — one workflow type (loop-worker): a timer / poll loop
-   + `revise` / `snooze` / `cancel` / `reset` signals + a `status` query. The
-   single new primitive.
-2. **Search Attributes** `IntentionUser` / `IntentionKind` / `IntentionState` —
-   `IntentionWorkflow` upserts them (identity two on start, state at every
-   transition); `list_intentions` filters `ListWorkflowExecutions` on them, so
-   visibility *is* the registry. Registering the three Keyword attributes on the
-   namespace is the one deploy step.
-3. **Coordinator `Wake` signal** — a handful of lines in the existing selector
-   (`coordinator.go:102`), plus honouring `initiated_by` on the started turn.
-4. **`turns.initiated_by`** — one column, a provenance string (`user` |
-   `intn:<id>` | `plan`). (Migration 020 also added `episodes.initiated_by`,
-   but the `episodes` table itself was dropped in migration `025` — that half
-   is moot.)
-5. **Activities** (tenant-worker, hold a Temporal client — `ModelCall` already
-   does): `ArmIntention` / `ReviseIntention` / `CancelIntention` behind agent
-   tools; `FireIntention` (`SignalWithStart` the coordinator); `CheckCondition`
-   (the generic probe runner for condition / state / event / inactivity).
-6. **One genesis Schedule per user** — the daily "review recent episodes for
-   anything worth raising" intention.
+A wake can also be armed on an event. The pieces, and where they belong:
+
+- **mcp-hub owns the public hop.** It already holds connection credentials and
+  already has a public callback path (it does the OAuth callbacks today), so it
+  registers the provider webhook, receives the event, normalizes it, and POSTs
+  *internally* to the harness. The harness therefore grows **no unauthenticated
+  public endpoint**.
+- **The callback carries an opaque signed token**, not a session key:
+  `base64(session_key | expiry) + HMAC`. mcp-hub treats it as opaque and never
+  learns what a session is; the harness verifies it and reads the session key out,
+  so the harness needs **no mapping table either**.
+- **Revocation needs no revocable token**: cancelling deletes mcp-hub's
+  subscription row (and unsubscribes from the provider), so no further callbacks
+  arrive.
+- **Order of operations is harness-first**: arm the wake and get the callback,
+  *then* have the agent call the external system's own subscribe tool. The endpoint
+  exists before anyone is told about it, so an event cannot arrive early. The
+  orphan window is on the harmless side — a Schedule that expires unfired.
+- **Idempotency is required**: the callback must dedupe on event id, or a retried
+  POST wakes the agent twice.
+
+**Why it is not built yet:** most MCP servers are request/response and expose no
+subscribe capability at all; real push (Calendar, say) is a provider-API feature
+needing webhook domain registration. So this path depends on connectors in
+mcp-hub, which is mcp-hub work. `arm_wake` deliberately **does not offer
+`on_event`** until then — a tool the model can call that cannot work is worse than
+a tool it cannot see. The interim answer is a periodic wake with a cheap tool-call
+check, which works against any MCP server today.
 
 ### The agent's tools
 
 **Two model-facing tools** (`tool-registry.md`, "Resolved: Three-Layer Tool
-Taxonomy" — 6 → 2, 2026-09-04): `create_intention` (its own schema — the one
-genuinely complex operation) and `manage_intention(action, intention_id, …)`
-with `action` in `{list, inspect, revise, snooze, cancel}` — CRUD on one
-construct, not five distinct intents. Both call into `tools_intention.py`,
-which keeps the five operations as separate internal functions (`list`/`inspect`
-are `ListWorkflowExecutions` / `query_workflow`); `manage_intention` is a thin
-dispatcher over them. The agent's currently-armed intentions render into its
-prompt as a small block (like the plan), so it reasons about its commitments
-and prunes stale ones.
+Taxonomy" — the same create-plus-dispatcher consolidation v3 used, so only the
+construct changed):
 
-### No per-user holder
+- **`arm_wake`** (`tools_wake.py`) — its own schema, the one genuinely complex
+  operation. `name` is required and is the identity.
+- **`manage_wake(action, wake_id, …)`** with `action` in
+  `{list, inspect, revise, cancel}` — a thin dispatcher over the four handlers.
 
-Each `IntentionWorkflow` arms its own trigger, so there is nothing for a parent
-to hold; Temporal visibility replaces "the list". Cross-intention coordination is
-the per-session coordinator's existing turn-serialization plus the deciding
-turn's judgment. A per-user holder would only add one place for global
-proactivity policy — promote it later if memory + the coordinator choke point
-prove insufficient.
+**Why `arm_wake` and not `create_schedule`:** external tool names arrive
+dynamically through `discover_tools`, and mcp-hub's disambiguation covers collision
+*within its own tier* only — a native tool colliding with a discovered
+Calendar/Reminders tool has no resolution path. `schedule`, `reminder`,
+`notification`, `event`, `calendar`, `timer` are exactly the words such a server
+claims. `Wake` is already this codebase's own vocabulary (`WakeSignalName`,
+`WakeSessionActivity`); `arm` is nobody's.
 
-### Delivery — no fallback
-
-One target: the channel the session already uses (Discord → the bot posts; web →
-Postgres, surfaced on next open), via the existing `deliver:{platform}:{connection}`
-activities. Delivery failure fails the turn and is surfaced. No channel fallback
-— same stance as the rest of the system.
+The agent's armed wakes render into its prompt so it reasons about its own
+commitments and prunes stale ones.
 
 ### Data model
 
 | thing | where |
 |---|---|
-| intentions | Temporal — `IntentionWorkflow` executions + Schedules. **No table.** |
-| intention provenance on work | `turns.initiated_by` (one column; `episodes.initiated_by` was moot from the start — that table was dropped) |
+| time wakes | Temporal — Schedules. **No table.** |
+| event wakes | mcp-hub's subscription table (opaque token, source, filter, callback, expiry, last event id) — mcp-hub's data, in mcp-hub's own database |
 | a proactive turn's seed | a `system`-role `messages` row |
-| preferences / quiet hours / "stop doing X" | agent-brain memory (already the store) |
-| engagement feedback | agent-brain memory (a deciding turn observing the follow-up writes it) |
+| wake provenance on work | `turns.initiated_by` = `"wake:<id>"` (one column) |
+| preferences / quiet hours / "stop doing X" | agent-brain memory |
+| engagement feedback | agent-brain memory |
 
 ### Degradation (no fallback)
 
-- An `IntentionWorkflow`'s `CheckCondition` errors → Temporal retry; a persistent
-  failure surfaces the intention as failed, it is not silently dropped.
-- The deciding turn errors → Temporal retry → `failTurn`; the intention re-fires
-  on its next trigger.
+- A `WakeSession` that cannot reach its session fails the `WakeWorkflow` visibly.
+  The Schedule's next tick is the retry, and a Schedule that keeps failing shows up
+  in its own action history.
+- The deciding turn errors → Temporal retry → `failTurn`; the wake fires again on
+  its next tick.
 - Delivery fails → the turn fails, surfaced.
 
 ### Deferred
 
-- **Push EVENT triggers** — gateway webhook ingestion → signal the workflow.
-  Start with polling.
-- **A per-user proactivity-policy holder** — start with memory + the coordinator
-  choke point.
-- **Learned importance weights** for the daily review — start with the model
-  judging.
-- **Digests / batching** low-urgency items — start with individual turns.
-- **Cross-session reach** (fire against a user with no live session) — the
-  headless-coordinator path is sketched, not designed.
+- **Event wakes end to end** — mcp-hub's subscription table and provider
+  registration, the harness `/events` ingress, and `on_event` in `arm_wake`. See
+  above; the design is settled, the dependency is another repo.
+- **Headless wake with no live session** — confirmed working, deliberately planned
+  later.
+- **Digests / batching** low-urgency wakes — start with individual wakes.
+- **A client surface for wakes.** Deliberately none: Retro is the record of what
+  you *did*, not the agent's to-do list, and external reminders are visible in the
+  external apps where the user already sees them.
 
 ### Open Questions
 
-- **Genesis** — what creates a user's daily-review Schedule, and when? (Same
-  question `CoordinatorWorkflow` has for its own first start.)
-- **`initiated_by` and the active-turn fold-in** — when a wake arrives mid-turn,
-  fold as a priority the model surfaces next step, or cancel the in-flight
-  `ModelCall` (the interrupt path)? Lean fold unless the intention is
-  time-critical.
+- **`list` unions one source today, two later.** Right now every wake is a
+  Schedule, so `list_wakes` is one prefix filter. With event wakes it becomes a
+  union of Temporal's schedule list and mcp-hub's subscriptions — the one place
+  the abstraction leaks, confined to one function.
+- **Suppression counting moved out of the workflow.** v3 let an intention that was
+  suppressed N times self-cancel and write a belief, because the workflow counted.
+  A Schedule does not count suppressions, so that judgment has to move to the
+  deciding turn (or agent-brain). Not yet designed.
 - **Quiet hours before they're learned** — until agent-brain has the fact, the
-  deciding turn is conservative and an early proactive message asks
-  *"when's off-limits, how should I reach you?"*
-- **`CheckCondition` cost** — a frequently-polled NL predicate check is a real
-  cost. Cache the last result and only re-judge on a raw-value change, or
-  constrain predicates to a small expression grammar over the probe result.
-- **Slug collisions / intention identity** — `intn:<user>:<slug>` where the slug
-  comes from the objective; how is it derived, and what happens when the agent
-  arms a near-duplicate (revise the existing one, or run both)?
+  deciding turn is conservative and an early proactive message asks *"when's
+  off-limits, how should I reach you?"*
+- **When does a wake stop being worth it?** A weekly review nobody reads should
+  eventually be pruned. The agent can see its own wakes and cancel them, but
+  nothing yet prompts it to look.

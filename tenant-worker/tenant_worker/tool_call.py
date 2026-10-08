@@ -64,9 +64,9 @@ class ToolCallActivity:
         # llm_client.get_client(model_config), from whichever tier's
         # config the summary path actually uses. See __call__ below.
         #
-        # temporal_client IS injected — the intention tools
-        # (tools_intention.py, docs/components/proactivity.md) are thin
-        # wrappers over it (start/signal/cancel/query an IntentionWorkflow).
+        # temporal_client IS injected — the wake tools
+        # (tools_wake.py, docs/components/proactivity.md) are thin
+        # wrappers over it (create/describe/update/delete a wake Schedule).
         # Same "an activity may hold its own client" pattern ModelCallActivity
         # already uses for its streaming path.
         self._temporal_client = temporal_client

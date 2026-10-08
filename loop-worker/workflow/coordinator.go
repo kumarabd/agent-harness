@@ -104,10 +104,10 @@ func CoordinatorWorkflow(ctx workflow.Context, input CoordinatorInput) error {
 				if err := workflow.SignalExternalWorkflow(ctx, chatID, "", NewMessageSignalName, fold).Get(ctx, nil); err == nil {
 					return
 				} else {
-					logger.Error("failed to fold wake into active turn", "turn_id", chatID, "intention_id", p.IntentionID, "error", err)
+					logger.Error("failed to fold wake into active turn", "turn_id", chatID, "wake_id", p.WakeID, "error", err)
 				}
 			}
-			pending = append(pending, queuedChatMessage{payload: types.SignalPayload{Message: types.Message{Role: "user", Content: proactiveSeedText(p)}}, initiatedBy: "intn:" + p.IntentionID})
+			pending = append(pending, queuedChatMessage{payload: types.SignalPayload{Message: types.Message{Role: "user", Content: proactiveSeedText(p)}}, initiatedBy: "wake:" + p.WakeID})
 		})
 		sel.AddReceive(keepAlive, func(c workflow.ReceiveChannel, _ bool) { var v struct{}; c.Receive(ctx, &v) })
 		sel.AddReceive(cancelSignal, func(c workflow.ReceiveChannel, _ bool) {

@@ -118,7 +118,7 @@ class ToolContext:
     summary_model: str
     heartbeat_interval_seconds: float
     lease_ttl_seconds: float
-    # docs/components/proactivity.md — the intention tools (tools_intention.py)
+    # docs/components/proactivity.md — the wake tools (tools_wake.py)
     # are thin wrappers over the Temporal client. None for any ToolCallActivity
     # not constructed with one; those tools raise a clear error if called.
     temporal_client: Any = None
@@ -640,10 +640,10 @@ _DEMO_TOOL_SPEC = ToolSpec(
     start_to_close_timeout_seconds=30.0,
 )
 
-# docs/components/proactivity.md — intention tools. Imported here (after the
+# docs/components/proactivity.md — wake tools. Imported here (after the
 # handlers above are defined) to keep the dependency one-directional:
-# tools_intention.py must not import this module.
-from . import tools_intention as _ti  # noqa: E402
+# tools_wake.py must not import this module.
+from . import tools_wake as _tw  # noqa: E402
 from . import capabilities as _cap  # noqa: E402
 
 # handler_ref (in capabilities.CAPABILITIES) -> the actual callable. This is the
@@ -667,8 +667,8 @@ _HANDLERS: dict[str, Any] = {
     "lcm_grep": lcm_grep,
     "lcm_describe": lcm_describe,
     "lcm_expand": lcm_expand,
-    "create_intention": _ti.create_intention,
-    "manage_intention": _ti.manage_intention,
+    "arm_wake": _tw.arm_wake,
+    "manage_wake": _tw.manage_wake,
 }
 
 # Every capability with a real activity handler, built from the single
