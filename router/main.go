@@ -58,6 +58,7 @@ func main() {
 
 	srv.WithMapsEnginePort(envIntOrDefault("TENANT_MAPS_ENGINE_PORT", 8080))
 	srv.WithFinanceEnginePort(envIntOrDefault("TENANT_FINANCE_ENGINE_PORT", 8091))
+	srv.WithRetroEnginePort(envIntOrDefault("TENANT_RETRO_ENGINE_PORT", 8092))
 
 	// Self-serve tenant onboarding (docs/components/gateway/web.md's Phase
 	// 2, onboarding.go) — genuinely optional: a router deployed without the

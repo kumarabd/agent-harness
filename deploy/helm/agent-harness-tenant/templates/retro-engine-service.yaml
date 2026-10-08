@@ -1,0 +1,18 @@
+{{- if (include "agent-harness.retroEngineEnabled" .) -}}
+# Named "retro-engine" (no tenant prefix by convention): the router's Tenant.RetroEngineBaseURL() builds
+# http://retro-engine.<tenant-namespace>.svc.cluster.local:<port>.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "retro-engine") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "retro-engine") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "retro-engine") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.retroEngine.port }}
+      targetPort: http
+{{- end }}

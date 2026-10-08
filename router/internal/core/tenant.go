@@ -20,6 +20,7 @@ type Tenant struct {
 	AgentBrainPort    int
 	MapsEnginePort    int
 	FinanceEnginePort int
+	RetroEnginePort   int
 }
 
 func (t Tenant) Namespace() string { return t.Slug }
@@ -61,6 +62,10 @@ func (t Tenant) MapsEngineBaseURL() string {
 // its own: it trusts headerVerifiedUser and must be reachable only from this router (NetworkPolicy).
 func (t Tenant) FinanceEngineBaseURL() string {
 	return fmt.Sprintf("http://finance-engine.%s.svc.cluster.local:%d", t.Namespace(), t.FinanceEnginePort)
+}
+
+func (t Tenant) RetroEngineBaseURL() string {
+	return fmt.Sprintf("http://retro-engine.%s.svc.cluster.local:%d", t.Namespace(), t.RetroEnginePort)
 }
 
 func TenantForSub(sub string, gatewayPort, agentBrainPort int) Tenant {

@@ -49,6 +49,8 @@ spec:
             # Each tenant's own finance-engine Service (agent-harness-tenant's financeEngine.port), reached at /finance/.
             - name: TENANT_FINANCE_ENGINE_PORT
               value: "8091"
+            - name: TENANT_RETRO_ENGINE_PORT
+              value: "8092"
             # Same non-secret JWKS-only verification as agent-harness-tenant's
             # gateway.web.clerkJwksUrl/clerkIssuer — see that chart's own
             # comment for the full reasoning (no Clerk secret key anywhere).

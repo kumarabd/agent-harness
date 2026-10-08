@@ -35,3 +35,7 @@ dependencies:
     # POST/DELETE /api/connections API. See mcp-hub's own values.yaml comment.
     version: "0.2.0"
     repository: "oci://ghcr.io/realnighthawk/infra/charts"
+  - name: minio
+    version: "5.4.0"
+    repository: "https://charts.min.io/"
+    condition: retroEngine.enabled

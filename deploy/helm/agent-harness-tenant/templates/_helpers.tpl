@@ -208,3 +208,37 @@ its password). Used by both the Secret and the hook, so they cannot disagree.
 {{- define "agent-harness.llmTierApiKey" -}}
 {{- default (index .root.Values "agent-brain").secret.litellmAPIKey .tier.apiKey -}}
 {{- end }}
+
+{{/* Retro is optional; completed workspace onboarding is never rerun to add it. */}}
+{{- define "agent-harness.retroEngineEnabled" -}}
+{{- $r := (.Values.retroEngine | default dict) -}}
+{{- if $r.enabled -}}true{{- end -}}
+{{- end -}}
+{{- define "agent-harness.retroEnginePassword" -}}
+{{- if .Values.retroEngine.postgres.password -}}
+{{- .Values.retroEngine.postgres.password -}}
+{{- else if .Values.postgresql.auth.postgresPassword -}}
+{{- printf "%s:retro-engine-db" .Values.postgresql.auth.postgresPassword | sha256sum | trunc 40 -}}
+{{- else -}}
+{{- fail "retro-engine requires postgresql.auth.postgresPassword or retroEngine.postgres.password" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Reuse the tenant's existing secret seed, but keep root and application credentials distinct. */}}
+{{- define "agent-harness.minioPassword" -}}
+{{- $seed := required "MinIO requires the existing postgresql.auth.postgresPassword" .context.Values.postgresql.auth.postgresPassword -}}
+{{- printf "%s:%s" $seed .purpose | sha256sum | trunc 40 -}}
+{{- end -}}
+
+{{/* One bucket declaration drives both upstream provisioning and Retro. */}}
+{{- define "agent-harness.retroPhotoBucket" -}}
+{{- if not .Values.minio.buckets -}}{{- fail "MinIO needs a private first bucket for Retro" -}}{{- end -}}
+{{- $bucket := index .Values.minio.buckets 0 -}}
+{{- if or $bucket.purge (ne ($bucket.policy | default "none") "none") -}}
+{{- fail "Retro's MinIO bucket must have policy: none and purge: false" -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$" $bucket.name) -}}
+{{- fail "Retro's bucket name must be 3-63 lowercase letters, digits or hyphens" -}}
+{{- end -}}
+{{- $bucket.name -}}
+{{- end -}}

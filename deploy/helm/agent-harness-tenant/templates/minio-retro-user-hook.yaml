@@ -1,0 +1,64 @@
+{{- if (include "agent-harness.retroEngineEnabled" .) -}}
+{{- $bucket := include "agent-harness.retroPhotoBucket" . -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "agent-harness.resourceName" (dict "context" . "name" "minio-retro-user") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "minio-retro-user") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1" # after the upstream bucket and existing DB-role hooks
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        {{ include "minio.name" .Subcharts.minio }}-client: "true"
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      {{- with .Values.minio.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: create-user
+          image: "{{ .Values.minio.mcImage.repository }}:{{ .Values.minio.mcImage.tag }}"
+          imagePullPolicy: {{ .Values.minio.mcImage.pullPolicy }}
+          resources:
+            {{- toYaml .Values.minio.makeUserJob.resources | nindent 12 }}
+          env:
+            - name: MINIO_ENDPOINT
+              value: {{ printf "http://%s:%v" (include "minio.fullname" .Subcharts.minio) .Values.minio.service.port | quote }}
+            - name: ROOT_USER
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.minio.existingSecret | quote }}, key: rootUser }
+            - name: ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.minio.existingSecret | quote }}, key: rootPassword }
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-harness.resourceName" (dict "context" . "name" "retro-engine") }}
+                  key: MINIO_ACCESS_KEY
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-harness.resourceName" (dict "context" . "name" "retro-engine") }}
+                  key: MINIO_SECRET_KEY
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              mc alias set storage "$MINIO_ENDPOINT" "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
+              mc stat "storage/{{ $bucket }}" >/dev/null
+              cat > /tmp/retro-policy.json <<'POLICY'
+              {{ dict "Version" "2012-10-17" "Statement" (list (dict "Effect" "Allow" "Action" (list "s3:GetBucketLocation" "s3:ListBucket") "Resource" (list (printf "arn:aws:s3:::%s" $bucket))) (dict "Effect" "Allow" "Action" (list "s3:GetObject" "s3:PutObject") "Resource" (list (printf "arn:aws:s3:::%s/*" $bucket)))) | toJson }}
+              POLICY
+              mc admin policy create storage retro-engine /tmp/retro-policy.json
+              mc admin user add storage "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY"
+              mc admin policy attach storage retro-engine --user "$MINIO_ACCESS_KEY"
+{{- end }}

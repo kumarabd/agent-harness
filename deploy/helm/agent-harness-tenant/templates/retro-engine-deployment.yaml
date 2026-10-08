@@ -1,0 +1,74 @@
+{{- if (include "agent-harness.retroEngineEnabled" .) -}}
+{{- $finance := (.Values.financeEngine | default dict) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-harness.componentFullname" (dict "context" . "component" "retro-engine") }}
+  labels:
+    {{- include "agent-harness.componentLabels" (dict "context" . "component" "retro-engine") | nindent 4 }}
+spec:
+  replicas: {{ .Values.retroEngine.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "retro-engine") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-harness.componentSelectorLabels" (dict "context" . "component" "retro-engine") | nindent 8 }}
+        {{ include "minio.name" .Subcharts.minio }}-client: "true"
+    spec:
+      serviceAccountName: {{ include "agent-harness.resourceName" (dict "context" . "name" "tenant") }}
+      # Never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      {{- with $finance.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: retro-engine
+          image: "{{ required "retroEngine.image.repository is required" .Values.retroEngine.image.repository }}:{{ required "retroEngine.image.tag is required" .Values.retroEngine.image.tag }}"
+          imagePullPolicy: {{ .Values.retroEngine.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.retroEngine.port }}
+          envFrom:
+            - secretRef:
+                name: {{ include "agent-harness.resourceName" (dict "context" . "name" "retro-engine") }}
+          env:
+            - name: LISTEN_ADDR
+              value: {{ printf "0.0.0.0:%d" (int .Values.retroEngine.port) | quote }}
+            # Browser callers (agent-web) arrive with an Origin; native apps send none. The engine's cross-origin guard
+            # rejects state-changing browser requests from origins not listed here.
+            - name: TRUSTED_ORIGINS
+              value: {{ join "," ($finance.trustedOrigins | default list) | quote }}
+            - name: MINIO_ENDPOINT
+              value: {{ printf "http://%s:%v" (include "minio.fullname" .Subcharts.minio) .Values.minio.service.port | quote }}
+            - name: MINIO_BUCKET
+              value: {{ include "agent-harness.retroPhotoBucket" . | quote }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 60
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.retroEngine.resources | nindent 12 }}
+{{- end }}

@@ -794,3 +794,45 @@ financeEngine:
       memory: 64Mi
     limits:
       memory: 256Mi
+
+# -- Wardrobe engine behind /retro. Existing workspace upgrades enable this; onboarding is not rerun.
+# Reuses Finance's browser origins, registry pull secrets and router namespace. No engine auth settings.
+retroEngine:
+  enabled: false
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  port: 8092
+  postgres:
+    password: "" # derived from postgresql.auth.postgresPassword, like the other engines
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi } # bounded photo decoding needs room beyond idle usage
+
+# -- MinIO subchart, enabled by retroEngine.enabled. Configure storage/buckets here only.
+# Credentials are derived from the existing Postgres admin secret with distinct salts; no extra tenant passwords.
+minio:
+  fullnameOverride: "minio"
+  mode: standalone
+  existingSecret: "minio-root"
+  image:
+    tag: "RELEASE.2025-09-07T16-13-09Z"
+  deploymentUpdate:
+    type: Recreate # one ReadWriteOnce volume
+  persistence:
+    size: 10G # decimal 10 GB, not 10 GiB
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  buckets:
+    - name: retro-photos # Retro uses this first bucket; never repeat its name under retroEngine
+      policy: none
+      purge: false
+  users: [] # remove upstream's default console/console123 account; the parent creates Retro's scoped user
+  networkPolicy:
+    enabled: true
+    allowExternal: false
+  podLabels:
+    minio-client: "true" # the upstream bucket hook must reach MinIO under its NetworkPolicy

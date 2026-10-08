@@ -91,6 +91,7 @@ type Server struct {
 	agentBrainPort    int
 	mapsEnginePort    int
 	financeEnginePort int
+	retroEnginePort   int
 
 	// Self-serve tenant onboarding (onboarding.go, docs/components/gateway/
 	// web.md's Phase 2) — nil-able: a router deployed without automation
@@ -101,7 +102,7 @@ type Server struct {
 }
 
 func New(clerkCfg clerkauth.Config, gatewayPort, agentBrainPort int) *Server {
-	return &Server{clerkCfg: clerkCfg, gatewayPort: gatewayPort, agentBrainPort: agentBrainPort, mapsEnginePort: defaultMapsEnginePort, financeEnginePort: defaultFinanceEnginePort}
+	return &Server{clerkCfg: clerkCfg, gatewayPort: gatewayPort, agentBrainPort: agentBrainPort, mapsEnginePort: defaultMapsEnginePort, financeEnginePort: defaultFinanceEnginePort, retroEnginePort: defaultRetroEnginePort}
 }
 
 // defaultMapsEnginePort is maps-engine's own default HTTP port (server.port in its config).
@@ -122,6 +123,13 @@ func (s *Server) WithFinanceEnginePort(port int) *Server {
 	return s
 }
 
+const defaultRetroEnginePort = 8092
+
+func (s *Server) WithRetroEnginePort(port int) *Server {
+	s.retroEnginePort = port
+	return s
+}
+
 // WithOnboarding enables /onboard (onboarding.go) — a separate step from
 // New(), not an extra constructor argument, so every existing New(...)
 // call site (including this package's own tests) keeps working unchanged
@@ -136,6 +144,7 @@ func (s *Server) tenant(sub string) Tenant {
 	t := TenantForSub(sub, s.gatewayPort, s.agentBrainPort)
 	t.MapsEnginePort = s.mapsEnginePort
 	t.FinanceEnginePort = s.financeEnginePort
+	t.RetroEnginePort = s.retroEnginePort
 	return t
 }
 
@@ -165,6 +174,8 @@ func (s *Server) Handler() http.Handler {
 	// finance-engine (spends, categories, insights): /finance/api/v1/... reaches the tenant's /api/v1/... with the
 	// verified identity stamped on. Native clients (Treasure for iOS and Android) and agent-web call it here.
 	mux.HandleFunc("/finance/", s.handleProxy("/finance", func(t Tenant) string { return t.FinanceEngineBaseURL() }))
+	// Wardrobe operations, MCP and binary photos share verified tenant identity.
+	mux.HandleFunc("/retro/", s.handleProxy("/retro", func(t Tenant) string { return t.RetroEngineBaseURL() }))
 	mux.HandleFunc("POST /connections/{backend}/authorize", s.handleAuthorize)
 	mux.HandleFunc("/connections/", s.handleProxy("/connections", func(t Tenant) string { return t.McpHubBaseURL() }))
 	// OAuth providers redirect back here with no Clerk bearer token at all —

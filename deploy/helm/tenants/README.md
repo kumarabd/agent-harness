@@ -89,3 +89,33 @@ mapsEngine:
 ```
 
 The app's `ROUTER_BASE_URL` is the router's public URL.
+
+## Retro wardrobe engine and MinIO
+
+Enable on an existing workspace with a chart upgrade; completed onboarding is not rerun.
+Only the image differs per deployment; the existing Postgres admin password seeds separate stable DB, storage-root
+and storage-application credentials. Do not add Retro Clerk/owner settings or duplicate MinIO endpoint/credentials.
+
+```yaml
+retroEngine:
+  enabled: true
+  image:
+    repository: YOUR_REGISTRY/retro-engine
+    tag: YOUR_PINNED_TAG
+```
+
+The chart vendors upstream MinIO 5.4.0, enabled by `retroEngine.enabled`: standalone, one persistent `10G` PVC
+(decimal **10 GB**, not 10 GiB), requests **50m CPU / 128Mi memory**, limit **512Mi memory**. MinIO remains
+ClusterIP-only. Configure storage or buckets only under `minio`; the first bucket must stay private (`policy: none`)
+and non-purging (`purge: false`). Retro uses that same bucket, Service port/name and a separately provisioned Get/Put
+user. There are no extra root/application passwords to set. MinIO's upstream default console account is disabled.
+
+Retro reuses `financeEngine.trustedOrigins`, `financeEngine.imagePullSecrets` and
+`financeEngine.networkPolicy.routerNamespace`. Its own ingress policy is always installed: only router pods and
+the trusted local MCP hub may call the engine. The MinIO policy only admits labeled local clients and provisioning
+hooks. NetworkPolicy enforcement is required because the engine delegates all authentication to the router.
+
+First enablement uses the ordinary upgrade command above **without `--wait`**: the existing role hook and upstream
+bucket hook run at weight 0, then the application-user hook at weight 1. Wait for the new workload after these hooks.
+Back up the database and MinIO PVC together. The single-volume setup has no HA or redundant storage. No infrastructure
+was deployed or verified while making these chart changes.
