@@ -5,33 +5,37 @@
 > settled that a wake is a Temporal Schedule. This doc covers the *other* half:
 > events raised by an engine rather than by a clock.
 >
-> Built: the finance side's detection (`finance-engine` `b6eeb22`) and the whole
-> mcp-hub half of the delivery path — `/events`, the `subscriptions` table, and the
-> wake itself (`infra` `810ec9e`). Remaining: the per-engine delivery workers, the
-> maps arrival hook, and wiring `arm_wake(on_event=...)` so that anything actually
+> Built: the finance side's detection (`finance-engine` `b6eeb22`), its half of the
+> delivery contract (`finance-engine` `e8d9238`), and mcp-hub's per-connection
+> delivery loop (`infra` `4aa6155`). Remaining: the maps arrival hook and its half
+> of the contract, and wiring `arm_wake(on_event=...)` so that anything actually
 > arms a subscription.
 
 ### The shape, in one line
 
-An engine notices something about its own data **when the data lands**, records
-it, and POSTs it to mcp-hub; mcp-hub invokes the id that event is registered
-against; the agent decides what, if anything, to say. The engine never talks to
-Temporal and never learns a session key; mcp-hub never learns what a budget is,
-nor what the id it invokes means.
+An engine notices something about its own data **when the data lands** and records
+it. It does not send it anywhere. mcp-hub asks each connection what it has noticed,
+invokes whatever each notice is registered against, and tells the connection it
+landed. So an engine never talks to Temporal, never learns a session key and never
+holds mcp-hub's address; mcp-hub never learns what a budget is, nor what the id it
+invokes means.
 
 ```
-engine write  ──▶  detect (same transaction)  ──▶  record (own table)
-                                                        │
-                                          delivery ─────┘
-                                                        ▼
-                    POST <mcp-hub>/events  { event_key, objective, event_id }
-                                                        │
+engine write ──▶ detect (same transaction) ──▶ record (own table)
+                                                     ▲
+                                    events_ack ──────┤  marks it delivered
+                                                     │
+     mcp-hub, one delivery loop per connection ──────┤
+                                                     │  events_pending
+                                                     ▼
                               subscriptions: event_key → invoke_id  (opaque)
-                                                        ▼
-                    SignalWithStart CoordinatorWorkflow
-                            id = invoke_id,   signal = Wake
-                                                        │
-                                    coordinator folds it in as a turn
+                                                     │
+                                                     ▼
+                              SignalWithStart CoordinatorWorkflow
+                                     id = invoke_id,  signal = Wake
+                                                     │
+                                                     ▼
+                                       coordinator folds it in as a turn
 ```
 
 ### mcp-hub owns the routing
@@ -42,16 +46,24 @@ the external engines, so the harness must not hold a direct line to them — and
 engine must not need to know the harness exists at all. Engines are connections;
 mcp-hub is the boundary in both directions.
 
-The engine therefore emits **domain facts only**:
+**An engine's whole half is a pair of operations.** `events_pending` hands over what
+it has recorded and not yet delivered; `events_ack` marks those delivered. Both are
+ordinary operations on the engine's existing registry, so they arrive over MCP and
+HTTP alongside everything else it exposes — no new transport, no endpoint, no
+credential, no awareness that anything is listening:
 
 ```
-POST <mcp-hub>/events
-{ "event_key": "budget:<id>|2026-10", "objective": "...", "event_id": "<dedupe>" }
+events_pending  ->  { items: [ { event_key, event_id, objective, why } ] }
+events_ack      <-  { event_ids: [ ... ] }
 ```
 
-No session, no callback URL, no credential, no awareness that anything is
-listening. mcp-hub holds `event_key -> invoke_id` in its own `subscriptions` table
-and signals that id:
+That pair is the *only* thing named for a mechanism rather than a use case in either
+engine, and deliberately so: mcp-hub finds it by name on every connection and calls
+it blind, which is what lets one delivery loop serve budget crossings and map
+arrivals without knowing what either is.
+
+mcp-hub holds `event_key -> invoke_id` in its own `subscriptions` table and signals
+that id:
 
 ```
 mcp-hub ──▶ Temporal   SignalWithStart(CoordinatorWorkflow, id=invoke_id,
@@ -104,35 +116,42 @@ Three consequences worth stating:
 
 ### Delivery, concretely
 
-1. **A delivery worker per engine**, mirroring `poller.py`'s shape in mcp-hub:
-   one injectable `httpx.AsyncClient`, an `asyncio` task started next to the
-   existing loops, cancelled in the same `finally`. No new deployment — it lives
-   inside the API process.
-2. **Claim before send.** Take the oldest undelivered row, set `delivered_at` on
-   success. On failure leave it and retry with backoff — mcp-hub's
-   `min(interval * 2**failures, 900)` is the precedent.
-3. **Dedupe by event id, enforced in Temporal.** A retried POST carries the same
-   event id, so it computes the same workflow id: `REJECT_DUPLICATE` once the wake
-   has completed, `USE_EXISTING` while one runs. The delivery worker needs no dedupe
-   table of its own — but it still marks `delivered_at` only after mcp-hub has
-   accepted the POST, or a crash between the two loses the event silently.
-4. **Never log bodies.** Provider and engine payloads can carry credentials;
+1. **One delivery loop per connection**, in mcp-hub's `run_forever` beside that
+   connection's poll loop and created the same way — a connection whose wakes keep
+   failing cannot stall the others, and registering a connection starts both. It
+   runs on a shorter interval than indexing, because a notice is time-sensitive in a
+   way a tool description is not.
+2. **Ask, wake, ack, in that order.** `events_pending` returns what the engine has
+   recorded; each notice wakes whatever its `event_key` is registered against; and
+   only what actually woke is acked. A failed wake stays pending and the loop's own
+   backoff (`min(interval * 2**failures, 900)`) brings it back.
+3. **A notice nobody subscribed to is acked too.** It can never become deliverable,
+   and leaving it pending would hand it back on every tick for the life of the
+   connection.
+4. **`event_deliveries` is the safety net, not the mechanism.** The engine's ack is
+   what normally stops a repeat; the table covers the window where a wake succeeded
+   and the ack did not, which would otherwise wake the same session twice.
+5. **Never log bodies.** Provider and engine payloads can carry credentials;
    mcp-hub's own rule, and it applies here.
 
-mcp-hub side: a `subscriptions` table (`event_key -> invoke_id`, expiry-checked
-the way `oauth_tokens` already is) plus the same SignalWithStart the gateway makes,
-on the `Wake` channel. `turns.initiated_by`
-reads `wake:<event_key>:<event_id>`.
+mcp-hub side: a `subscriptions` table (`event_key -> invoke_id`, expiry-checked the
+way `oauth_tokens` already is) plus the same SignalWithStart the gateway makes, on
+the `Wake` channel. `turns.initiated_by` reads `wake:<event_key>:<event_id>`.
 
 ### Use case 1 — finance budgets (detection built)
 
 Already done in `finance-engine` `b6eeb22`: a spend is written, and the same
 transaction asks whether it pushed any budget past its alert line, recording the
-crossing once. `budget_fires.delivered_at` is the column the delivery worker
-drains, and `budget:<id>|<period_key>` is its `event_key`.
+crossing once. `finance-engine` `1dee400` adds the `events_pending`/`events_ack` pair
+that hands those crossings over and marks them delivered, keyed by `budget:<id>` —
+deliberately **not** scoped by period. A subscription is a standing intent ("tell me
+when Dining out goes over"), so a key carrying the period would stop matching the
+moment the calendar moved on, silently, a month after anyone could have noticed.
+Once-per-period is already the fire's own guarantee: its id is unique per crossing,
+and that is the `event_id`.
 
-**Remaining:** the delivery worker, and mcp-hub's side of the path. Nothing else —
-the detection, the dedup and the record all exist.
+**Remaining:** nothing. The detection, the record, the contract and the delivery loop
+all exist; what is missing is anything that *arms* a subscription, below.
 
 `finance.budgets.callback_token` is **dead** and should be dropped in the same
 change that adds the worker. It was minted for the deleted signed-callback design
@@ -152,7 +171,7 @@ instead of a Places call at detection time on every drive.
 
 On that path: read the trip's last telemetry sample for its coordinate (one
 query — `trips` has no location columns, the trace is in `telemetry_samples`),
-insert an arrival row, and let the delivery worker drain it. The payload is small:
+insert an arrival row, and let mcp-hub's delivery loop collect it. The payload is small:
 trip id, final lat/lng, completed_at, and the vehicle. **No reverse geocoding in
 the engine** — that is the agent's job, and doing it here would put a paid API call
 on every drive.
@@ -179,10 +198,10 @@ without any of that.
 
 ### Ordering
 
-1. ~~**mcp-hub's `/events` route + `subscriptions` table.**~~ **DONE** (`infra`
-   `810ec9e`; mcp-hub's 142 tests green). A known `event_key` invokes the id
-   registered against it, an unknown one is a 404, a replayed event id returns 202
-   `duplicate` having invoked nothing a second time, and an expired subscription is
+1. ~~**mcp-hub's delivery loop + `subscriptions` table.**~~ **DONE** (`infra`
+   `4aa6155`; mcp-hub's 140 tests green). A notice wakes whatever its `event_key` is
+   registered against; one nobody subscribed to is acked and dropped; an event
+   already delivered is acked without waking again; and an expired subscription is
    ignored — expiry decided in SQL and tested against a real Postgres, so the clock
    the test runs on cannot make a stale row look live.
 
@@ -193,10 +212,11 @@ without any of that.
    without `ALLOW_DUPLICATE` the ordinary case, waking a session that has gone
    idle, is refused. `cmd/starter/main.go` already set it for the chat path;
    `WakeSession` did not, and now does (agent-harness `0fdd504`).
-2. **finance delivery worker.** Smallest possible proof of the whole path, because
+2. **finance's half of the contract.** Smallest possible proof of the whole path, because
    detection is already done and a crossing can be produced by writing a spend.
-3. **maps arrival** — the `trips_api.go` hook, the preference, the delivery worker
-   (a copy of finance's).
+3. **maps arrival** — the `trips_api.go` hook, the preference, and the same
+   `events_pending`/`events_ack` pair finance now implements. mcp-hub needs no change:
+   its delivery loop finds the pair by name on any connection.
 4. **Android budgets mirror** — models, fixtures and operation shapes all exist, so
    this is a mirror rather than a design job. Held for now.
 5. **Home strip** — `BudgetsModel.alerted` is already the hook; a small surface,
@@ -204,12 +224,15 @@ without any of that.
 
 ### Open questions
 
-- **Nothing subscribes yet.** No engine exposes a subscribe operation, and
-  `finance` emits on every budget crossing whether or not anyone is listening — so
-  today the toggle is an engine-side flag, not something the agent opens. Wiring
-  `on_event` means: agent calls the provider's subscribe tool *after* mcp-hub holds
-  the row (harness first, provider second), so an event cannot arrive before
-  anything can route it.
+- **Nothing arms a subscription yet.** `arm_wake(on_event=...)` still raises rather
+  than registering, and it is the only step left for finance. With delivery a pull
+  the arming step is small — the harness posts `{event_key, invoke_id}` to mcp-hub's
+  `/api/subscriptions` and the delivery loop collects the notice on its next tick —
+  but it needs the agent to name the `event_key`, which means the tool surface has
+  to offer something like "watch this budget" rather than a raw id. The ordering
+  worry that shaped an earlier draft is gone: an engine holds undelivered notices
+  until they are acked, so a subscription armed *after* a crossing still receives it
+  rather than losing it.
 - **What an arrival briefing costs.** One wake per drive end could be a lot of
   messages. The agent decides whether to speak, and `recall` holds "stop doing
   this" corrections, but a per-day cap may be needed and is not designed.
