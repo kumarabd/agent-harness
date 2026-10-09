@@ -14,6 +14,7 @@
 //	lease        Postgres connection lease (Discord text + voice).
 //	speech       OpenAI-compatible STT/TTS + transcript text helpers.
 //	web          POST /send, GET /poll, POST /respond, GET /sessions (Clerk-auth).
+//	agentmcp     /mcp: authenticated ask_agent over isolated durable turns.
 //	discord      Discord text: connection, ingest, DiscordDeliver*, commands.
 //	discordvoice Discord voice: capture, VoiceDeliver*, the voice DSP stack.
 //	discordui    Discord message components shared by discord + discordvoice.
@@ -35,6 +36,7 @@ import (
 	"go.temporal.io/sdk/client"
 	contribtally "go.temporal.io/sdk/contrib/tally"
 
+	"agent-harness/gateway/internal/agentmcp"
 	"agent-harness/gateway/internal/core"
 	"agent-harness/gateway/internal/discord"
 	"agent-harness/gateway/internal/lease"
@@ -154,6 +156,7 @@ func main() {
 	leaseMgr := lease.NewManager(pool)
 
 	mux := http.NewServeMux()
+	mux.Handle("/mcp", agentmcp.New(pool, temporalClient, clerkCfg, taskQueue, tenantSlug))
 	web.New(ctx, ingestor, pool, temporalClient, clerkCfg, tenantSlug).Register(mux)
 	web.NewMacOS(ctx, ingestor, pool, temporalClient, clerkCfg, tenantSlug).RegisterMacOS(mux)
 	mobile.NewIOS(ctx, ingestor, pool, temporalClient, clerkCfg).Register(mux)

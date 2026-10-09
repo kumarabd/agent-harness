@@ -13,6 +13,7 @@ The platform-integration boundary: normalizes whatever a messaging platform send
 | macOS (first-party native desktop) | `gateway/web.md` | IN PROGRESS — Web protocol reused under a separate selectable-session scope |
 | iOS / iPadOS / CarPlay | `gateway/mobile.md` | IN PROGRESS — explicit `ios` scope and `/ios/ws` route built |
 | Android / Android Auto | `gateway/mobile.md` | IN PROGRESS — explicit `android` scope and `/android/ws` route built |
+| MCP (native on-device agent delegation) | [gateway/mcp.md](gateway/mcp.md) | Implemented in source — `/mcp` with authenticated `ask_agent`, isolated durable turns, retry/poll/cancel and pending owner input; deployment deferred |
 | Discord | `gateway/discord.md` | IN PROGRESS — connected live; ingestion, mention/reply/personal-DM trigger detection, and outbound delivery all built (not yet redeployed for a full live round-trip confirmation) |
 | Discord Voice | `gateway/discord-voice.md` | IN PROGRESS — core cascaded pipeline built (capture/VAD/STT/turn/TTS/playback), not yet live-verified; see "Resolved: Voice Platforms — Cascaded Architecture" below for the reference shape every voice platform follows |
 | Webhook-style (WhatsApp/Telegram) | *(none yet)* | Illustrative only, in this doc's category framing below — not a real build target |

@@ -798,10 +798,10 @@ financeEngine:
 # -- Wardrobe engine behind /retro. Existing workspace upgrades enable this; onboarding is not rerun.
 # Reuses Finance's browser origins, registry pull secrets and router namespace. No engine auth settings.
 retroEngine:
-  enabled: false
+  enabled: true
   image:
-    repository: ""
-    tag: ""
+    repository: "ghcr.io/realnighthawk/retro/engine"
+    tag: "latest"
     pullPolicy: IfNotPresent
   replicaCount: 1
   port: 8092
@@ -818,7 +818,25 @@ minio:
   mode: standalone
   existingSecret: "minio-root"
   image:
-    tag: "RELEASE.2025-09-07T16-13-09Z"
+    # 2026-10-08: MinIO's community images are withdrawn — quay.io anonymous
+    # tokens now grant zero pull actions on minio/minio, the Docker Hub repo is
+    # gone, and dl.min.io binaries return 410. This is a faithful rebuild of the
+    # FINAL community release (verified: ships /usr/bin/docker-entrypoint.sh,
+    # the exact interface this subchart's command hardcodes, and `minio
+    # --version` reports RELEASE.2025-10-15T17-29-55Z). Frozen by nature —
+    # MinIO community is discontinued, so there will never be a newer tag.
+    repository: "ghcr.io/coollabsio/minio"
+    tag: "RELEASE.2025-10-15T17-29-55Z"
+  mcImage:
+    # The bucket/user provisioning hooks run mc; MinIO's own mc images are gone
+    # from both registries. The subchart's post-job script invokes /usr/bin/mc
+    # by ABSOLUTE path — the Bitnami minio-client image puts mc at
+    # /opt/bitnami/minio-client/bin/mc instead, so it looped forever on
+    # "mc: not found" and blocked the entire hook chain. The coollabsio server
+    # rebuild ships mc at /usr/bin/mc (verified), so the server image doubles
+    # as the client image here.
+    repository: "ghcr.io/coollabsio/minio"
+    tag: "RELEASE.2025-10-15T17-29-55Z"
   deploymentUpdate:
     type: Recreate # one ReadWriteOnce volume
   persistence:
